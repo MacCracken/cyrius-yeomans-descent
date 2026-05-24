@@ -76,6 +76,6 @@ The backend replicates the Telnet era while benefiting from modern stability.
 
 ## See Also
 
-- [`../adr/`](../adr/) — decision records for choices in this design (combat tick over cooldowns, raw TCP/Telnet over a higher-level protocol).
+- [`../adr/`](../adr/) — decision records for choices in this design (combat tick over cooldowns, raw TCP/Telnet over a higher-level protocol, single-thread event loop for concurrency).
 - [`../development/roadmap.md`](../development/roadmap.md) — milestone plan implementing this design.
 - [`../development/state.md`](../development/state.md) — live status snapshot.

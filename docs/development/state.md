@@ -25,6 +25,7 @@ Next-up module surface (per [roadmap M1](roadmap.md#m1--tcp--telnet-listener-v02
 - [`../architecture/overview.md`](../architecture/overview.md) — combat tick, classes, parser, zones, transport
 - [`../adr/0001-tick-based-combat-over-cooldowns.md`](../adr/0001-tick-based-combat-over-cooldowns.md) — combat tick rationale
 - [`../adr/0002-raw-tcp-telnet-protocol.md`](../adr/0002-raw-tcp-telnet-protocol.md) — transport rationale
+- [`../adr/0003-single-thread-event-loop-concurrency.md`](../adr/0003-single-thread-event-loop-concurrency.md) — concurrency model rationale
 
 ## Tests
 
