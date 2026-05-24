@@ -30,63 +30,32 @@
 
 ---
 
-## v1.0 criteria
-
-A release qualifies for 1.0 when:
-
-1. **M0–M8 + hardening have all shipped at least once.**
-2. **`cyrius audit` passes from a clean build** (lint / test / bench / doc).
-3. **TCP / Telnet server accepts concurrent player sessions reliably** — connect → log in → walk a zone → engage combat → die / loot / quit, across N simultaneous sessions without state corruption.
-4. **Verb-noun parser handles the full v1.0 verb table without ambiguity** — fuzz harness clean against 100k random inputs.
-5. **Combat tick (2.5s) runs deterministically under load** — drift < 50 ms p99 with all four classes engaged across N players × M mobs.
-6. **Zone reset semantics enforced** — no respawn while players present; respawn within the reset window once empty.
-7. **T.Ron-backed persistence** — players survive `kill -9` mid-tick; no data loss.
-8. **Joshua game management interface online for live ops** — operator can list / kick / ban / broadcast / reload zones.
-9. **Security audit pass logged** in `docs/audit/YYYY-MM-DD-audit.md`.
-10. **Benchmarks captured** in `docs/benchmarks.md` (tick throughput, parser p99, connection capacity).
-11. **CHANGELOG complete** from v0.1.0 onward.
-
----
-
 ## In progress
 
-**No active cycle.** v0.1.0 shipped 2026-05-24 — M0 scaffold + three
-load-bearing ADRs ([0001](../adr/0001-tick-based-combat-over-cooldowns.md)
-combat tick, [0002](../adr/0002-raw-tcp-telnet-protocol.md) raw TCP/Telnet,
-[0003](../adr/0003-single-thread-event-loop-concurrency.md) single-thread
-event loop) + the first slice of M1 (M1-A event-loop skeleton + M1-B
-per-connection sessions). Next slot is **M1-C — Telnet IAC parser**, on
-the path to closing M1 at v0.2.0.
+**No active cycle.** Next slot is **M1-C — Telnet IAC parser** ([§M1 sub-bites](#m1--tcpip--telnet-listener-v020-in-progress)). Pickup pointer + boot guide in [`state.md`](state.md).
 
 ---
 
 ## Milestones
 
-### M0 — Scaffold (v0.1.0) — ✅ shipped 2026-05-24
+### M1 — TCP / Telnet listener (v0.2.0, in progress)
 
-- `cyrius init` scaffold landed
-- Doc tree per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/first-party/first-party-documentation.md)
-- Core design captured in [`../architecture/overview.md`](../architecture/overview.md)
-- Three load-bearing ADRs filed: combat tick model, raw TCP / Telnet transport, single-thread event-loop concurrency
-
-### M1 — TCP / Telnet listener (v0.2.0)
-
-The wire and the loop. After this milestone the binary opens a port, accepts concurrent connections, walks the Telnet protocol, and runs a 2.5s no-op tick — combat math is empty, world is empty, but the heartbeat is real.
+The wire and the loop. After this milestone the binary opens a port, accepts concurrent connections, walks the Telnet protocol, and runs a 2.5 s no-op tick — combat math is empty, world is empty, but the heartbeat is real.
 
 Per [ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md) the loop is single-threaded, non-blocking, and `epoll`-shape over `lib/net.cyr`. Per [ADR 0002](../adr/0002-raw-tcp-telnet-protocol.md) the wire is raw TCP with Telnet line discipline.
 
-**Sub-bites:**
+**Closed in 0.1.0** — M1-A event-loop skeleton (`src/server.cyr`); M1-B per-connection session struct (`src/session.cyr`). Summary in [Closed milestones](#closed-milestones).
 
-- **M1-A — Event-loop skeleton.** ✅ shipped 0.1.0. Non-blocking listener; `epoll`-shape multiplex; absolute-time tick scheduling (`next_tick = next_tick + 2500ms`, drift-resistant); no-op `advance_tick()` placeholder; clean shutdown on SIGINT via signalfd in the same epoll set.
-- **M1-B — Per-connection session struct.** ✅ shipped 0.1.0. Heap-allocated via `lib/freelist.cyr` at `accept`, freed at disconnect. Holds: socket fd, login phase, rx line buffer (4 KB), tx queue (4 KB) with drain helpers, EPOLLOUT-armed flag, last-activity timestamp, stub slots for Telnet parser state (M1-C) and player id (M6). Echo stub on complete CRLF lines pending the M1-C parser. **No per-session globals** ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)).
-- **M1-C — Telnet IAC parser.** RFC 854 §11.2 dispatch (DATA / IAC / OPT / SB / SB_IAC). Pure / side-effect-free; emits data bytes, no-op consumption, or subneg-complete signals to the caller.
+**Sub-bites remaining:**
+
+- **M1-C — Telnet IAC parser.** RFC 854 §11.2 dispatch (DATA / IAC / OPT / SB / SB_IAC). Pure / side-effect-free; emits data bytes, no-op consumption, or subneg-complete signals to the caller. New module `src/telnet.cyr`; the per-session `SS_TS` slot (already reserved in `src/session.cyr`) becomes its owner.
 - **M1-D — Option negotiation.** RFC 1143 Q-method announce salvo on connect (WILL ECHO + WILL SUPPRESS_GO_AHEAD); naive-refuse on anything else (DO → WONT, WILL → DONT) for first cut. Real LINEMODE deferred — line discipline works without it for any standards-conformant client.
-- **M1-E — Login flow scaffold.** MOTD → name prompt → MOTD-2 → command prompt. Name is captured but **not authenticated** — real auth lands at M6 ([ADR 0004 open](#open-adrs)). Reserved names (`system`, `admin`, anything starting `_`) refused.
-- **M1-F — Idle timeout & graceful disconnect.** Slowloris-style 5-minute idle disconnect; clean teardown on EOF / RST / write error; in-flight tx buffer drained best-effort.
+- **M1-E — Login flow scaffold.** MOTD → name prompt → MOTD-2 → command prompt. Name is captured but **not authenticated** — real auth lands at M6 ([ADR 0004 open](#open-adrs)). Reserved names (`system`, `admin`, anything starting `_`) refused. Replaces the M1-B echo stub in `session_consume_rx`.
+- **M1-F — Idle timeout & graceful disconnect.** Slowloris-style 5-minute idle disconnect using the `SS_LAST_MS` slot already populated by `session_on_readable`; clean teardown on EOF / RST / write error; in-flight tx buffer drained best-effort.
 - **M1-G — Benchmark harness.** `benches/bench_telnet.bcyr` — IAC-parser hot path; baseline locked at M1 close. Re-run at every minor through 1.0.
-- **M1-H — Observability.** Connection count, sessions logged-in, ticks-since-boot, tick-drift-ms-p99 — exposed via a stub admin verb (becomes Joshua input at M8).
+- **M1-H — Observability.** Connection count (`g_session_count` already wired), sessions logged-in, ticks-since-boot (`g_tick_count` already wired), tick-drift-ms-p99 — exposed via a stub admin verb (becomes Joshua input at M8).
 
-**Gate:** clean `cyrius audit` run; 32 concurrent dummy clients connect, exchange MOTDs, idle, and disconnect; tick continues firing within ±10 ms drift throughout.
+**Gate (whole milestone):** clean `cyrius audit` run; 32 concurrent dummy clients connect, exchange MOTDs, idle, and disconnect; tick continues firing within ±10 ms drift throughout.
 
 **Reuses (informed by agora 1.0.0):** `lib/net.cyr` socket primitives, `lib/bannermanor` for MOTD, `lib/darshana` for ANSI color, the RFC 1143 Q-method shape, the slowloris-timeout pattern. Concurrency model **diverges** — agora forks per accept; we don't ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)).
 
@@ -216,6 +185,34 @@ The closeout.
 
 ---
 
+## Closed milestones
+
+Brief one-liners; per-tag chronology in [`../../CHANGELOG.md`](../../CHANGELOG.md). Detail folded back into the active body when relevant.
+
+- **M0 (0.1.0)** — `cyrius init` scaffold; doc tree per first-party-documentation; design captured in `docs/architecture/overview.md`. Three load-bearing ADRs filed: combat tick model ([0001](../adr/0001-tick-based-combat-over-cooldowns.md)), raw TCP / Telnet transport ([0002](../adr/0002-raw-tcp-telnet-protocol.md)), single-thread event-loop concurrency ([0003](../adr/0003-single-thread-event-loop-concurrency.md)).
+- **M1-A (0.1.0)** — event-loop skeleton in `src/server.cyr`. Non-blocking listener; `epoll`-shape multiplex; absolute-time tick scheduling (`next_tick += 2500ms`, drift-resistant catch-up); SIGINT / SIGTERM shutdown via `signalfd` in the same epoll set; no-op `advance_tick()` placeholder for M4.
+- **M1-B (0.1.0)** — per-connection session struct in `src/session.cyr`. Heap-alloc via `lib/freelist.cyr` at accept, freed at disconnect ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)). Rx 4 KB + tx 4 KB buffers with on-demand EPOLLOUT arming; CRLF-line echo stub pending the M1-C parser. Smokes: single-client round-trip, 32-way concurrent fanout, 100-line single-session byte-exact, SIGINT exit 0.
+
+---
+
+## v1.0 criteria
+
+A release qualifies for 1.0 when:
+
+1. **M0–M8 + hardening have all shipped at least once.**
+2. **`cyrius audit` passes from a clean build** (lint / test / bench / doc).
+3. **TCP / Telnet server accepts concurrent player sessions reliably** — connect → log in → walk a zone → engage combat → die / loot / quit, across N simultaneous sessions without state corruption.
+4. **Verb-noun parser handles the full v1.0 verb table without ambiguity** — fuzz harness clean against 100k random inputs.
+5. **Combat tick (2.5s) runs deterministically under load** — drift < 50 ms p99 with all four classes engaged across N players × M mobs.
+6. **Zone reset semantics enforced** — no respawn while players present; respawn within the reset window once empty.
+7. **T.Ron-backed persistence** — players survive `kill -9` mid-tick; no data loss.
+8. **Joshua game management interface online for live ops** — operator can list / kick / ban / broadcast / reload zones.
+9. **Security audit pass logged** in `docs/audit/YYYY-MM-DD-audit.md`.
+10. **Benchmarks captured** in `docs/benchmarks.md` (tick throughput, parser p99, connection capacity).
+11. **CHANGELOG complete** from v0.1.0 onward.
+
+---
+
 ## Open ADRs
 
 The decisions queued ahead of their consumer milestones:
@@ -245,7 +242,7 @@ Filed when their first consumer lands; numbered in flight, not pre-allocated.
 
 ## Cross-references
 
-- [`state.md`](state.md) — live state snapshot (current version, in-flight slot).
+- [`state.md`](state.md) — live state snapshot (current version, in-flight slot, **next-agent boot guide**).
 - [`../architecture/overview.md`](../architecture/overview.md) — system design.
 - [`../adr/`](../adr/) — architecture decision records.
 - [`../../CHANGELOG.md`](../../CHANGELOG.md) — per-tag chronology.
