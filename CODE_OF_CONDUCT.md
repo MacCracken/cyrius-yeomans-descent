@@ -2,7 +2,7 @@
 
 ## Pledge
 
-The cyrius-yeomans-decent project is part of the AGNOS first-party ecosystem and adopts the [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/), v2.1. We pledge to make participation a harassment-free experience for everyone, regardless of age, body size, visible or invisible disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, or sexual identity and orientation.
+The cyrius-yeomans-descent project is part of the AGNOS first-party ecosystem and adopts the [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/), v2.1. We pledge to make participation a harassment-free experience for everyone, regardless of age, body size, visible or invisible disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, or sexual identity and orientation.
 
 ## Standards
 

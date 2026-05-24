@@ -1,4 +1,4 @@
-# cyrius-yeomans-decent — Roadmap
+# cyrius-yeomans-descent — Roadmap
 
 > **Last Updated**: 2026-05-24
 >
@@ -16,8 +16,8 @@
 
 | Tag | Theme | Status |
 |---|---|---|
-| **0.1.0** | M0 — scaffold + design (ADRs 0001 / 0002 / 0003) | ✅ 2026-05-24 |
-| **0.2.0** | M1 — event-loop TCP / Telnet listener (RFC 854 / 1143 + minimal subneg) | next |
+| **0.1.0** | M0 scaffold + ADRs 0001 / 0002 / 0003 + M1-A event loop + M1-B sessions | ✅ 2026-05-24 |
+| **0.2.0** | M1 close — Telnet parser (M1-C) + option negotiation (M1-D) + login scaffold (M1-E) + idle timeout (M1-F) + bench harness (M1-G) + observability (M1-H) | next |
 | **0.3.0** | M2 — verb-noun parser + fuzz harness | |
 | **0.4.0** | M3 — world / rooms / movement + starter zone | |
 | **0.5.0** | M4 — combat tick + hit/damage math + corpses | |
@@ -50,11 +50,13 @@ A release qualifies for 1.0 when:
 
 ## In progress
 
-**No active cycle.** v0.1.0 scaffold shipped 2026-05-24 with three load-bearing ADRs filed
-([0001](../adr/0001-tick-based-combat-over-cooldowns.md) combat tick,
-[0002](../adr/0002-raw-tcp-telnet-protocol.md) raw TCP/Telnet,
-[0003](../adr/0003-single-thread-event-loop-concurrency.md) single-thread event loop).
-Next slot is **M1**.
+**No active cycle.** v0.1.0 shipped 2026-05-24 — M0 scaffold + three
+load-bearing ADRs ([0001](../adr/0001-tick-based-combat-over-cooldowns.md)
+combat tick, [0002](../adr/0002-raw-tcp-telnet-protocol.md) raw TCP/Telnet,
+[0003](../adr/0003-single-thread-event-loop-concurrency.md) single-thread
+event loop) + the first slice of M1 (M1-A event-loop skeleton + M1-B
+per-connection sessions). Next slot is **M1-C — Telnet IAC parser**, on
+the path to closing M1 at v0.2.0.
 
 ---
 
@@ -75,8 +77,8 @@ Per [ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md) the loop is 
 
 **Sub-bites:**
 
-- **M1-A — Event-loop skeleton.** Non-blocking listener; `epoll`-shape multiplex; absolute-time tick scheduling (`next_tick = next_tick + 2500ms`, drift-resistant); no-op `advance_tick()` placeholder; clean shutdown on SIGINT.
-- **M1-B — Per-connection session struct.** Heap-allocated at `accept`, freed at disconnect. Holds: socket fd, Telnet parser state, rx line buffer, tx queue, login phase, player-id slot. **No per-session globals** ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)).
+- **M1-A — Event-loop skeleton.** ✅ shipped 0.1.0. Non-blocking listener; `epoll`-shape multiplex; absolute-time tick scheduling (`next_tick = next_tick + 2500ms`, drift-resistant); no-op `advance_tick()` placeholder; clean shutdown on SIGINT via signalfd in the same epoll set.
+- **M1-B — Per-connection session struct.** ✅ shipped 0.1.0. Heap-allocated via `lib/freelist.cyr` at `accept`, freed at disconnect. Holds: socket fd, login phase, rx line buffer (4 KB), tx queue (4 KB) with drain helpers, EPOLLOUT-armed flag, last-activity timestamp, stub slots for Telnet parser state (M1-C) and player id (M6). Echo stub on complete CRLF lines pending the M1-C parser. **No per-session globals** ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)).
 - **M1-C — Telnet IAC parser.** RFC 854 §11.2 dispatch (DATA / IAC / OPT / SB / SB_IAC). Pure / side-effect-free; emits data bytes, no-op consumption, or subneg-complete signals to the caller.
 - **M1-D — Option negotiation.** RFC 1143 Q-method announce salvo on connect (WILL ECHO + WILL SUPPRESS_GO_AHEAD); naive-refuse on anything else (DO → WONT, WILL → DONT) for first cut. Real LINEMODE deferred — line discipline works without it for any standards-conformant client.
 - **M1-E — Login flow scaffold.** MOTD → name prompt → MOTD-2 → command prompt. Name is captured but **not authenticated** — real auth lands at M6 ([ADR 0004 open](#open-adrs)). Reserved names (`system`, `admin`, anything starting `_`) refused.
@@ -99,9 +101,9 @@ Turns lines from the command prompt into structured actions. The MUD-defining pa
 - **M2-C — Direct-object resolution.** Resolve the noun against the actor's inventory + the current room's contents + the actor's worn/wielded slots. Ambiguity returns a "which X did you mean?" prompt.
 - **M2-D — Preposition / indirect-object resolution.** `put rations in pack`, `give monoblade to kiran`, `get all from corpse`. Preposition table: `in`, `on`, `to`, `from`, `at`, `with`.
 - **M2-E — Qualifiers.** `all.X` (every X in scope), `X.N` (the Nth X in deterministic scan order). `get all.rations`, `kill 2.drone`.
-- **M2-F — Fuzz harness.** `tests/cyrius-yeomans-decent.fcyr` driven against the parser: 100k random byte sequences, every UTF-8 length, every embedded NUL position. No crashes, no hangs, no unbounded memory growth.
+- **M2-F — Fuzz harness.** `tests/cyrius-yeomans-descent.fcyr` driven against the parser: 100k random byte sequences, every UTF-8 length, every embedded NUL position. No crashes, no hangs, no unbounded memory growth.
 
-**Gate:** fuzz harness clean against 100k random inputs; verb table covered by `tests/cyrius-yeomans-decent.tcyr`.
+**Gate:** fuzz harness clean against 100k random inputs; verb table covered by `tests/cyrius-yeomans-descent.tcyr`.
 
 ### M3 — World, rooms, movement (v0.4.0)
 
@@ -132,7 +134,7 @@ The placeholder tick from M1 gets a job. Engaged combatants resolve a round ever
 - **M4-E — Death & corpses.** On death: mob → corpse object in the room holding the mob's loot; player → death prose, drop inventory in current room, respawn at the starter Hub (full v1.0 death penalty is M5+ class flavor).
 - **M4-F — `get all from corpse`** (parser already supports it at M2; combat creates the consumers).
 - **M4-G — Tick drift instrumentation.** Continuous p99-drift measurement; logged via the M1-H observability hook.
-- **M4-H — Load test.** `tests/cyrius-yeomans-decent.bcyr` — N players × M mobs × 5-minute run; assert p99 drift < 50 ms.
+- **M4-H — Load test.** `tests/cyrius-yeomans-descent.bcyr` — N players × M mobs × 5-minute run; assert p99 drift < 50 ms.
 
 **Gate:** load test passes — 32 simulated players × 64 mobs ticking without drift breach.
 

@@ -1,6 +1,6 @@
-# Contributing to cyrius-yeomans-decent
+# Contributing to cyrius-yeomans-descent
 
-Thanks for the interest. cyrius-yeomans-decent is a Cyrius-native MUD server in the [AGNOS](https://github.com/MacCracken/agnosticos) first-party stack — contributions follow the standards documented at [first-party-standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/first-party/first-party-standards.md) and [first-party-documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/first-party/first-party-documentation.md).
+Thanks for the interest. cyrius-yeomans-descent is a Cyrius-native MUD server in the [AGNOS](https://github.com/MacCracken/agnosticos) first-party stack — contributions follow the standards documented at [first-party-standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/first-party/first-party-standards.md) and [first-party-documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/first-party/first-party-documentation.md).
 
 ## Before You Start
 
@@ -12,7 +12,7 @@ Thanks for the interest. cyrius-yeomans-decent is a Cyrius-native MUD server in 
 
 ```sh
 cyrius deps                                              # resolve stdlib deps
-cyrius build src/main.cyr build/cyrius-yeomans-decent    # compile
+cyrius build src/main.cyr build/cyrius-yeomans-descent    # compile
 cyrius test                                              # run [build].test + tests/*.tcyr
 ```
 

@@ -1,0 +1,207 @@
+# session.cyr — M1-B per-connection session struct + lifecycle.
+#
+# One Session per accepted client. Heap-allocated at accept via
+# fl_alloc, returned to the freelist at disconnect — per ADR 0003 the
+# long-running event loop pays for per-conn-lifetime memory exactly
+# once per session.
+#
+# At M1-B the session holds:
+#   - the socket fd
+#   - rx + tx byte buffers
+#   - a coarse phase enum (banner / cmd) — login flow lands at M1-E
+#   - an unused telnet-state pointer slot (M1-C will fill it)
+#   - an unused player-id slot (M6 will fill it)
+#   - a last-activity timestamp (M1-F idle timeout will consume it)
+#
+# At M1-B the rx path is a stub echo — every line the client sends is
+# echoed back. M1-C swaps that for the RFC 854 IAC parser; M2 adds
+# verb-noun dispatch on top.
+
+# === Struct field offsets (all i64 / 8 bytes per CLAUDE.md conventions) ===
+
+enum SS {
+    SS_FD         = 0;    # connected socket fd (non-blocking)
+    SS_PHASE      = 8;    # current PHASE_*
+    SS_LAST_MS    = 16;   # monotonic ms of last byte exchanged
+    SS_RX_BUF     = 24;   # ptr to rx accumulator (RX_CAP bytes)
+    SS_RX_LEN     = 32;   # bytes accumulated
+    SS_TX_BUF     = 40;   # ptr to tx queue (TX_CAP bytes)
+    SS_TX_LEN     = 48;   # bytes queued (write end)
+    SS_TX_OFF     = 56;   # bytes already drained to the socket
+    SS_OUT_ARMED  = 64;   # 1 iff the fd is currently registered with EPOLLOUT
+    SS_TS         = 72;   # Telnet parser state ptr (M1-C; 0 at M1-B)
+    SS_PLAYER     = 80;   # player id (M6; 0 at M1-B)
+    SS_SIZE       = 88;
+}
+
+enum SessConst {
+    RX_CAP = 4096;        # one full Telnet line — M2 parser caps at this
+    TX_CAP = 4096;        # banner + a few command replies
+}
+
+enum Phase {
+    PHASE_BANNER = 0;     # connection open, MOTD on its way out
+    PHASE_CMD    = 1;     # accepting commands (echo stub at M1-B)
+}
+
+# === session_new — alloc + zero-init a Session for an accepted fd. ===
+fn session_new(fd, now_ms): i64 {
+    var s = fl_alloc(SS_SIZE);
+    var rxb = fl_alloc(RX_CAP);
+    var txb = fl_alloc(TX_CAP);
+    memset(s, 0, SS_SIZE);
+    store64(s + SS_FD, fd);
+    store64(s + SS_PHASE, PHASE_BANNER);
+    store64(s + SS_LAST_MS, now_ms);
+    store64(s + SS_RX_BUF, rxb);
+    store64(s + SS_TX_BUF, txb);
+    return s;
+}
+
+# === session_free — close fd, return buffers to the freelist. ===
+fn session_free(s): i64 {
+    sock_close(load64(s + SS_FD));
+    fl_free(load64(s + SS_RX_BUF));
+    fl_free(load64(s + SS_TX_BUF));
+    fl_free(s);
+    return 0;
+}
+
+# === session_appendtx — copy `len` bytes into the tx queue. ===
+#
+# Truncates on overflow (returns the number of bytes actually queued).
+# At M1-B the queue is one banner + short replies — overflow is a bug,
+# not an expected condition, but we cap rather than corrupt memory.
+fn session_appendtx(s, buf, len): i64 {
+    var pos = load64(s + SS_TX_LEN);
+    var cap = TX_CAP;
+    var room = cap - pos;
+    var n = len;
+    if (n > room) { n = room; }
+    if (n <= 0) { return 0; }
+    memcpy(load64(s + SS_TX_BUF) + pos, buf, n);
+    store64(s + SS_TX_LEN, pos + n);
+    return n;
+}
+
+# Convenience: append a NUL-terminated cstring.
+fn session_appendtx_cstr(s, cstr): i64 {
+    return session_appendtx(s, cstr, strlen(cstr));
+}
+
+# === session_drain — try to write any queued tx bytes to the socket. ===
+#
+# Returns:
+#   2 = drained completely (queue is now empty)
+#   1 = partial (would-block; caller should arm EPOLLOUT)
+#   0 = nothing to drain
+#   negative = socket error (caller should disconnect)
+fn session_drain(s): i64 {
+    var tx_len = load64(s + SS_TX_LEN);
+    var tx_off = load64(s + SS_TX_OFF);
+    if (tx_off >= tx_len) { return 0; }
+    var fd = load64(s + SS_FD);
+    var done = 0;
+    var rc = 1;
+    while (done == 0) {
+        if (tx_off >= tx_len) { done = 1; rc = 2; continue; }
+        var n = sys_write(fd, load64(s + SS_TX_BUF) + tx_off, tx_len - tx_off);
+        if (n < 0) {
+            # EAGAIN / EWOULDBLOCK (-11) means the kernel buffer is full —
+            # we keep the unsent bytes and let the caller arm EPOLLOUT.
+            # Anything else is a real error.
+            if (n == 0 - 11) { done = 1; rc = 1; continue; }
+            done = 1;
+            rc = n;
+            continue;
+        }
+        if (n == 0) { done = 1; rc = 1; continue; }
+        tx_off = tx_off + n;
+    }
+    if (rc == 2) {
+        # Empty queue — reset offsets so the next append starts at 0.
+        store64(s + SS_TX_LEN, 0);
+        store64(s + SS_TX_OFF, 0);
+    } else {
+        store64(s + SS_TX_OFF, tx_off);
+    }
+    return rc;
+}
+
+# === session_consume_rx — process any pending rx bytes. ===
+#
+# At M1-B this is a sanity-check echo: each complete line (terminated
+# by \n) is echoed back prefixed with "echo: ". Bytes past the buffer
+# cap are discarded. M1-C replaces this with the Telnet parser; M2
+# routes complete lines into the verb-noun parser.
+fn session_consume_rx(s): i64 {
+    var rx = load64(s + SS_RX_BUF);
+    var len = load64(s + SS_RX_LEN);
+    var i = 0;
+    var line_start = 0;
+    while (i < len) {
+        if (load8(rx + i) == 10) {
+            # Found a newline at i. Echo bytes [line_start, i).
+            var l = i - line_start;
+            # Strip a trailing \r if present (Telnet CR LF).
+            if (l > 0) {
+                if (load8(rx + line_start + l - 1) == 13) { l = l - 1; }
+            }
+            session_appendtx_cstr(s, "echo: ");
+            session_appendtx(s, rx + line_start, l);
+            session_appendtx_cstr(s, "\r\n");
+            line_start = i + 1;
+        }
+        i = i + 1;
+    }
+    # Compact: shift remaining partial line to the start of the buffer.
+    if (line_start > 0) {
+        var leftover = len - line_start;
+        if (leftover > 0) {
+            memcpy(rx, rx + line_start, leftover);
+        }
+        store64(s + SS_RX_LEN, leftover);
+    }
+    # Hard cap: if the rx buffer is full with no newline in sight,
+    # drop everything. A real parser (M2) will reject the over-long
+    # line with a wire error; for M1-B we just reset.
+    if (load64(s + SS_RX_LEN) >= RX_CAP) {
+        store64(s + SS_RX_LEN, 0);
+        session_appendtx_cstr(s, "(line too long — buffer reset)\r\n");
+    }
+    return 0;
+}
+
+# === session_on_readable — pull bytes from the socket into rx. ===
+#
+# Returns 1 if the session should stay alive, 0 if it should be torn
+# down (clean EOF or socket error).
+fn session_on_readable(s, now_ms): i64 {
+    var rx = load64(s + SS_RX_BUF);
+    var len = load64(s + SS_RX_LEN);
+    var fd = load64(s + SS_FD);
+    var done = 0;
+    var alive = 1;
+    while (done == 0) {
+        var room = RX_CAP - len;
+        if (room <= 0) { done = 1; continue; }
+        var n = sys_read(fd, rx + len, room);
+        if (n < 0) {
+            # EAGAIN → drained for now. Anything else → real error.
+            if (n != 0 - 11) { alive = 0; }
+            done = 1;
+            continue;
+        }
+        if (n == 0) {
+            # Clean EOF.
+            alive = 0;
+            done = 1;
+            continue;
+        }
+        len = len + n;
+    }
+    store64(s + SS_RX_LEN, len);
+    if (len > 0) { store64(s + SS_LAST_MS, now_ms); }
+    session_consume_rx(s);
+    return alive;
+}

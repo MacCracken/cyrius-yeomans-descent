@@ -2,7 +2,7 @@
 
 > **Last Updated**: 2026-05-24
 >
-> System-level design for cyrius-yeomans-decent. The *what* of the system: concept, modules, data flow, and the load-bearing invariants every contributor needs in their head. Decisions (the *why*) live in [`../adr/`](../adr/); single-point non-obvious quirks live as numbered notes alongside this file.
+> System-level design for cyrius-yeomans-descent. The *what* of the system: concept, modules, data flow, and the load-bearing invariants every contributor needs in their head. Decisions (the *why*) live in [`../adr/`](../adr/); single-point non-obvious quirks live as numbered notes alongside this file.
 
 ---
 

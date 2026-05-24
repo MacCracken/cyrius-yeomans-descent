@@ -1,4 +1,4 @@
-# cyrius-yeomans-decent benchmarks
+# cyrius-yeomans-descent benchmarks
 # Stdlib auto-included via cyrius.cyml
 #
 # Pattern: bench_new -> bench_batch_start -> tight loop -> bench_batch_stop -> bench_report.

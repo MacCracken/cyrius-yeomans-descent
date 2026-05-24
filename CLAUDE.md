@@ -1,4 +1,4 @@
-# cyrius-yeomans-decent — Claude Code Instructions
+# cyrius-yeomans-descent — Claude Code Instructions
 
 > **Core rule**: this file is **preferences, process, and procedures** —
 > durable rules that change rarely. Volatile state (current version,
@@ -8,7 +8,7 @@
 
 ## Project Identity
 
-**cyrius-yeomans-decent** — Yeoman's Descent, a Cyrius-native text MUD server in the DikuMUD / LPMud tradition, set in a techno-feudal arcology (the "Under-Grid")
+**cyrius-yeomans-descent** — Yeoman's Descent, a Cyrius-native text MUD server in the DikuMUD / LPMud tradition, set in a techno-feudal arcology (the "Under-Grid")
 
 - **Type**: Binary
 - **License**: GPL-3.0-only
@@ -38,7 +38,7 @@ Project was scaffolded with `cyrius init` (greenfield) or `cyrius port` (Rust �
 
 ```sh
 cyrius deps                          # resolve sibling deps
-cyrius build src/main.cyr build/cyrius-yeomans-decent
+cyrius build src/main.cyr build/cyrius-yeomans-descent
 cyrius test                          # run [build].test + tests/*.tcyr
 ```
 

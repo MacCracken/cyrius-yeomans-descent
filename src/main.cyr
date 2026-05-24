@@ -1,10 +1,11 @@
-# cyrius-yeomans-decent — main entry point.
+# cyrius-yeomans-descent — main entry point.
 #
 # argv dispatch. The `serve` verb opens the M1 event-loop listener
 # (per ADR 0003); `version` / `help` are stubs that don't touch the
 # wire. Stdlib auto-included via cyrius.cyml; sibling src/* files
 # need explicit `include` per first-party convention.
 
+include "src/session.cyr"
 include "src/server.cyr"
 
 var VERSION_STRING = "0.1.0";
@@ -17,7 +18,7 @@ fn print_banner(): i64 {
 fn print_help(): i64 {
     print_banner();
     println("");
-    println("USAGE: cyrius-yeomans-decent <command> [args]");
+    println("USAGE: cyrius-yeomans-descent <command> [args]");
     println("");
     println("COMMANDS:");
     println("  serve [port]   start the M1 event-loop listener (default 4000)");

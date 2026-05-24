@@ -1,4 +1,4 @@
-# cyrius-yeomans-decent test suite
+# cyrius-yeomans-descent test suite
 # Stdlib auto-included via cyrius.cyml
 
 fn main() {

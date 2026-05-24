@@ -1,5 +1,5 @@
-# cyrius-yeomans-decent — top-level test entry (referenced by cyrius.cyml [build].test).
-# For unit tests, prefer adding cases to tests/cyrius-yeomans-decent.tcyr.
+# cyrius-yeomans-descent — top-level test entry (referenced by cyrius.cyml [build].test).
+# For unit tests, prefer adding cases to tests/cyrius-yeomans-descent.tcyr.
 
 include "lib/syscalls.cyr"
 

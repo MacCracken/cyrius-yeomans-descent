@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-Decisions about cyrius-yeomans-decent — what we chose, the context, and the consequences we accept. Use these when a future reader would reasonably ask *"why did we do it this way?"*
+Decisions about cyrius-yeomans-descent — what we chose, the context, and the consequences we accept. Use these when a future reader would reasonably ask *"why did we do it this way?"*
 
 ## Conventions
 

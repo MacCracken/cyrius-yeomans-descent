@@ -1,4 +1,4 @@
-# cyrius-yeomans-decent
+# cyrius-yeomans-descent
 
 **Yeoman's Descent** — a Cyrius-native text-based MUD set in a gritty techno-feudal universe. Players begin as serfs or squires and delve into the "Under-Grid": a subterranean arcology of ruined servers, rusted automated defenses, and rogue AI fiefdoms. Pure text parsing, ANSI color, deep world-building — the DikuMUD / LPMud era reproduced on a modern, sovereign stack.
 
@@ -19,7 +19,7 @@ Full design: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
 ```sh
 cyrius deps                                              # resolve stdlib deps
-cyrius build src/main.cyr build/cyrius-yeomans-decent    # compile
+cyrius build src/main.cyr build/cyrius-yeomans-descent    # compile
 cyrius test                                              # unit + integration tests
 ```
 

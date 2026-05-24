@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-cyrius-yeomans-decent is a multi-user TCP service. A vulnerability in the parser, session handling, or tick loop can compromise every connected player.
+cyrius-yeomans-descent is a multi-user TCP service. A vulnerability in the parser, session handling, or tick loop can compromise every connected player.
 
 **Do not open a public GitHub issue for security reports.**
 
