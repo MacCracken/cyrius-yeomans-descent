@@ -19,4 +19,5 @@ Decisions about cyrius-yeomans-decent — what we chose, the context, and the co
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+- [`0001-tick-based-combat-over-cooldowns.md`](0001-tick-based-combat-over-cooldowns.md) — Accepted — combat resolves on a 2.5s server-wide tick, not per-player cooldowns; keeps text output readable and load predictable.
+- [`0002-raw-tcp-telnet-protocol.md`](0002-raw-tcp-telnet-protocol.md) — Accepted — the server speaks raw TCP / Telnet; browser clients use an external WebSocket bridge.

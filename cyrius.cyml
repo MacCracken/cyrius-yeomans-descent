@@ -1,7 +1,7 @@
 [package]
 name = "cyrius-yeomans-decent"
 version = "0.1.0"
-description = "cyrius-yeomans-decent — TODO"
+description = "Yeoman's Descent — a Cyrius-native text MUD server set in a techno-feudal arcology"
 license = "GPL-3.0-only"
 language = "cyrius"
 cyrius = "6.0.1"

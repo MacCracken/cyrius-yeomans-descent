@@ -8,7 +8,7 @@
 
 ## Project Identity
 
-**cyrius-yeomans-decent** — cyrius-yeomans-decent — TODO
+**cyrius-yeomans-decent** — Yeoman's Descent, a Cyrius-native text MUD server in the DikuMUD / LPMud tradition, set in a techno-feudal arcology (the "Under-Grid")
 
 - **Type**: Binary
 - **License**: GPL-3.0-only
@@ -18,7 +18,9 @@
 
 ## Goal
 
-_TODO: one-or-two-sentence mission statement. What does cyrius-yeomans-decent OWN in the stack? Durable — doesn't change per release._
+Own the MUD server. A raw-TCP / Telnet multi-user dungeon with a verb-noun parser, a server-wide 2.5s combat tick, classic THAC0-style hidden-roll combat, and zone resets — backed by T.Ron for persistent player state and managed via Joshua. Cyrius-native, no external runtime.
+
+See [`docs/architecture/overview.md`](docs/architecture/overview.md) for the full design (combat math, class structure, parser, zone-reset semantics).
 
 ## Current State
 
