@@ -1,0 +1,16 @@
+[package]
+name = "cyrius-yeomans-decent"
+version = "0.1.0"
+description = "cyrius-yeomans-decent — TODO"
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "6.0.1"
+
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "cyrius-yeomans-decent"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench"]
+---

@@ -1,0 +1,11 @@
+# cyrius-yeomans-decent — main entry point
+# Stdlib auto-included via cyrius.cyml
+
+fn main() {
+    alloc_init();
+    println("hello from cyrius-yeomans-decent");
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);
