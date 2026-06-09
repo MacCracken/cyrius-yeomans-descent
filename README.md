@@ -15,6 +15,15 @@ Written in [Cyrius](https://github.com/MacCracken/cyrius). Part of [AGNOS](https
 
 Full design: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
+## Status
+
+**v0.2.0 — M1 complete (the wire and the loop).** The server accepts
+concurrent Telnet connections, walks the IAC protocol and negotiates
+options (RFC 854 / 1143), runs a login flow, reaps idle clients, and
+ticks every 2.5 s — surfaced via an `@stats` admin verb. Combat, the
+world, and the verb-noun parser are still empty; they land next. See the
+[roadmap](docs/development/roadmap.md) and [current state](docs/development/state.md).
+
 ## Quick Start
 
 ```sh
