@@ -1,11 +1,204 @@
 # cyrius-yeomans-descent test suite
-# Stdlib auto-included via cyrius.cyml
+# Stdlib auto-included via cyrius.cyml; project modules included explicitly.
+
+include "src/telnet.cyr"
+include "src/session.cyr"
+
+# Feed a byte and assert the returned TelEvent.
+fn feed_is(ts, b, want_ev, name): i64 {
+    return assert_eq(telnet_feed(ts, b), want_ev, name);
+}
+
+# === M1-C — Telnet IAC parser ===
+fn test_telnet(): i64 {
+    test_group("telnet");
+
+    # T1: a plain data byte passes through as EV_DATA, value preserved.
+    var ts = telnet_state_new();
+    feed_is(ts, 0x41, EV_DATA, "plain byte → EV_DATA");
+    assert_eq(telnet_data_byte(ts) & 0xFF, 0x41, "data byte is 'A'");
+
+    # T2: IAC IAC is an escaped literal 0xFF in the data stream.
+    feed_is(ts, IAC, EV_NONE, "IAC → EV_NONE (enter IAC state)");
+    feed_is(ts, IAC, EV_DATA, "IAC IAC → EV_DATA");
+    assert_eq(telnet_data_byte(ts) & 0xFF, 0xFF, "escaped byte is 0xFF");
+
+    # T3: naive-refuse — peer WILL ECHO draws IAC DONT ECHO.
+    var t3 = telnet_state_new();
+    telnet_feed(t3, IAC);
+    telnet_feed(t3, WILL);
+    telnet_feed(t3, OPT_ECHO);
+    assert_eq(telnet_tx_len(t3), 3, "WILL draws a 3-byte reply");
+    var b3 = telnet_tx_buf(t3);
+    assert_eq(load8(b3 + 0) & 0xFF, IAC,  "reply[0] = IAC");
+    assert_eq(load8(b3 + 1) & 0xFF, DONT, "reply[1] = DONT");
+    assert_eq(load8(b3 + 2) & 0xFF, OPT_ECHO, "reply[2] = ECHO");
+
+    # T4: naive-refuse — peer DO on an untracked option draws IAC WONT.
+    # (SGA is a preferred option under M1-D; STATUS stays untracked.)
+    var t4 = telnet_state_new();
+    telnet_feed(t4, IAC);
+    telnet_feed(t4, DO);
+    telnet_feed(t4, OPT_STATUS);
+    var b4 = telnet_tx_buf(t4);
+    assert_eq(load8(b4 + 1) & 0xFF, WONT, "DO untracked draws WONT");
+
+    # T5: a single-byte command (NOP) is consumed with no reply.
+    var t5 = telnet_state_new();
+    telnet_feed(t5, IAC);
+    feed_is(t5, NOP, EV_NONE, "IAC NOP → EV_NONE");
+    assert_eq(telnet_tx_len(t5), 0, "NOP draws no reply");
+
+    # T6: subnegotiation collects its payload and ends with EV_SB.
+    var t6 = telnet_state_new();
+    telnet_feed(t6, IAC);
+    telnet_feed(t6, SB);
+    telnet_feed(t6, OPT_NAWS);
+    telnet_feed(t6, 0x00);
+    telnet_feed(t6, 0x50);   # cols = 80
+    telnet_feed(t6, 0x00);
+    telnet_feed(t6, 0x18);   # rows = 24
+    telnet_feed(t6, IAC);
+    feed_is(t6, SE, EV_SB, "IAC SE → EV_SB");
+    assert_eq(telnet_sb_len(t6), 5, "subneg payload is 5 bytes (opt+4)");
+    assert_eq(load8(telnet_sb_buf(t6)) & 0xFF, OPT_NAWS, "payload[0] = NAWS");
+
+    # T7: an escaped IAC inside SB lands as a literal 0xFF in the payload.
+    var t7 = telnet_state_new();
+    telnet_feed(t7, IAC);
+    telnet_feed(t7, SB);
+    telnet_feed(t7, OPT_STATUS);
+    telnet_feed(t7, 0x42);   # 'B'
+    telnet_feed(t7, IAC);
+    telnet_feed(t7, IAC);    # escaped → 0xFF
+    telnet_feed(t7, 0x43);   # 'C'
+    telnet_feed(t7, IAC);
+    feed_is(t7, SE, EV_SB, "escaped-SB → EV_SB");
+    assert_eq(telnet_sb_len(t7), 4, "payload is 4 bytes");
+    assert_eq(load8(telnet_sb_buf(t7) + 2) & 0xFF, 0xFF, "payload[2] = 0xFF");
+
+    # T8: malformed SB (IAC then a non-SE/non-IAC byte) recovers to DATA;
+    # the next plain byte flows as data, proving no lock-up.
+    var t8 = telnet_state_new();
+    telnet_feed(t8, IAC);
+    telnet_feed(t8, SB);
+    telnet_feed(t8, OPT_STATUS);
+    telnet_feed(t8, 0x42);
+    telnet_feed(t8, IAC);
+    telnet_feed(t8, NOP);    # malformed inside SB
+    feed_is(t8, 0x5A, EV_DATA, "recovers to DATA after malformed SB");
+    assert_eq(telnet_data_byte(t8) & 0xFF, 0x5A, "data byte is 'Z'");
+
+    # T9: data still flows around a negotiation salvo (mixed stream).
+    var t9 = telnet_state_new();
+    feed_is(t9, 0x58, EV_DATA, "pre-negotiation 'X' is data");
+    telnet_feed(t9, IAC);
+    telnet_feed(t9, DO);
+    telnet_feed(t9, OPT_ECHO);
+    feed_is(t9, 0x59, EV_DATA, "post-negotiation 'Y' is data");
+    assert_eq(telnet_tx_len(t9), 3, "the DO ECHO drew exactly one reply");
+
+    return 0;
+}
+
+# === M1-D — RFC 1143 Q-method negotiation ===
+fn test_negotiation(): i64 {
+    test_group("negotiation");
+
+    # N1: announce queues IAC WILL ECHO + IAC WILL SGA (6 bytes).
+    var ts = telnet_state_new();
+    telnet_announce(ts);
+    assert_eq(telnet_tx_len(ts), 6, "announce is two 3-byte triples");
+    var b = telnet_tx_buf(ts);
+    assert_eq(load8(b + 1) & 0xFF, WILL,     "salvo[0] verb = WILL");
+    assert_eq(load8(b + 2) & 0xFF, OPT_ECHO, "salvo[0] opt = ECHO");
+    assert_eq(load8(b + 5) & 0xFF, OPT_SUPPRESS_GO_AHEAD, "salvo[1] opt = SGA");
+    assert_eq(opt_us(ts, OPT_ECHO), Q_WANTYES, "us-ECHO is WANTYES after announce");
+
+    # N2: peer DO ECHO confirms our announce — no further reply, us=YES.
+    var t2 = telnet_state_new();
+    telnet_announce(t2);
+    telnet_tx_consume(t2);
+    telnet_feed(t2, IAC);
+    telnet_feed(t2, DO);
+    telnet_feed(t2, OPT_ECHO);
+    assert_eq(telnet_tx_len(t2), 0, "DO ECHO after announce draws no reply");
+    assert_eq(opt_us(t2, OPT_ECHO), Q_YES, "us-ECHO settles at YES");
+
+    # N3: peer DONT ECHO after announce — accept silently, us=NO.
+    var t3 = telnet_state_new();
+    telnet_announce(t3);
+    telnet_tx_consume(t3);
+    telnet_feed(t3, IAC);
+    telnet_feed(t3, DONT);
+    telnet_feed(t3, OPT_ECHO);
+    assert_eq(opt_us(t3, OPT_ECHO), Q_NO, "us-ECHO drops to NO on DONT");
+
+    # N4: an untracked option (STATUS) still routes to naive-refuse.
+    var t4 = telnet_state_new();
+    telnet_feed(t4, IAC);
+    telnet_feed(t4, WILL);
+    telnet_feed(t4, OPT_STATUS);
+    assert_eq(telnet_tx_len(t4), 3, "untracked WILL draws a refusal");
+    assert_eq(load8(telnet_tx_buf(t4) + 1) & 0xFF, DONT, "untracked WILL → DONT");
+
+    # N5: peer asks us to do SGA (DO SGA) cold — we prefer it, so WILL SGA.
+    var t5 = telnet_state_new();
+    telnet_feed(t5, IAC);
+    telnet_feed(t5, DO);
+    telnet_feed(t5, OPT_SUPPRESS_GO_AHEAD);
+    assert_eq(load8(telnet_tx_buf(t5) + 1) & 0xFF, WILL, "DO SGA → WILL SGA");
+    assert_eq(opt_us(t5, OPT_SUPPRESS_GO_AHEAD), Q_YES, "us-SGA at YES");
+
+    return 0;
+}
+
+# === M1-E — login name validation ===
+fn name_ok_cstr(lit): i64 { return login_name_ok(lit, strlen(lit)); }
+
+fn test_login(): i64 {
+    test_group("login");
+    assert_eq(name_ok_cstr("kiran"),  1, "kiran ok");
+    assert_eq(name_ok_cstr("ab"),     1, "2 chars ok (min)");
+    assert_eq(name_ok_cstr("Kiran7"), 1, "alnum mixed-case ok");
+    assert_eq(name_ok_cstr("admins"), 1, "admins is not reserved");
+    assert_eq(name_ok_cstr("a"),      0, "1 char too short");
+    assert_eq(name_ok_cstr("verylongnamebeyond"), 0, "18 chars too long");
+    assert_eq(name_ok_cstr("_hidden"), 0, "leading underscore rejected");
+    assert_eq(name_ok_cstr("123go"),  0, "leading digit rejected");
+    assert_eq(name_ok_cstr("kir an"), 0, "embedded space rejected");
+    assert_eq(name_ok_cstr("admin"),  0, "reserved admin rejected");
+    assert_eq(name_ok_cstr("ADMIN"),  0, "reserved admin (caps) rejected");
+    assert_eq(name_ok_cstr("system"), 0, "reserved system rejected");
+    return 0;
+}
+
+# === M1-F — idle predicate ===
+fn test_idle(): i64 {
+    test_group("idle");
+    # Fabricate a minimal session-shaped slab: only SS_LAST_MS matters.
+    var s = fl_alloc(SS_SIZE);
+    memset(s, 0, SS_SIZE);
+    store64(s + SS_LAST_MS, 1000);
+    assert_eq(session_is_idle(s, 1000 + 299999, 300000), 0, "just under 5m: live");
+    assert_eq(session_is_idle(s, 1000 + 300000, 300000), 1, "exactly 5m: idle");
+    assert_eq(session_is_idle(s, 1000 + 600000, 300000), 1, "well past: idle");
+    fl_free(s);
+    return 0;
+}
 
 fn main() {
     alloc_init();
+
     test_group("smoke");
     assert(1, "true is true");
     assert_eq(1 + 1, 2, "math works");
+
+    test_telnet();
+    test_negotiation();
+    test_login();
+    test_idle();
+
     return assert_summary();
 }
 

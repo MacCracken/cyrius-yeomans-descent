@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-05-24
+> **Last Updated**: 2026-06-09
 >
 > Milestone plan through v1.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
@@ -17,8 +17,8 @@
 | Tag | Theme | Status |
 |---|---|---|
 | **0.1.0** | M0 scaffold + ADRs 0001 / 0002 / 0003 + M1-A event loop + M1-B sessions | ✅ 2026-05-24 |
-| **0.2.0** | M1 close — Telnet parser (M1-C) + option negotiation (M1-D) + login scaffold (M1-E) + idle timeout (M1-F) + bench harness (M1-G) + observability (M1-H) | next |
-| **0.3.0** | M2 — verb-noun parser + fuzz harness | |
+| **0.2.0** | M1 close — Telnet parser (M1-C) + option negotiation (M1-D) + login scaffold (M1-E) + idle timeout (M1-F) + bench harness (M1-G) + observability (M1-H) | ✅ 2026-06-09 |
+| **0.3.0** | M2 — verb-noun parser + fuzz harness | next |
 | **0.4.0** | M3 — world / rooms / movement + starter zone | |
 | **0.5.0** | M4 — combat tick + hit/damage math + corpses | |
 | **0.6.0** | M5 — four classes playable solo through the starter zone | |
@@ -32,32 +32,11 @@
 
 ## In progress
 
-**No active cycle.** Next slot is **M1-C — Telnet IAC parser** ([§M1 sub-bites](#m1--tcpip--telnet-listener-v020-in-progress)). Pickup pointer + boot guide in [`state.md`](state.md).
+**No active cycle.** M1 closed at 0.2.0. Next slot is **M2-A — tokenizer** ([§M2 sub-bites](#m2--verb-noun-parser-v030)). Pickup pointer + boot guide in [`state.md`](state.md).
 
 ---
 
 ## Milestones
-
-### M1 — TCP / Telnet listener (v0.2.0, in progress)
-
-The wire and the loop. After this milestone the binary opens a port, accepts concurrent connections, walks the Telnet protocol, and runs a 2.5 s no-op tick — combat math is empty, world is empty, but the heartbeat is real.
-
-Per [ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md) the loop is single-threaded, non-blocking, and `epoll`-shape over `lib/net.cyr`. Per [ADR 0002](../adr/0002-raw-tcp-telnet-protocol.md) the wire is raw TCP with Telnet line discipline.
-
-**Closed in 0.1.0** — M1-A event-loop skeleton (`src/server.cyr`); M1-B per-connection session struct (`src/session.cyr`). Summary in [Closed milestones](#closed-milestones).
-
-**Sub-bites remaining:**
-
-- **M1-C — Telnet IAC parser.** RFC 854 §11.2 dispatch (DATA / IAC / OPT / SB / SB_IAC). Pure / side-effect-free; emits data bytes, no-op consumption, or subneg-complete signals to the caller. New module `src/telnet.cyr`; the per-session `SS_TS` slot (already reserved in `src/session.cyr`) becomes its owner.
-- **M1-D — Option negotiation.** RFC 1143 Q-method announce salvo on connect (WILL ECHO + WILL SUPPRESS_GO_AHEAD); naive-refuse on anything else (DO → WONT, WILL → DONT) for first cut. Real LINEMODE deferred — line discipline works without it for any standards-conformant client.
-- **M1-E — Login flow scaffold.** MOTD → name prompt → MOTD-2 → command prompt. Name is captured but **not authenticated** — real auth lands at M6 ([ADR 0004 open](#open-adrs)). Reserved names (`system`, `admin`, anything starting `_`) refused. Replaces the M1-B echo stub in `session_consume_rx`.
-- **M1-F — Idle timeout & graceful disconnect.** Slowloris-style 5-minute idle disconnect using the `SS_LAST_MS` slot already populated by `session_on_readable`; clean teardown on EOF / RST / write error; in-flight tx buffer drained best-effort.
-- **M1-G — Benchmark harness.** `benches/bench_telnet.bcyr` — IAC-parser hot path; baseline locked at M1 close. Re-run at every minor through 1.0.
-- **M1-H — Observability.** Connection count (`g_session_count` already wired), sessions logged-in, ticks-since-boot (`g_tick_count` already wired), tick-drift-ms-p99 — exposed via a stub admin verb (becomes Joshua input at M8).
-
-**Gate (whole milestone):** clean `cyrius audit` run; 32 concurrent dummy clients connect, exchange MOTDs, idle, and disconnect; tick continues firing within ±10 ms drift throughout.
-
-**Reuses (informed by agora 1.0.0):** `lib/net.cyr` socket primitives, `lib/bannermanor` for MOTD, `lib/darshana` for ANSI color, the RFC 1143 Q-method shape, the slowloris-timeout pattern. Concurrency model **diverges** — agora forks per accept; we don't ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)).
 
 ### M2 — Verb-noun parser (v0.3.0)
 
@@ -192,6 +171,13 @@ Brief one-liners; per-tag chronology in [`../../CHANGELOG.md`](../../CHANGELOG.m
 - **M0 (0.1.0)** — `cyrius init` scaffold; doc tree per first-party-documentation; design captured in `docs/architecture/overview.md`. Three load-bearing ADRs filed: combat tick model ([0001](../adr/0001-tick-based-combat-over-cooldowns.md)), raw TCP / Telnet transport ([0002](../adr/0002-raw-tcp-telnet-protocol.md)), single-thread event-loop concurrency ([0003](../adr/0003-single-thread-event-loop-concurrency.md)).
 - **M1-A (0.1.0)** — event-loop skeleton in `src/server.cyr`. Non-blocking listener; `epoll`-shape multiplex; absolute-time tick scheduling (`next_tick += 2500ms`, drift-resistant catch-up); SIGINT / SIGTERM shutdown via `signalfd` in the same epoll set; no-op `advance_tick()` placeholder for M4.
 - **M1-B (0.1.0)** — per-connection session struct in `src/session.cyr`. Heap-alloc via `lib/freelist.cyr` at accept, freed at disconnect ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)). Rx 4 KB + tx 4 KB buffers with on-demand EPOLLOUT arming; CRLF-line echo stub pending the M1-C parser. Smokes: single-client round-trip, 32-way concurrent fanout, 100-line single-session byte-exact, SIGINT exit 0.
+- **M1 (0.2.0)** — milestone closed. The wire and the loop are complete.
+  - **M1-C** — RFC 854 IAC parser (`src/telnet.cyr`); pure DATA/IAC/OPT/SB/SB_IAC state machine, escaped-IAC + malformed-SB recovery, one `TelnetState` per session feeding a decoded-line accumulator.
+  - **M1-D** — RFC 1143 Q-method negotiation; WILL ECHO + WILL SGA announce salvo on connect, naive-refuse for untracked options, no renegotiation loops.
+  - **M1-E** — login flow (MOTD → name → MOTD-2 → command prompt); name captured + validated (2–16 alnum, leading letter, reserved handles refused), unauthenticated pending M6.
+  - **M1-F** — 5-minute idle sweep over an intrusive session list (`SS_NEXT`/`SS_PREV`), `YD_IDLE_MS` override; best-effort tx drain on teardown.
+  - **M1-G** — `benches/bench_telnet.bcyr` IAC-parser baseline (≈ 6 ns/byte mixed, ≈ 5 ns/byte data).
+  - **M1-H** — `@stats` admin verb (connections, logged-in, ticks, tick-drift p99). Gate met: 32 concurrent connect→login→disconnect, sessions reclaimed, tick p99 drift < 10 ms.
 
 ---
 

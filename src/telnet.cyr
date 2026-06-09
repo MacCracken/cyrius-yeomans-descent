@@ -1,0 +1,410 @@
+# telnet.cyr — M1-C RFC 854 Telnet IAC parser (pure, no socket I/O).
+#
+# One TelnetState per connection, owned by the Session's SS_TS slot
+# (see session.cyr). The state machine consumes one wire byte at a
+# time via telnet_feed() and emits exactly one of three signals:
+#
+#   EV_NONE  — byte was consumed by the IAC machine (no application data)
+#   EV_DATA  — a real data byte is ready in telnet_data_byte()
+#   EV_SB    — a subnegotiation just completed (payload in sb_buf)
+#
+# Negotiation replies the machine wants to put back on the wire are
+# queued in the state's own tx buffer. After every telnet_feed() the
+# caller MUST check telnet_tx_len(): if > 0, copy telnet_tx_buf()[0..len]
+# onto the wire and call telnet_tx_consume() to clear it. In our
+# single-thread epoll model the caller copies those bytes into the
+# Session tx queue rather than writing the socket directly (see
+# session_consume_rx).
+#
+# M1-C scope: the parser handles every RFC 854 §11.2 shape correctly
+# (the bytes-don't-corrupt-the-stream invariant) and negotiates with
+# naive-refuse — every DO → WONT, every WILL → DONT. That is enough
+# for any conformant client to connect, see a banner, and send
+# keystrokes. M1-D upgrades the negotiation to the RFC 1143 Q-method
+# with an opening WILL ECHO / WILL SGA announce salvo.
+#
+# Adapted from agora's src/telnet.cyr (fork-per-conn) to our
+# single-thread-shared session model — same TelCmd / TelState / TelEvent
+# shape, trimmed of the NAWS / TERMINAL-TYPE / LINEMODE surface that
+# isn't on the M1 path.
+#
+# RFC 854:  https://datatracker.ietf.org/doc/html/rfc854
+# RFC 1143: https://datatracker.ietf.org/doc/html/rfc1143 (M1-D)
+
+# === RFC 854 §11.2 command byte values ===
+enum TelCmd {
+    IAC  = 255;
+    DONT = 254;
+    DO   = 253;
+    WONT = 252;
+    WILL = 251;
+    SB   = 250;
+    GA   = 249;
+    EL   = 248;
+    EC   = 247;
+    AYT  = 246;
+    AO   = 245;
+    IP   = 244;
+    BRK  = 243;
+    DM   = 242;
+    NOP  = 241;
+    SE   = 240;
+}
+
+# === Common option codes (subset; full list in the IANA registry) ===
+enum TelOpt {
+    OPT_ECHO              = 1;
+    OPT_SUPPRESS_GO_AHEAD = 3;
+    OPT_STATUS            = 5;
+    OPT_TERMINAL_TYPE     = 24;
+    OPT_NAWS              = 31;
+    OPT_LINEMODE          = 34;
+}
+
+# === Parser states (RFC 854 §11.2 IAC dispatch) ===
+#
+#   ST_DATA    : default — copy bytes through as data
+#   ST_IAC     : just saw IAC; next byte is a command
+#   ST_OPT     : just saw IAC + (DO|DONT|WILL|WONT); next byte is option code
+#   ST_SB      : inside subnegotiation; accumulating
+#   ST_SB_IAC  : inside subneg, just saw IAC; next byte is SE or escaped IAC
+enum TelState {
+    ST_DATA   = 0;
+    ST_IAC    = 1;
+    ST_OPT    = 2;
+    ST_SB     = 3;
+    ST_SB_IAC = 4;
+}
+
+# === telnet_feed return codes ===
+enum TelEvent {
+    EV_NONE = 0;   # byte consumed by the IAC machine; no application data
+    EV_DATA = 1;   # application data byte ready in TS_DATA_OUT
+    EV_SB   = 2;   # subnegotiation complete; sb_buf[0..sb_len] holds it
+}
+
+# === TelnetState layout (every field i64, offsets in bytes) ===
+enum TS {
+    TS_STATE    = 0;     # parser state (TelState enum)
+    TS_VERB     = 8;     # last DO/DONT/WILL/WONT seen (awaiting option byte)
+    TS_DATA_OUT = 16;    # last data byte emitted (valid when feed → EV_DATA)
+
+    TS_TX_BUF   = 24;    # ptr to negotiation-response buffer
+    TS_TX_CAP   = 32;    # capacity (bytes) of tx_buf
+    TS_TX_LEN   = 40;    # bytes currently queued in tx_buf
+
+    TS_SB_BUF   = 48;    # ptr to subneg accumulator
+    TS_SB_CAP   = 56;    # capacity (bytes)
+    TS_SB_LEN   = 64;    # bytes currently accumulated
+
+    TS_OPT_US   = 72;    # ptr to 256-byte us-side option state (RFC 1143 Q)
+    TS_OPT_HIM  = 80;    # ptr to 256-byte him-side option state
+
+    TS_SIZE     = 88;    # total struct size
+}
+
+# RFC 1143 Q-method per-option states. Stored one byte per option code
+# in the us / him arrays. Q_NO == 0 so a zero-filled array means every
+# option starts disabled until announce or peer activity moves it.
+enum TelQ {
+    Q_NO      = 0;   # option is off
+    Q_WANTYES = 1;   # we asked to enable; awaiting the peer's confirm
+    Q_YES     = 2;   # option is on
+}
+
+# Buffer caps. A negotiation salvo is a handful of 3-byte IAC triples;
+# 256 bytes both fits any sane reply burst and caps hostile reply
+# amplification. Subneg payloads (NAWS/TT) are short; 512 is generous
+# headroom that also bounds subneg overrun.
+enum TelCap {
+    TX_BUF_CAP = 256;
+    SB_BUF_CAP = 512;
+}
+
+# === telnet_state_new — alloc + zero-init a TelnetState. ===
+#
+# Allocated from the freelist alongside the Session (per ADR 0003 the
+# loop pays per-conn-lifetime memory once per session). Freed by
+# telnet_state_free at disconnect.
+fn telnet_state_new(): i64 {
+    var ts = fl_alloc(TS_SIZE);
+    var tx = fl_alloc(TX_BUF_CAP);
+    var sb = fl_alloc(SB_BUF_CAP);
+    var ou = fl_alloc(256);
+    var oh = fl_alloc(256);
+    memset(ts, 0, TS_SIZE);
+    memset(ou, 0, 256);
+    memset(oh, 0, 256);
+    store64(ts + TS_STATE, ST_DATA);
+    store64(ts + TS_TX_BUF, tx);
+    store64(ts + TS_TX_CAP, TX_BUF_CAP);
+    store64(ts + TS_SB_BUF, sb);
+    store64(ts + TS_SB_CAP, SB_BUF_CAP);
+    store64(ts + TS_OPT_US, ou);
+    store64(ts + TS_OPT_HIM, oh);
+    return ts;
+}
+
+# === telnet_state_free — return buffers + struct to the freelist. ===
+fn telnet_state_free(ts): i64 {
+    fl_free(load64(ts + TS_TX_BUF));
+    fl_free(load64(ts + TS_SB_BUF));
+    fl_free(load64(ts + TS_OPT_US));
+    fl_free(load64(ts + TS_OPT_HIM));
+    fl_free(ts);
+    return 0;
+}
+
+# === Accessors the caller uses after telnet_feed() ===
+fn telnet_data_byte(ts): i64 { return load64(ts + TS_DATA_OUT); }
+fn telnet_tx_buf(ts): i64    { return load64(ts + TS_TX_BUF); }
+fn telnet_tx_len(ts): i64    { return load64(ts + TS_TX_LEN); }
+fn telnet_sb_buf(ts): i64    { return load64(ts + TS_SB_BUF); }
+fn telnet_sb_len(ts): i64    { return load64(ts + TS_SB_LEN); }
+
+# Clear the tx buffer after the caller has copied it onto the wire.
+fn telnet_tx_consume(ts): i64 {
+    store64(ts + TS_TX_LEN, 0);
+    return 0;
+}
+
+# === Internal buffer pushes ===
+
+# Push one byte onto the response buffer. Silently drops when full —
+# a full tx_buf means the peer sent enough commands at once to exhaust
+# 256 bytes of replies, which is hostile-shape traffic.
+fn ts_tx_push(ts, b): i64 {
+    var len = load64(ts + TS_TX_LEN);
+    if (len >= load64(ts + TS_TX_CAP)) { return 0; }
+    store8(load64(ts + TS_TX_BUF) + len, b & 0xFF);
+    store64(ts + TS_TX_LEN, len + 1);
+    return 1;
+}
+
+# Push one byte onto the subneg accumulator. Silently drops when full.
+fn ts_sb_push(ts, b): i64 {
+    var len = load64(ts + TS_SB_LEN);
+    if (len >= load64(ts + TS_SB_CAP)) { return 0; }
+    store8(load64(ts + TS_SB_BUF) + len, b & 0xFF);
+    store64(ts + TS_SB_LEN, len + 1);
+    return 1;
+}
+
+fn ts_sb_reset(ts): i64 {
+    store64(ts + TS_SB_LEN, 0);
+    return 0;
+}
+
+# Emit a 3-byte IAC command triple onto the tx buffer.
+fn ts_emit_iac3(ts, verb, opt): i64 {
+    ts_tx_push(ts, IAC);
+    ts_tx_push(ts, verb & 0xFF);
+    ts_tx_push(ts, opt & 0xFF);
+    return 0;
+}
+
+# === Per-option Q-state accessors (RFC 1143). ===
+fn opt_us(ts, opt): i64 {
+    return load8(load64(ts + TS_OPT_US) + (opt & 0xFF)) & 0xFF;
+}
+fn opt_him(ts, opt): i64 {
+    return load8(load64(ts + TS_OPT_HIM) + (opt & 0xFF)) & 0xFF;
+}
+fn opt_set_us(ts, opt, st): i64 {
+    store8(load64(ts + TS_OPT_US) + (opt & 0xFF), st & 0xFF);
+    return 0;
+}
+fn opt_set_him(ts, opt, st): i64 {
+    store8(load64(ts + TS_OPT_HIM) + (opt & 0xFF), st & 0xFF);
+    return 0;
+}
+
+# === Server-side option preferences. ===
+#
+# opt_pref_us  — do we want us=YES (we will perform <opt>)?
+# opt_pref_him — do we want him=YES (peer will perform <opt>)?
+#
+# Policy at M1-D: the server echoes input (ECHO) and suppresses go-ahead
+# (SGA) so modern char-at-a-time clients behave; we also accept the peer
+# suppressing GA. Everything else is refused. NAWS / TERMINAL-TYPE /
+# LINEMODE are intentionally untracked until a later milestone needs them.
+fn opt_pref_us(opt): i64 {
+    if (opt == OPT_ECHO)              { return 1; }
+    if (opt == OPT_SUPPRESS_GO_AHEAD) { return 1; }
+    return 0;
+}
+fn opt_pref_him(opt): i64 {
+    if (opt == OPT_SUPPRESS_GO_AHEAD) { return 1; }
+    return 0;
+}
+# Tracked == either side has a preference. Untracked options route to
+# naive-refuse so we never accidentally agree to anything unpreferred.
+fn opt_tracked(opt): i64 {
+    if (opt_pref_us(opt)  != 0) { return 1; }
+    if (opt_pref_him(opt) != 0) { return 1; }
+    return 0;
+}
+
+# Naive-refuse for untracked options: WILL → DONT, DO → WONT, else silent.
+fn telnet_respond_refuse(ts, verb, opt): i64 {
+    if (verb == DO)   { ts_emit_iac3(ts, WONT, opt); return 0; }
+    if (verb == WILL) { ts_emit_iac3(ts, DONT, opt); return 0; }
+    return 0;
+}
+
+# === Negotiation handler (M1-D: RFC 1143 Q-method). ===
+#
+# Runs the §Q transition for the relevant side (him-state for WILL/WONT,
+# us-state for DO/DONT) and emits the reply. Tracked options can be
+# actively agreed to; untracked options fall through to naive-refuse, so
+# the only options we ever say YES to are the ones in opt_pref_*.
+fn telnet_handle_negotiation(ts, verb, opt): i64 {
+    opt = opt & 0xFF;
+    if (opt_tracked(opt) == 0) {
+        telnet_respond_refuse(ts, verb, opt);
+        return 0;
+    }
+
+    # WILL <opt>: peer announces "I will do <opt>". Affects him-state.
+    if (verb == WILL) {
+        var sh = opt_him(ts, opt);
+        if (sh == Q_NO) {
+            if (opt_pref_him(opt) != 0) {
+                opt_set_him(ts, opt, Q_YES);
+                ts_emit_iac3(ts, DO, opt);
+            } else {
+                ts_emit_iac3(ts, DONT, opt);
+            }
+            return 0;
+        }
+        if (sh == Q_WANTYES) {
+            opt_set_him(ts, opt, Q_YES);   # confirmation of our ask; no reply
+            return 0;
+        }
+        return 0;                          # Q_YES — already on
+    }
+
+    # WONT <opt>: peer refuses / abandons <opt>. Affects him-state.
+    if (verb == WONT) {
+        var sh2 = opt_him(ts, opt);
+        if (sh2 == Q_YES) {
+            opt_set_him(ts, opt, Q_NO);
+            ts_emit_iac3(ts, DONT, opt);
+            return 0;
+        }
+        opt_set_him(ts, opt, Q_NO);        # Q_WANTYES → accept refusal silently
+        return 0;
+    }
+
+    # DO <opt>: peer asks "please you do <opt>". Affects us-state.
+    if (verb == DO) {
+        var su = opt_us(ts, opt);
+        if (su == Q_NO) {
+            if (opt_pref_us(opt) != 0) {
+                opt_set_us(ts, opt, Q_YES);
+                ts_emit_iac3(ts, WILL, opt);
+            } else {
+                ts_emit_iac3(ts, WONT, opt);
+            }
+            return 0;
+        }
+        opt_set_us(ts, opt, Q_YES);        # Q_WANTYES confirmed; no reply
+        return 0;
+    }
+
+    # DONT <opt>: peer asks "please stop doing <opt>". Affects us-state.
+    if (verb == DONT) {
+        var su2 = opt_us(ts, opt);
+        if (su2 == Q_YES) {
+            opt_set_us(ts, opt, Q_NO);
+            ts_emit_iac3(ts, WONT, opt);
+            return 0;
+        }
+        opt_set_us(ts, opt, Q_NO);
+        return 0;
+    }
+    return 0;
+}
+
+# === telnet_announce — opening preferred-options salvo. ===
+#
+# Queue IAC WILL ECHO + IAC WILL SUPPRESS_GO_AHEAD onto the tx buffer.
+# Sent ahead of the banner so a conformant client negotiates before any
+# application bytes flow. The caller drains telnet_tx_* afterwards.
+fn telnet_announce(ts): i64 {
+    opt_set_us(ts, OPT_ECHO, Q_WANTYES);
+    ts_emit_iac3(ts, WILL, OPT_ECHO);
+    opt_set_us(ts, OPT_SUPPRESS_GO_AHEAD, Q_WANTYES);
+    ts_emit_iac3(ts, WILL, OPT_SUPPRESS_GO_AHEAD);
+    return 0;
+}
+
+# === telnet_feed — feed one wire byte; return a TelEvent. ===
+#
+# After every call the caller MUST drain telnet_tx_len() onto the wire.
+fn telnet_feed(ts, b): i64 {
+    var state = load64(ts + TS_STATE);
+    b = b & 0xFF;
+
+    if (state == ST_DATA) {
+        if (b == IAC) { store64(ts + TS_STATE, ST_IAC); return EV_NONE; }
+        store64(ts + TS_DATA_OUT, b);
+        return EV_DATA;
+    }
+
+    if (state == ST_IAC) {
+        # We just saw IAC; b is a command byte.
+        if (b == IAC) {
+            # Escaped data byte: a literal 0xFF in the data stream.
+            store64(ts + TS_STATE, ST_DATA);
+            store64(ts + TS_DATA_OUT, 0xFF);
+            return EV_DATA;
+        }
+        if (b == DO)   { store64(ts + TS_STATE, ST_OPT); store64(ts + TS_VERB, DO);   return EV_NONE; }
+        if (b == DONT) { store64(ts + TS_STATE, ST_OPT); store64(ts + TS_VERB, DONT); return EV_NONE; }
+        if (b == WILL) { store64(ts + TS_STATE, ST_OPT); store64(ts + TS_VERB, WILL); return EV_NONE; }
+        if (b == WONT) { store64(ts + TS_STATE, ST_OPT); store64(ts + TS_VERB, WONT); return EV_NONE; }
+        if (b == SB)   { ts_sb_reset(ts); store64(ts + TS_STATE, ST_SB); return EV_NONE; }
+        # Single-byte commands (NOP/AYT/IP/AO/EC/EL/BRK/DM/GA and a
+        # stray SE) — consume and return to DATA. No reply generated.
+        store64(ts + TS_STATE, ST_DATA);
+        return EV_NONE;
+    }
+
+    if (state == ST_OPT) {
+        # We just saw IAC <verb>; b is the option code.
+        telnet_handle_negotiation(ts, load64(ts + TS_VERB), b);
+        store64(ts + TS_STATE, ST_DATA);
+        return EV_NONE;
+    }
+
+    if (state == ST_SB) {
+        if (b == IAC) { store64(ts + TS_STATE, ST_SB_IAC); return EV_NONE; }
+        ts_sb_push(ts, b);
+        return EV_NONE;
+    }
+
+    if (state == ST_SB_IAC) {
+        if (b == SE) {
+            # Subnegotiation complete.
+            store64(ts + TS_STATE, ST_DATA);
+            return EV_SB;
+        }
+        if (b == IAC) {
+            # Escaped IAC inside SB → literal 0xFF in the payload.
+            ts_sb_push(ts, IAC);
+            store64(ts + TS_STATE, ST_SB);
+            return EV_NONE;
+        }
+        # Malformed (RFC 855 implementations differ). We abort the
+        # subneg cleanly: drop the accumulated bytes, return to DATA.
+        # A hostile client can't pin us in SB_IAC.
+        ts_sb_reset(ts);
+        store64(ts + TS_STATE, ST_DATA);
+        return EV_NONE;
+    }
+
+    # Unreachable for well-formed input; defensive reset.
+    store64(ts + TS_STATE, ST_DATA);
+    return EV_NONE;
+}

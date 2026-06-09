@@ -23,25 +23,35 @@ enum SS {
     SS_FD         = 0;    # connected socket fd (non-blocking)
     SS_PHASE      = 8;    # current PHASE_*
     SS_LAST_MS    = 16;   # monotonic ms of last byte exchanged
-    SS_RX_BUF     = 24;   # ptr to rx accumulator (RX_CAP bytes)
-    SS_RX_LEN     = 32;   # bytes accumulated
+    SS_RX_BUF     = 24;   # ptr to raw socket-read scratch (RX_CAP bytes)
+    SS_RX_LEN     = 32;   # raw bytes read, pending Telnet decode
     SS_TX_BUF     = 40;   # ptr to tx queue (TX_CAP bytes)
     SS_TX_LEN     = 48;   # bytes queued (write end)
     SS_TX_OFF     = 56;   # bytes already drained to the socket
     SS_OUT_ARMED  = 64;   # 1 iff the fd is currently registered with EPOLLOUT
-    SS_TS         = 72;   # Telnet parser state ptr (M1-C; 0 at M1-B)
-    SS_PLAYER     = 80;   # player id (M6; 0 at M1-B)
-    SS_SIZE       = 88;
+    SS_TS         = 72;   # Telnet parser state ptr (M1-C)
+    SS_PLAYER     = 80;   # player id (M6; 0 until then)
+    SS_LINE_BUF   = 88;   # ptr to decoded-data line accumulator (LINE_CAP)
+    SS_LINE_LEN   = 96;   # decoded data bytes in the current partial line
+    SS_NAME_BUF   = 104;  # ptr to captured player name (NAME_CAP bytes)
+    SS_NAME_LEN   = 112;  # length of the captured name
+    SS_NEXT       = 120;  # intrusive active-session list (server.cyr owns it)
+    SS_PREV       = 128;  # — used by the tick idle sweep (M1-F)
+    SS_SIZE       = 136;
 }
 
 enum SessConst {
-    RX_CAP = 4096;        # one full Telnet line — M2 parser caps at this
-    TX_CAP = 4096;        # banner + a few command replies
+    RX_CAP   = 4096;      # raw socket-read scratch (decoded each readable)
+    TX_CAP   = 4096;      # banner + a few command replies
+    LINE_CAP = 4096;      # one full decoded line — M2 parser caps at this
+    NAME_CAP = 32;        # name buffer (NAME_MAX + headroom)
+    NAME_MAX = 16;        # longest accepted player name
+    NAME_MIN = 2;         # shortest accepted player name
 }
 
 enum Phase {
-    PHASE_BANNER = 0;     # connection open, MOTD on its way out
-    PHASE_CMD    = 1;     # accepting commands (echo stub at M1-B)
+    PHASE_NAME = 0;       # awaiting name entry (first prompt after MOTD)
+    PHASE_CMD  = 1;       # accepting commands (echo stub until M2)
 }
 
 # === session_new — alloc + zero-init a Session for an accepted fd. ===
@@ -49,20 +59,28 @@ fn session_new(fd, now_ms): i64 {
     var s = fl_alloc(SS_SIZE);
     var rxb = fl_alloc(RX_CAP);
     var txb = fl_alloc(TX_CAP);
+    var lnb = fl_alloc(LINE_CAP);
+    var nmb = fl_alloc(NAME_CAP);
     memset(s, 0, SS_SIZE);
     store64(s + SS_FD, fd);
-    store64(s + SS_PHASE, PHASE_BANNER);
+    store64(s + SS_PHASE, PHASE_NAME);
     store64(s + SS_LAST_MS, now_ms);
     store64(s + SS_RX_BUF, rxb);
     store64(s + SS_TX_BUF, txb);
+    store64(s + SS_LINE_BUF, lnb);
+    store64(s + SS_NAME_BUF, nmb);
+    store64(s + SS_TS, telnet_state_new());
     return s;
 }
 
 # === session_free — close fd, return buffers to the freelist. ===
 fn session_free(s): i64 {
     sock_close(load64(s + SS_FD));
+    telnet_state_free(load64(s + SS_TS));
     fl_free(load64(s + SS_RX_BUF));
     fl_free(load64(s + SS_TX_BUF));
+    fl_free(load64(s + SS_LINE_BUF));
+    fl_free(load64(s + SS_NAME_BUF));
     fl_free(s);
     return 0;
 }
@@ -87,6 +105,54 @@ fn session_appendtx(s, buf, len): i64 {
 # Convenience: append a NUL-terminated cstring.
 fn session_appendtx_cstr(s, cstr): i64 {
     return session_appendtx(s, cstr, strlen(cstr));
+}
+
+# Append a signed integer in decimal. Used by the M1-H status verb.
+fn session_appendtx_num(s, n): i64 {
+    if (n == 0) {
+        var z[1];
+        store8(&z, 48);
+        session_appendtx(s, &z, 1);
+        return 0;
+    }
+    if (n < 0) {
+        var m[1];
+        store8(&m, 45);          # '-'
+        session_appendtx(s, &m, 1);
+        n = 0 - n;
+    }
+    var tmp[24];
+    var len = 0;
+    while (n > 0) {
+        store8(&tmp + len, 48 + (n % 10));
+        n = n / 10;
+        len = len + 1;
+    }
+    var out[24];
+    var i = 0;
+    while (i < len) {
+        store8(&out + i, load8(&tmp + len - 1 - i));
+        i = i + 1;
+    }
+    session_appendtx(s, &out, len);
+    return 0;
+}
+
+# === session_telnet_announce — queue the opening option salvo. ===
+#
+# Runs telnet_announce on the session's parser and copies the resulting
+# IAC bytes into the tx queue. Called once at accept, ahead of the
+# banner, so a conformant client negotiates ECHO / SGA before any
+# application bytes arrive.
+fn session_telnet_announce(s): i64 {
+    var ts = load64(s + SS_TS);
+    telnet_announce(ts);
+    var txl = telnet_tx_len(ts);
+    if (txl > 0) {
+        session_appendtx(s, telnet_tx_buf(ts), txl);
+        telnet_tx_consume(ts);
+    }
+    return 0;
 }
 
 # === session_drain — try to write any queued tx bytes to the socket. ===
@@ -128,47 +194,205 @@ fn session_drain(s): i64 {
     return rc;
 }
 
-# === session_consume_rx — process any pending rx bytes. ===
+# === Login flow (M1-E scaffold). ===
 #
-# At M1-B this is a sanity-check echo: each complete line (terminated
-# by \n) is echoed back prefixed with "echo: ". Bytes past the buffer
-# cap are discarded. M1-C replaces this with the Telnet parser; M2
-# routes complete lines into the verb-noun parser.
+# MOTD → name prompt → MOTD-2 → command prompt. The name is captured
+# but NOT authenticated — real identity / auth lands at M6 (ADR 0004).
+# Reserved handles and ill-formed names are refused with a re-prompt.
+
+fn ascii_lower(c): i64 {
+    if (c >= 65) { if (c <= 90) { return c + 32; } }
+    return c;
+}
+
+# Case-insensitive compare of buf[0..len] against NUL-terminated lit.
+fn name_eq_ci(buf, len, lit): i64 {
+    var i = 0;
+    while (i < len) {
+        var lc = load8(lit + i) & 0xFF;
+        if (lc == 0) { return 0; }                  # lit shorter than buf
+        if (ascii_lower(load8(buf + i) & 0xFF) != ascii_lower(lc)) { return 0; }
+        i = i + 1;
+    }
+    if ((load8(lit + i) & 0xFF) != 0) { return 0; } # lit longer than buf
+    return 1;
+}
+
+fn is_alpha(c): i64 {
+    if (c >= 65)  { if (c <= 90)  { return 1; } }
+    if (c >= 97)  { if (c <= 122) { return 1; } }
+    return 0;
+}
+fn is_alnum(c): i64 {
+    if (is_alpha(c) == 1) { return 1; }
+    if (c >= 48) { if (c <= 57) { return 1; } }
+    return 0;
+}
+
+# Validate a candidate player name. Returns 1 if acceptable. Rules:
+#   - length in [NAME_MIN, NAME_MAX]
+#   - first char a letter (rules out leading '_' and digits)
+#   - every char alphanumeric
+#   - not a reserved handle (system / admin)
+fn login_name_ok(buf, len): i64 {
+    if (len < NAME_MIN) { return 0; }
+    if (len > NAME_MAX) { return 0; }
+    if (is_alpha(load8(buf) & 0xFF) == 0) { return 0; }
+    var i = 0;
+    while (i < len) {
+        if (is_alnum(load8(buf + i) & 0xFF) == 0) { return 0; }
+        i = i + 1;
+    }
+    if (name_eq_ci(buf, len, "system") == 1) { return 0; }
+    if (name_eq_ci(buf, len, "admin")  == 1) { return 0; }
+    return 1;
+}
+
+fn session_send_motd(s): i64 {
+    session_appendtx_cstr(s, "\r\n");
+    session_appendtx_cstr(s, "  ============================================\r\n");
+    session_appendtx_cstr(s, "        Y E O M A N ' S   D E S C E N T\r\n");
+    session_appendtx_cstr(s, "     a MUD of the techno-feudal Under-Grid\r\n");
+    session_appendtx_cstr(s, "  ============================================\r\n");
+    session_appendtx_cstr(s, "\r\n");
+    return 0;
+}
+fn session_send_name_prompt(s): i64 {
+    session_appendtx_cstr(s, "By what name are you known? ");
+    return 0;
+}
+fn session_send_cmd_prompt(s): i64 {
+    session_appendtx_cstr(s, "> ");
+    return 0;
+}
+
+# Send MOTD + the first name prompt; the session starts in PHASE_NAME.
+# Called once at accept (replaces the M1-B placeholder banner).
+fn session_begin_login(s): i64 {
+    store64(s + SS_PHASE, PHASE_NAME);
+    session_send_motd(s);
+    session_send_name_prompt(s);
+    return 0;
+}
+
+# Handle a line entered at the name prompt.
+fn login_on_name(s, buf, len): i64 {
+    if (login_name_ok(buf, len) == 0) {
+        session_appendtx_cstr(s, "That name won't do — 2-16 letters/digits, no reserved handles.\r\n");
+        session_send_name_prompt(s);
+        return 0;
+    }
+    # Capture the name (unauthenticated) and advance to the command phase.
+    memcpy(load64(s + SS_NAME_BUF), buf, len);
+    store64(s + SS_NAME_LEN, len);
+    store64(s + SS_PHASE, PHASE_CMD);
+    session_appendtx_cstr(s, "\r\nWelcome, ");
+    session_appendtx(s, buf, len);
+    session_appendtx_cstr(s, ". The Under-Grid stirs.\r\n");
+    session_appendtx_cstr(s, "(the verb parser arrives at M2; until then your input is echoed.)\r\n");
+    session_send_cmd_prompt(s);
+    return 0;
+}
+
+# Handle a line entered at the command prompt. M1-E keeps the echo stub
+# as a placeholder; M2 swaps in the verb-noun parser here. The `@stats`
+# admin verb (M1-H) surfaces loop observability — render_stats lives in
+# server.cyr, where the counters do (resolved as a forward reference).
+fn cmd_on_line(s, buf, len): i64 {
+    if (name_eq_ci(buf, len, "@stats") == 1) {
+        render_stats(s);
+        session_send_cmd_prompt(s);
+        return 0;
+    }
+    session_appendtx_cstr(s, "echo: ");
+    session_appendtx(s, buf, len);
+    session_appendtx_cstr(s, "\r\n");
+    session_send_cmd_prompt(s);
+    return 0;
+}
+
+# === session_on_line — dispatch one complete decoded line by phase. ===
+#
+# `buf` / `len` is the line with its CR / LF terminator already stripped.
+fn session_on_line(s, buf, len): i64 {
+    if (load64(s + SS_PHASE) == PHASE_NAME) {
+        return login_on_name(s, buf, len);
+    }
+    return cmd_on_line(s, buf, len);
+}
+
+# === session_push_line_byte — append one decoded data byte to the line. ===
+#
+# CR is the canonical line terminator. CR LF collapses to one line: the
+# CR dispatches, then the paired LF arrives with the line already empty
+# and is dropped. A lone LF (Unix-style `nc` clients) terminates a
+# non-empty line too. Over-long lines (no terminator within LINE_CAP)
+# reset with a wire warning — M2 will reject these as a parse error.
+fn session_push_line_byte(s, b): i64 {
+    var ln = load64(s + SS_LINE_BUF);
+    var len = load64(s + SS_LINE_LEN);
+    if (b == 13) {
+        session_on_line(s, ln, len);
+        store64(s + SS_LINE_LEN, 0);
+        return 0;
+    }
+    if (b == 10) {
+        # len == 0 here is the LF half of a CR LF pair — absorb it.
+        if (len == 0) { return 0; }
+        session_on_line(s, ln, len);
+        store64(s + SS_LINE_LEN, 0);
+        return 0;
+    }
+    if (len >= LINE_CAP) {
+        store64(s + SS_LINE_LEN, 0);
+        session_appendtx_cstr(s, "(line too long — buffer reset)\r\n");
+        return 0;
+    }
+    store8(ln + len, b);
+    store64(s + SS_LINE_LEN, len + 1);
+    return 0;
+}
+
+# === session_consume_rx — Telnet-decode pending rx bytes. ===
+#
+# Feeds every raw byte read this round through the per-session Telnet
+# parser. IAC sequences are consumed by the state machine; any reply it
+# queues (option negotiation) is copied into our tx queue so it goes out
+# in on-wire order ahead of application data. Decoded data bytes flow
+# into the line accumulator, which dispatches complete lines to
+# session_on_line. The raw rx buffer is scratch — fully consumed here,
+# so SS_RX_LEN resets to 0 on return.
 fn session_consume_rx(s): i64 {
     var rx = load64(s + SS_RX_BUF);
     var len = load64(s + SS_RX_LEN);
+    var ts = load64(s + SS_TS);
     var i = 0;
-    var line_start = 0;
     while (i < len) {
-        if (load8(rx + i) == 10) {
-            # Found a newline at i. Echo bytes [line_start, i).
-            var l = i - line_start;
-            # Strip a trailing \r if present (Telnet CR LF).
-            if (l > 0) {
-                if (load8(rx + line_start + l - 1) == 13) { l = l - 1; }
-            }
-            session_appendtx_cstr(s, "echo: ");
-            session_appendtx(s, rx + line_start, l);
-            session_appendtx_cstr(s, "\r\n");
-            line_start = i + 1;
+        var ev = telnet_feed(ts, load8(rx + i));
+        # Drain any negotiation reply into the tx queue before the data
+        # byte, preserving RFC 854 on-wire ordering.
+        var txl = telnet_tx_len(ts);
+        if (txl > 0) {
+            session_appendtx(s, telnet_tx_buf(ts), txl);
+            telnet_tx_consume(ts);
         }
+        if (ev == EV_DATA) {
+            session_push_line_byte(s, telnet_data_byte(ts) & 0xFF);
+        }
+        # EV_SB / EV_NONE: nothing for the application at M1-C/M1-D.
         i = i + 1;
     }
-    # Compact: shift remaining partial line to the start of the buffer.
-    if (line_start > 0) {
-        var leftover = len - line_start;
-        if (leftover > 0) {
-            memcpy(rx, rx + line_start, leftover);
-        }
-        store64(s + SS_RX_LEN, leftover);
-    }
-    # Hard cap: if the rx buffer is full with no newline in sight,
-    # drop everything. A real parser (M2) will reject the over-long
-    # line with a wire error; for M1-B we just reset.
-    if (load64(s + SS_RX_LEN) >= RX_CAP) {
-        store64(s + SS_RX_LEN, 0);
-        session_appendtx_cstr(s, "(line too long — buffer reset)\r\n");
-    }
+    store64(s + SS_RX_LEN, 0);
+    return 0;
+}
+
+# === session_is_idle — has this session been silent past the limit? ===
+#
+# Pure predicate over SS_LAST_MS (updated on every inbound byte). The
+# tick sweep (server.cyr) uses it to reap slowloris-style quiet clients.
+# Returns 1 if (now - last) >= timeout_ms.
+fn session_is_idle(s, now_ms, timeout_ms): i64 {
+    if (now_ms - load64(s + SS_LAST_MS) >= timeout_ms) { return 1; }
     return 0;
 }
 

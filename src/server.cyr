@@ -87,16 +87,156 @@ fn advance_tick(): i64 {
     return 0;
 }
 
-# === Session disconnect — remove from epoll, free, log. ===
+# Sessions-currently-connected counter (M1-H observability hook).
+var g_session_count = 0;
+
+# Intrusive head of the active-session list. Threaded through each
+# Session's SS_NEXT / SS_PREV so the tick sweep (M1-F) can walk every
+# live connection without a separate container.
+var g_session_head = 0;
+
+# Idle-disconnect threshold (ms). Default 5 minutes; overridable at
+# startup via the YD_IDLE_MS env var (testing / ops tuning).
+var g_idle_timeout_ms = 300000;
+
+# Prepend a session to the active list.
+fn session_list_push(s): i64 {
+    store64(s + SS_PREV, 0);
+    store64(s + SS_NEXT, g_session_head);
+    if (g_session_head != 0) { store64(g_session_head + SS_PREV, s); }
+    g_session_head = s;
+    return 0;
+}
+
+# Unlink a session from the active list.
+fn session_list_remove(s): i64 {
+    var p = load64(s + SS_PREV);
+    var n = load64(s + SS_NEXT);
+    if (p != 0) { store64(p + SS_NEXT, n); } else { g_session_head = n; }
+    if (n != 0) { store64(n + SS_PREV, p); }
+    store64(s + SS_NEXT, 0);
+    store64(s + SS_PREV, 0);
+    return 0;
+}
+
+# === Session disconnect — unlink, remove from epoll, free. ===
 fn drop_session(epfd, s): i64 {
     sys_epoll_ctl(epfd, EPOLL_CTL_DEL, load64(s + SS_FD), 0);
+    session_list_remove(s);
     session_free(s);
     g_session_count = g_session_count - 1;
     return 0;
 }
 
-# Sessions-currently-connected counter (M1-H observability hook).
-var g_session_count = 0;
+# === sweep_idle — reap sessions silent past g_idle_timeout_ms. ===
+#
+# Called once per tick. Captures SS_NEXT before dropping, since
+# drop_session unlinks the node mid-walk. A best-effort goodbye line is
+# flushed before teardown (slowloris defense, ADR 0002 wire model).
+fn sweep_idle(epfd, now_ms): i64 {
+    var s = g_session_head;
+    while (s != 0) {
+        var nxt = load64(s + SS_NEXT);
+        if (session_is_idle(s, now_ms, g_idle_timeout_ms) == 1) {
+            session_appendtx_cstr(s, "\r\nIdle timeout — disconnecting.\r\n");
+            session_drain(s);
+            drop_session(epfd, s);
+        }
+        s = nxt;
+    }
+    return 0;
+}
+
+# === Observability (M1-H). =================================================
+#
+# A small set of counters the `@stats` admin verb surfaces (and that
+# Joshua consumes at M8): live connections, sessions logged in, ticks
+# since boot, and the p99 of recent tick-scheduling drift.
+
+enum ObsConst { DRIFT_RING_CAP = 512; }
+
+var g_tick_drift_ring  = 0;   # ring of recent drift samples (ms)
+var g_tick_drift_tmp   = 0;   # scratch buffer for the p99 sort
+var g_tick_drift_count = 0;   # samples recorded (saturates at CAP)
+var g_tick_drift_idx   = 0;   # next ring write slot
+
+# Allocate the drift buffers. Called once at serve start.
+fn obs_init(): i64 {
+    g_tick_drift_ring = alloc(DRIFT_RING_CAP * 8);
+    g_tick_drift_tmp  = alloc(DRIFT_RING_CAP * 8);
+    return 0;
+}
+
+# Record one tick's scheduling drift (how late the tick fired vs its
+# absolute deadline). Negative is clamped to 0 (early is never late).
+fn record_tick_drift(drift_ms): i64 {
+    if (drift_ms < 0) { drift_ms = 0; }
+    store64(g_tick_drift_ring + g_tick_drift_idx * 8, drift_ms);
+    g_tick_drift_idx = (g_tick_drift_idx + 1) % DRIFT_RING_CAP;
+    if (g_tick_drift_count < DRIFT_RING_CAP) {
+        g_tick_drift_count = g_tick_drift_count + 1;
+    }
+    return 0;
+}
+
+# p99 of the recent drift window (ms). Insertion-sorts a copy of the
+# ring (bounded at DRIFT_RING_CAP); computed only when @stats is invoked.
+fn tick_drift_p99(): i64 {
+    var cnt = g_tick_drift_count;
+    if (cnt == 0) { return 0; }
+    var i = 0;
+    while (i < cnt) {
+        store64(g_tick_drift_tmp + i * 8, load64(g_tick_drift_ring + i * 8));
+        i = i + 1;
+    }
+    var a = 1;
+    while (a < cnt) {
+        var key = load64(g_tick_drift_tmp + a * 8);
+        var b = a - 1;
+        while (b >= 0) {
+            if (load64(g_tick_drift_tmp + b * 8) <= key) { break; }
+            store64(g_tick_drift_tmp + (b + 1) * 8, load64(g_tick_drift_tmp + b * 8));
+            b = b - 1;
+        }
+        store64(g_tick_drift_tmp + (b + 1) * 8, key);
+        a = a + 1;
+    }
+    var idx = (cnt * 99) / 100;
+    if (idx >= cnt) { idx = cnt - 1; }
+    return load64(g_tick_drift_tmp + idx * 8);
+}
+
+# Count sessions past the login gate (PHASE_CMD) by walking the list.
+fn count_logged_in(): i64 {
+    var c = 0;
+    var s = g_session_head;
+    while (s != 0) {
+        if (load64(s + SS_PHASE) == PHASE_CMD) { c = c + 1; }
+        s = load64(s + SS_NEXT);
+    }
+    return c;
+}
+
+# Render the status block into a session's tx queue (the `@stats` verb).
+fn render_stats(s): i64 {
+    session_appendtx_cstr(s, "-- yeoman's descent :: status --\r\n");
+    session_appendtx_cstr(s, "connections : ");
+    session_appendtx_num(s, g_session_count);
+    session_appendtx_cstr(s, "\r\n");
+    session_appendtx_cstr(s, "logged in   : ");
+    session_appendtx_num(s, count_logged_in());
+    session_appendtx_cstr(s, "\r\n");
+    session_appendtx_cstr(s, "ticks       : ");
+    session_appendtx_num(s, g_tick_count);
+    session_appendtx_cstr(s, "\r\n");
+    session_appendtx_cstr(s, "drift p99ms : ");
+    session_appendtx_num(s, tick_drift_p99());
+    session_appendtx_cstr(s, "\r\n");
+    session_appendtx_cstr(s, "idle to ms  : ");
+    session_appendtx_num(s, g_idle_timeout_ms);
+    session_appendtx_cstr(s, "\r\n");
+    return 0;
+}
 
 # === Drain a session's tx queue, arming / unarming EPOLLOUT to match. ===
 #
@@ -120,10 +260,13 @@ fn handle_accept(epfd, listener_fd, now_ms): i64 {
         if (nb < 0) { sock_close(cfd); continue; }
         var s = session_new(cfd, now_ms);
         epoll_add_in(epfd, cfd, s);
+        session_list_push(s);
         g_session_count = g_session_count + 1;
-        # Banner — M1-B placeholder. M1-E swaps for the real login flow.
-        session_appendtx_cstr(s, "yeoman's descent — M1-B sessions live.\r\n");
-        session_appendtx_cstr(s, "(M1-B echo stub: type a line, see it echoed.)\r\n");
+        # Opening Telnet salvo (IAC WILL ECHO / WILL SGA) ahead of any
+        # application bytes, per RFC 1143 — see session_telnet_announce.
+        session_telnet_announce(s);
+        # MOTD + name prompt; the session opens in PHASE_NAME (M1-E).
+        session_begin_login(s);
         flush_session(epfd, s);
     }
     return 0;
@@ -154,9 +297,21 @@ fn dispatch_session(epfd, s, events, now_ms): i64 {
     return 1;
 }
 
+# Apply the YD_IDLE_MS env override to g_idle_timeout_ms, if set to a
+# positive integer. Invalid / absent → keep the 5-minute default.
+fn apply_idle_env(): i64 {
+    var v = getenv("YD_IDLE_MS");
+    if (v == 0) { return 0; }
+    var ms = atoi(v);
+    if (ms > 0) { g_idle_timeout_ms = ms; }
+    return 0;
+}
+
 # === cmd_serve — open listener, run the loop until SIGINT/SIGTERM. ===
 fn cmd_serve(port): i64 {
-    println("yeoman's descent — starting M1-B event-loop listener");
+    apply_idle_env();
+    obs_init();
+    println("yeoman's descent — starting event-loop listener");
     println("server: listening on port");
     print_num(port);
     println("");
@@ -217,7 +372,9 @@ fn cmd_serve(port): i64 {
         # boundary so we don't fire a burst of catch-up ticks.
         now = clock_now_ms();
         if (now >= next_tick) {
+            record_tick_drift(now - next_tick);
             advance_tick();
+            sweep_idle(epfd, now);
             next_tick = next_tick + TICK_MS;
             while (next_tick <= now) { next_tick = next_tick + TICK_MS; }
         }

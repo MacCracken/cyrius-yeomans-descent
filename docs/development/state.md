@@ -3,37 +3,50 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-05-24
+> **Last refresh**: 2026-06-09
 
 ## Version
 
-**0.1.0** — first tag, 2026-05-24. Greenfield scaffold + three load-bearing
-ADRs (0001 combat tick / 0002 raw TCP+Telnet / 0003 single-thread event loop)
-+ the first slice of M1: M1-A event loop + M1-B per-connection sessions.
-Echo stub on the wire pending the M1-C Telnet parser.
+**0.2.0** — M1 close, 2026-06-09. The listener now walks the Telnet
+protocol (M1-C), negotiates options via the RFC 1143 Q-method (M1-D),
+runs a real login flow (M1-E), reaps idle clients (M1-F), is benchmarked
+(M1-G), and surfaces loop observability via the `@stats` verb (M1-H) —
+all over the single-thread epoll loop + 2.5 s tick from 0.1.0. Combat,
+world, and the verb parser are still empty; the wire and the heartbeat
+are complete.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.0.1` (`cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.1.17` (`cyrius.cyml [package].cyrius`)
 
 ## Source layout
 
 ```
 src/
-  main.cyr       argv dispatch (`serve [port]` / `version` / `help`)
-  server.cyr     event loop, listener bring-up, signalfd shutdown,
-                 tick scheduler, per-session epoll dispatch
-  session.cyr    Session struct (~88 B), rx accumulator, tx queue,
-                 drain helpers, M1-B CRLF-line echo stub
+  main.cyr       argv dispatch (`serve [port]` / `version` / `help`);
+                 include order telnet → session → server
+  telnet.cyr     RFC 854 IAC parser + RFC 1143 Q-method negotiation
+                 (M1-C/M1-D); pure, no I/O; one TelnetState per session
+  session.cyr    Session struct (136 B), rx scratch, decoded-line
+                 accumulator, tx queue, login flow + name validation
+                 (M1-E), idle predicate (M1-F), @stats int formatting
+  server.cyr     event loop, listener, signalfd shutdown, tick scheduler,
+                 epoll dispatch, active-session list + idle sweep (M1-F),
+                 observability counters + render_stats (M1-H)
   test.cyr       top-level test entrypoint (per cyrius.cyml [build].test)
 
 tests/
-  cyrius-yeomans-descent.tcyr   smoke suite
-  cyrius-yeomans-descent.bcyr   benchmark stub (no-op until M1-G)
+  cyrius-yeomans-descent.tcyr   unit suite (52 assertions)
+  cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
+                                live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   fuzz stub (no-op until M2-F)
+
+benches/
+  bench_telnet.bcyr             IAC-parser hot-path baseline (M1-G);
+                                `cyrius bench` auto-discovers benches/
 ```
 
-Binary at `build/cyrius-yeomans-descent` (~90 KB with `CYRIUS_DCE=1`).
+Binary at `build/cyrius-yeomans-descent` (~112 KB with `CYRIUS_DCE=1`).
 
 ## Design
 
@@ -44,17 +57,33 @@ Binary at `build/cyrius-yeomans-descent` (~90 KB with `CYRIUS_DCE=1`).
 
 ## Tests
 
-End-to-end smokes validated locally on Linux x86_64 at 0.1.0 cut:
+`cyrius test tests/cyrius-yeomans-descent.tcyr` — 52 unit assertions:
 
-- single-client banner + echo round-trip
-- 32-way concurrent fanout (banner delivered + per-client echo correct)
-- 100-line single-session round-trip (1490 B in / 1490 B out, byte-exact)
-- 5× rapid connect/close cycles (no leak, no crash)
-- SIGINT → clean shutdown, exit 0
+- **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
+  single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
+  malformed-SB recovery, mixed data/negotiation streams
+- **negotiation** — announce salvo shape, DO/DONT confirmation of the
+  announce, untracked-option refuse, cold DO SGA acceptance
+- **login** — name length bounds, leading-letter rule, alphanumeric
+  rule, reserved-handle refusal (case-insensitive)
+- **idle** — the `session_is_idle` threshold predicate
 
-`cyrius test src/test.cyr` exits 0. CI uses the explicit form (cyrius 6.0.1
-released binary doesn't honor bare `cyrius test` auto-discovery — see
-`.github/workflows/ci.yml` comment).
+End-to-end smokes validated locally on Linux x86_64 at the 0.2.0 cut:
+
+- opening salvo (IAC WILL ECHO / WILL SGA) precedes the banner; client
+  DO-confirmation draws no renegotiation loop
+- full login: reserved/underscore names refused + re-prompted, valid
+  name → welcome + command prompt; `@stats` renders the status block
+- `YD_IDLE_MS=1000` → idle client gets the goodbye line and is
+  disconnected on the next tick (~1.9 s)
+- 32-way concurrent connect → negotiate → log in → command → disconnect;
+  sessions fully reclaimed afterward (no leak); tick p99 drift < 10 ms
+
+Benchmark: `cyrius bench` → telnet_feed ≈ 6 ns/byte (mixed), ≈ 5 ns/byte
+(pure data), 16 M iterations, stable.
+
+`cyrius test src/test.cyr` exits 0 (CI uses this explicit form — see
+`.github/workflows/ci.yml`; the pin reads from `cyrius.cyml`).
 
 ## Dependencies
 
@@ -71,46 +100,63 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** Pickup the next slot per the boot guide below.
+**No active cycle.** M1 closed at 0.2.0. Pick up the next slot per the
+boot guide below.
 
 ---
 
 ## Next-agent boot guide
 
-You are picking up at **M1-C — Telnet IAC parser** ([roadmap.md M1 sub-bites](roadmap.md#m1--tcp--telnet-listener-v020-in-progress)). The path to closing M1 at v0.2.0 is M1-C → M1-D → M1-E → M1-F → M1-G → M1-H.
+You are picking up at **M2-A — tokenizer** ([roadmap.md M2 sub-bites](roadmap.md#m2--verb-noun-parser-v030)). M2 is the verb-noun parser: tokenizer → verb table → direct-object resolution → preposition/indirect-object → qualifiers → fuzz harness, shipping at v0.3.0.
 
-### What's already built (0.1.0)
+### What's already built (0.2.0)
 
-- **Event loop** — `src/server.cyr` `cmd_serve(port)` opens a non-blocking listener, runs an epoll multiplex over `lib/net.cyr`, ticks every 2.5 s via absolute-time scheduling. SIGINT/SIGTERM via signalfd in the same epoll set.
-- **Per-conn sessions** — `src/session.cyr` `Session` struct (88 B) is heap-alloc'd via `lib/freelist.cyr` at accept, freed at disconnect. Rx 4 KB + tx 4 KB buffers. `session_on_readable(s, now)` pulls bytes; `session_consume_rx(s)` walks them line-by-line; `session_drain(s)` writes the tx queue with EAGAIN-aware partial-write handling; `flush_session(epfd, s)` arms/disarms EPOLLOUT to match.
-- **Reserved slots** waiting for M1-C through M6:
-  - `SS_TS` (offset 72 in `src/session.cyr`) — Telnet parser state pointer; **M1-C owns it**.
-  - `SS_LAST_MS` — last-activity timestamp; M1-F idle timeout consumes it.
-  - `SS_PLAYER` — player id slot; M6 fills it.
-- **Observability primitives already wired** — `g_session_count` (server.cyr) and `g_tick_count`. M1-H just needs to surface them via an admin verb.
+- **Telnet wire** — `src/telnet.cyr` `telnet_feed(ts, b)` is a pure
+  RFC 854 parser emitting EV_NONE / EV_DATA / EV_SB; negotiation replies
+  queue in the state's tx buffer (Q-method, ECHO + SGA preferred). One
+  `TelnetState` per session in `SS_TS`, alloc'd/freed with the session.
+- **Decoded-line plumbing** — `session_consume_rx` feeds raw rx bytes
+  through the parser, copies negotiation replies into the session tx
+  queue, and routes EV_DATA bytes into the per-session line accumulator.
+  Complete lines (CR / CRLF / lone-LF) dispatch to `session_on_line`,
+  which branches on phase.
+- **Login flow** — `PHASE_NAME` → `PHASE_CMD`. `login_on_name` validates
+  and captures the name into `SS_NAME_BUF`; `cmd_on_line` is where M2
+  plugs the verb parser in (it currently echoes + handles `@stats`).
+- **Idle sweep** — active sessions are on an intrusive list
+  (`SS_NEXT`/`SS_PREV`, head `g_session_head`); `sweep_idle` reaps them
+  each tick past `g_idle_timeout_ms` (default 300000, `YD_IDLE_MS` env
+  override).
+- **Observability** — `g_session_count`, `g_tick_count`, the drift ring,
+  `count_logged_in()`, and `render_stats()` back the `@stats` verb.
 
-### What M1-C should do
+### What M2-A should do
 
-Create `src/telnet.cyr` with a pure (no-I/O) RFC 854 §11.2 state machine: DATA → IAC → OPT → SB → SB_IAC. The byte-feed function signature should be something like `telnet_feed(ts, b)` returning an event tag (data byte ready / no-op / subneg complete). Caller is `session_on_readable` (or a new helper between it and `session_consume_rx`), which routes data bytes into the existing rx buffer and discards no-op bytes (IAC command escapes).
-
-`session_new` should allocate a `TelnetState` and store the pointer in `SS_TS`. `session_free` should `fl_free` it.
-
-The M1-B echo stub stays useful as a regression baseline — once M1-C lands, lines from the rx buffer still get echoed, but with IAC sequences correctly consumed mid-stream. Test with `telnet 127.0.0.1 4000` directly — real clients send IAC negotiation salvos on connect.
+Create `src/parser.cyr` (or similar): a tokenizer that splits a command
+line on whitespace with quote handling for multi-word direct objects and
+lowercase normalization. Its input is the `buf`/`len` handed to
+`cmd_on_line`; its output is a token vector the M2-B verb table consumes.
+Keep it pure (no session I/O) so it fuzzes cleanly at M2-F. Reserve the
+`SS_PLAYER` slot for M6; the parser operates on the line, not the session.
 
 ### Reference
 
-- **agora's `src/telnet.cyr`** (`/home/macro/Repos/agora/src/telnet.cyr`, ~718 lines) is the closest existing template. Same `TelCmd` / `TelOpt` / `TelState` / `TelEvent` shape; same `TS` struct field layout. Pattern is sound; **don't copy verbatim** — adapt to fit our Session struct and our single-thread-shared model (agora forks per-conn, we don't).
-- RFC 854: https://datatracker.ietf.org/doc/html/rfc854
-- RFC 1143 (Q-method, lands at M1-D): https://datatracker.ietf.org/doc/html/rfc1143
+- **agora's command path** (`/home/macro/Repos/agora/src/main.cyr`
+  around the `session_execute` / tokenizer region) is the closest
+  template — adapt to our single-thread-shared model.
+- Verb table + resolution semantics: [roadmap.md M2](roadmap.md#m2--verb-noun-parser-v030).
 
 ### Quick boot sanity
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
+cyrius test tests/cyrius-yeomans-descent.tcyr   # 52 assertions
+cyrius bench                                     # IAC parser baseline
 ./build/cyrius-yeomans-descent serve 4000
-# in another terminal: nc / telnet / python — connect, type, see echo, ^C
+# telnet 127.0.0.1 4000 — log in, type @stats, ^C
 ```
 
 ### Open ADRs
 
-Three decisions are queued ahead of their consumer milestones — see [roadmap.md § Open ADRs](roadmap.md#open-adrs). None block M1-C.
+Three decisions are queued ahead of their consumer milestones — see
+[roadmap.md § Open ADRs](roadmap.md#open-adrs). None block M2.

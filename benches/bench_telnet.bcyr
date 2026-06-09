@@ -1,0 +1,79 @@
+# cyrius-yeomans-descent benchmarks
+# Stdlib auto-included via cyrius.cyml; project modules included explicitly.
+#
+# M1-G: the Telnet IAC parser is the per-byte hot path — every inbound
+# wire byte from every connection passes through telnet_feed(). This
+# locks the M1-close baseline; re-run at every minor through 1.0 and
+# compare ns/byte against it (roadmap M9-C).
+#
+# Pattern: bench_batch_start -> tight loop -> bench_batch_stop(total) ->
+# bench_report. Sub-1us ops need batched timing to amortize the
+# clock_gettime overhead — see lib/bench.cyr header.
+
+include "src/telnet.cyr"
+
+# Fill `buf` with a representative wire stream: runs of printable data
+# interleaved with an IAC WILL ECHO negotiation triple and a CR LF per
+# line. Ends cleanly in DATA state so the parser state is identical at
+# the start of every repeat. Returns the byte length written.
+fn build_wire_mixed(buf, cap): i64 {
+    var n = 0;
+    while (n < cap - 80) {
+        var j = 0;
+        while (j < 60) { store8(buf + n, 65 + (j % 26)); n = n + 1; j = j + 1; }
+        store8(buf + n, IAC);      n = n + 1;
+        store8(buf + n, WILL);     n = n + 1;
+        store8(buf + n, OPT_ECHO); n = n + 1;
+        store8(buf + n, 13);       n = n + 1;   # CR
+        store8(buf + n, 10);       n = n + 1;   # LF
+    }
+    return n;
+}
+
+# Pure printable data — the fast path with no IAC dispatch.
+fn build_wire_data(buf, cap): i64 {
+    var n = 0;
+    while (n < cap) { store8(buf + n, 65 + (n % 26)); n = n + 1; }
+    return n;
+}
+
+fn main(): i64 {
+    alloc_init();
+
+    var cap = 4096;
+    var wire = alloc(cap);
+    var ts = telnet_state_new();
+
+    # --- Mixed traffic (data + negotiation triples) ---
+    var mlen = build_wire_mixed(wire, cap);
+    var bm = bench_new("telnet_feed mixed (per byte)");
+    var rounds = 4000;
+    bench_batch_start(bm);
+    var r = 0;
+    while (r < rounds) {
+        var k = 0;
+        while (k < mlen) { telnet_feed(ts, load8(wire + k)); k = k + 1; }
+        telnet_tx_consume(ts);   # drop negotiation replies; not the measured path
+        r = r + 1;
+    }
+    bench_batch_stop(bm, rounds * mlen);
+    bench_report(bm);
+
+    # --- Pure data (fast path) ---
+    var dlen = build_wire_data(wire, cap);
+    var bd = bench_new("telnet_feed pure-data (per byte)");
+    bench_batch_start(bd);
+    var r2 = 0;
+    while (r2 < rounds) {
+        var k2 = 0;
+        while (k2 < dlen) { telnet_feed(ts, load8(wire + k2)); k2 = k2 + 1; }
+        r2 = r2 + 1;
+    }
+    bench_batch_stop(bd, rounds * dlen);
+    bench_report(bd);
+
+    return 0;
+}
+
+var r = main();
+syscall(60, r);
