@@ -44,7 +44,8 @@ enum MI {
     MI_ROOM   = 16;      # room index it occupies
     MI_TARGET = 24;      # session it is fighting (0 = none)
     MI_NEXT   = 32;      # intrusive room-occupant list
-    MI_SIZE   = 40;
+    MI_STUN   = 40;      # ticks it is stunned (skips its attack) — M5
+    MI_SIZE   = 48;
 }
 
 var g_mob_tpls      = 0;   # contiguous block of MT_SIZE templates
@@ -74,6 +75,8 @@ fn mi_room(m): i64        { return load64(m + MI_ROOM); }
 fn mi_target(m): i64      { return load64(m + MI_TARGET); }
 fn mi_set_target(m, v): i64 { store64(m + MI_TARGET, v); return 0; }
 fn mi_next(m): i64        { return load64(m + MI_NEXT); }
+fn mi_stun(m): i64        { return load64(m + MI_STUN); }
+fn mi_set_stun(m, v): i64 { store64(m + MI_STUN, v); return 0; }
 fn mi_name_ptr(m): i64    { return mt_name_ptr(mi_tpl(m)); }
 fn mi_name_len(m): i64    { return mt_name_len(mi_tpl(m)); }
 
@@ -223,6 +226,7 @@ fn mob_spawn(tpl, room_idx): i64 {
     store64(m + MI_HP, mt_hp(tpl));
     store64(m + MI_ROOM, room_idx);
     store64(m + MI_TARGET, 0);
+    store64(m + MI_STUN, 0);
     # push onto the room's mob list
     var r = room_at(room_idx);
     store64(m + MI_NEXT, room_mob_head(r));

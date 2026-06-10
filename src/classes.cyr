@@ -1,0 +1,488 @@
+# classes.cyr — M5 classes & abilities.
+#
+# The four callings (Pikeman / Splicer / Courier / Chaplain) load from
+# `data/classes.cyml` (CYML, kind="class"): starting attributes
+# (STR/DEX/CON/TEC) plus the derived combat profile (HP/AC/hit/damage) and
+# an energy pool. Class selection (M5-A) is a login sub-phase; apply_class
+# (M5-B) stamps the chosen class onto the session, replacing the flat
+# PlayerStat defaults. Abilities + cooldowns (M5-C..G) live in the second
+# half of this file.
+#
+# Included after combat.cyr so ability handlers can use the combat
+# primitives (roll, combat_try_hit, mob hp); the login hooks
+# (class_send_prompt / login_on_class) are forward-referenced from
+# session.cyr.
+
+# === Class data layout ===
+enum CL {
+    CL_ID       = 0;     # inline id (CL_ID_CAP)
+    CL_ID_LEN   = 32;
+    CL_NAME     = 40;    # inline display name (CL_NAME_CAP)
+    CL_NAME_LEN = 72;
+    CL_ROLE     = 80;    # inline role tag (CL_ROLE_CAP)
+    CL_ROLE_LEN = 112;
+    CL_STR      = 120;
+    CL_DEX      = 128;
+    CL_CON      = 136;
+    CL_TEC      = 144;
+    CL_HP       = 152;
+    CL_AC       = 160;
+    CL_HIT      = 168;
+    CL_NDICE    = 176;
+    CL_DSIZE    = 184;
+    CL_DMOD     = 192;
+    CL_ENERGY   = 200;
+    CL_DESC_PTR = 208;
+    CL_DESC_LEN = 216;
+    CL_SIZE     = 224;
+}
+enum ClCap { CL_ID_CAP = 32; CL_NAME_CAP = 32; CL_ROLE_CAP = 32; }
+
+var g_classes     = 0;
+var g_class_count = 0;
+
+fn cl_at(i): i64        { return g_classes + i * CL_SIZE; }
+fn cl_name_ptr(c): i64  { return c + CL_NAME; }
+fn cl_name_len(c): i64  { return load64(c + CL_NAME_LEN); }
+fn cl_role_ptr(c): i64  { return c + CL_ROLE; }
+fn cl_role_len(c): i64  { return load64(c + CL_ROLE_LEN); }
+fn cl_hp(c): i64        { return load64(c + CL_HP); }
+fn cl_ac(c): i64        { return load64(c + CL_AC); }
+fn cl_hit(c): i64       { return load64(c + CL_HIT); }
+fn cl_energy(c): i64    { return load64(c + CL_ENERGY); }
+fn cl_str(c): i64       { return load64(c + CL_STR); }
+fn cl_dex(c): i64       { return load64(c + CL_DEX); }
+fn cl_con(c): i64       { return load64(c + CL_CON); }
+fn cl_tec(c): i64       { return load64(c + CL_TEC); }
+
+# Class id of a session (or -1), and its display name (for who / stats).
+fn session_class(s): i64 { return load64(s + SS_CLASS); }
+fn class_name_ptr(idx): i64 { return cl_at(idx) + CL_NAME; }
+fn class_name_len(idx): i64 { return load64(cl_at(idx) + CL_NAME_LEN); }
+
+# === world_load_classes — parse data/classes.cyml into the class table. ===
+fn world_load_classes(path): i64 {
+    var r = cyml_parse_file_r(path);
+    if (is_ok(r) == 0) { return WL_ERR_IO; }
+    var doc = result_unwrap(r);
+    var n = cyml_doc_entry_count(doc);
+    if (n <= 0)          { return WL_ERR_EMPTY; }
+    if (n > MAX_ENTRIES) { return WL_ERR_OVERCAP; }
+
+    g_classes = alloc(n * CL_SIZE);
+    memset(g_classes, 0, n * CL_SIZE);
+    g_class_count = n;
+
+    var i = 0;
+    while (i < n) {
+        var e = cyml_doc_entry(doc, i);
+        var hs = str_new(cyml_entry_header(e), cyml_entry_header_len(e));
+        var secs = toml_parse(hs);
+        if (vec_len(secs) == 0) { return WL_ERR_NOID; }
+        var pairs = toml_section_pairs(vec_get(secs, 0));
+
+        var kind = toml_get(pairs, "kind");
+        if (kind == 0) { return WL_ERR_KIND; }
+        if (str_eq_cstr(kind, "class") == 0) { return WL_ERR_KIND; }
+
+        var c = cl_at(i);
+        var id = toml_get(pairs, "id");
+        if (id == 0) { return WL_ERR_NOID; }
+        store64(c + CL_ID_LEN, copy_str_capped(c + CL_ID, CL_ID_CAP, id));
+        var name = toml_get(pairs, "name");
+        if (name != 0) { store64(c + CL_NAME_LEN, copy_str_capped(c + CL_NAME, CL_NAME_CAP - 1, name)); }
+        var role = toml_get(pairs, "role");
+        if (role != 0) { store64(c + CL_ROLE_LEN, copy_str_capped(c + CL_ROLE, CL_ROLE_CAP - 1, role)); }
+
+        store64(c + CL_STR, toml_int(pairs, "str", 10));
+        store64(c + CL_DEX, toml_int(pairs, "dex", 10));
+        store64(c + CL_CON, toml_int(pairs, "con", 10));
+        store64(c + CL_TEC, toml_int(pairs, "tec", 10));
+        store64(c + CL_HP,  toml_int(pairs, "hp", 30));
+        store64(c + CL_AC,  toml_int(pairs, "ac", 8));
+        store64(c + CL_HIT, toml_int(pairs, "hit", 1));
+        store64(c + CL_ENERGY, toml_int(pairs, "energy", 20));
+
+        var nd[8]; var dd[8]; var dm[8];
+        parse_dice(toml_get(pairs, "damage"), &nd, &dd, &dm);
+        store64(c + CL_NDICE, load64(&nd));
+        store64(c + CL_DSIZE, load64(&dd));
+        store64(c + CL_DMOD,  load64(&dm));
+
+        store64(c + CL_DESC_PTR, cyml_entry_body(e));
+        store64(c + CL_DESC_LEN, cyml_entry_body_len(e));
+        i = i + 1;
+    }
+    return n;
+}
+
+# === apply_class — stamp class `idx`'s profile onto a session (M5-B). ===
+fn apply_class(s, idx): i64 {
+    var c = cl_at(idx);
+    store64(s + SS_CLASS, idx);
+    store64(s + SS_STR, cl_str(c));
+    store64(s + SS_DEX, cl_dex(c));
+    store64(s + SS_CON, cl_con(c));
+    store64(s + SS_TEC, cl_tec(c));
+    store64(s + SS_MAXHP, cl_hp(c));
+    store64(s + SS_HP, cl_hp(c));
+    store64(s + SS_AC, cl_ac(c));
+    store64(s + SS_HIT, cl_hit(c));
+    store64(s + SS_NDICE, load64(c + CL_NDICE));
+    store64(s + SS_DSIZE, load64(c + CL_DSIZE));
+    store64(s + SS_DMOD,  load64(c + CL_DMOD));
+    store64(s + SS_MAXENERGY, cl_energy(c));
+    store64(s + SS_ENERGY, cl_energy(c));
+    store64(s + SS_CD0, 0);
+    store64(s + SS_CD1, 0);
+    store64(s + SS_CD2, 0);
+    store64(s + SS_GUARD, 0);
+    store64(s + SS_STIM, 0);
+    store64(s + SS_STEALTH, 0);
+    return 0;
+}
+
+# === class_send_prompt — the M5-A selection menu. ===
+fn class_send_prompt(s): i64 {
+    session_appendtx_cstr(s, "\r\nChoose your calling in the Under-Grid:\r\n");
+    var i = 0;
+    while (i < g_class_count) {
+        var c = cl_at(i);
+        session_appendtx_cstr(s, "  ");
+        session_appendtx_num(s, i + 1);
+        session_appendtx_cstr(s, ") ");
+        session_appendtx(s, cl_name_ptr(c), cl_name_len(c));
+        session_appendtx_cstr(s, " — ");
+        session_appendtx(s, cl_role_ptr(c), cl_role_len(c));
+        session_appendtx_cstr(s, "\r\n");
+        i = i + 1;
+    }
+    session_appendtx_cstr(s, "Enter a number or name: ");
+    return 0;
+}
+
+# Is buf[0..tl) a case-insensitive prefix of class `c`'s id?
+fn class_id_prefix(c, buf, tl): i64 {
+    var idlen = load64(c + CL_ID_LEN);
+    if (tl <= 0)      { return 0; }
+    if (tl > idlen)   { return 0; }
+    var a = c + CL_ID;
+    var i = 0;
+    while (i < tl) {
+        if (ascii_lower(load8(a + i) & 0xFF) != ascii_lower(load8(buf + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Resolve a class-selection line to a class index, or -1.
+fn class_by_input(buf, len): i64 {
+    var st = 0;
+    while (st < len) {
+        var c = load8(buf + st) & 0xFF;
+        if (c != 32) { if (c != 9) { break; } }
+        st = st + 1;
+    }
+    if (st >= len) { return 0 - 1; }
+    var en = len;
+    while (en > st) {
+        var c = load8(buf + en - 1) & 0xFF;
+        if (c != 32) { if (c != 9) { break; } }
+        en = en - 1;
+    }
+    var p = buf + st;
+    var tl = en - st;
+    if (tl <= 0) { return 0 - 1; }
+
+    if (tl == 1) {
+        var d = load8(p) & 0xFF;
+        if (d >= 49) { if (d <= 48 + g_class_count) { return d - 49; } }   # '1'..'N'
+    }
+    var i = 0;
+    while (i < g_class_count) {
+        if (class_id_prefix(cl_at(i), p, tl) == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# === login_on_class — handle the class-selection prompt (M5-A). ===
+fn login_on_class(s, buf, len): i64 {
+    if (g_class_count == 0) {
+        # No classes loaded (roomless / misconfigured) — skip into the world.
+        store64(s + SS_PHASE, PHASE_CMD);
+        session_enter_world(s);
+        session_send_cmd_prompt(s);
+        return 0;
+    }
+    var idx = class_by_input(buf, len);
+    if (idx < 0) {
+        session_appendtx_cstr(s, "No such calling. ");
+        class_send_prompt(s);
+        return 0;
+    }
+    apply_class(s, idx);
+    store64(s + SS_PHASE, PHASE_CMD);
+    session_appendtx_cstr(s, "\r\nYou take up the mantle of the ");
+    session_appendtx(s, class_name_ptr(idx), class_name_len(idx));
+    session_appendtx_cstr(s, ".\r\n");
+    session_appendtx_cstr(s, "Type \"help\" for commands.\r\n");
+    session_enter_world(s);
+    session_send_cmd_prompt(s);
+    return 0;
+}
+
+# ─────────────────────────────────────────────────────────────────────
+# M5-G — Ability framework: energy, tick-counted cooldowns, status.
+#
+# Abilities resolve the instant they're typed (between ticks), composing
+# with the 2.5 s auto-attack rather than replacing it ([ADR 0001](../docs/adr/0001-tick-based-combat-over-cooldowns.md)).
+# Each costs energy and locks its cooldown slot for N ticks; classes_upkeep
+# (run every tick from combat_tick_all) regenerates energy and decays
+# cooldowns + buffs.
+
+enum AbilityConst { ENERGY_REGEN = 3; }
+
+# Does the session's class have id `cstr`?
+fn cl_id_eq(idx, cstr): i64 {
+    if (idx < 0) { return 0; }
+    var c = cl_at(idx);
+    var len = load64(c + CL_ID_LEN);
+    var a = c + CL_ID;
+    var i = 0;
+    while (i < len) {
+        var ch = load8(cstr + i) & 0xFF;
+        if (ch == 0) { return 0; }
+        if ((load8(a + i) & 0xFF) != ch) { return 0; }
+        i = i + 1;
+    }
+    if ((load8(cstr + i) & 0xFF) != 0) { return 0; }
+    return 1;
+}
+
+# Per-tick upkeep for one session: energy regen, cooldown + buff decay.
+fn classes_upkeep(s): i64 {
+    var e = load64(s + SS_ENERGY) + ENERGY_REGEN;
+    if (e > load64(s + SS_MAXENERGY)) { e = load64(s + SS_MAXENERGY); }
+    store64(s + SS_ENERGY, e);
+    if (load64(s + SS_CD0) > 0) { store64(s + SS_CD0, load64(s + SS_CD0) - 1); }
+    if (load64(s + SS_CD1) > 0) { store64(s + SS_CD1, load64(s + SS_CD1) - 1); }
+    if (load64(s + SS_CD2) > 0) { store64(s + SS_CD2, load64(s + SS_CD2) - 1); }
+    if (load64(s + SS_GUARD) > 0) { store64(s + SS_GUARD, load64(s + SS_GUARD) - 1); }
+    if (load64(s + SS_STIM) > 0)  { store64(s + SS_STIM, load64(s + SS_STIM) - 1); }
+    return 0;
+}
+
+# Common class / cooldown / energy gate for a self-targeted ability.
+# Spends on success (returns 1); on a block, sends the reason + returns 0.
+fn self_prep(s, owner, slot, cost, cd, vname): i64 {
+    if (cl_id_eq(load64(s + SS_CLASS), owner) == 0) {
+        session_appendtx_cstr(s, "You don't know how to ");
+        session_appendtx_cstr(s, vname);
+        session_appendtx_cstr(s, ".\r\n");
+        return 0;
+    }
+    var cda = s + SS_CD0 + slot * 8;
+    if (load64(cda) > 0) {
+        session_appendtx_cstr(s, vname);
+        session_appendtx_cstr(s, " isn't ready — ");
+        session_appendtx_num(s, load64(cda));
+        session_appendtx_cstr(s, " more tick(s).\r\n");
+        return 0;
+    }
+    if (load64(s + SS_ENERGY) < cost) {
+        session_appendtx_cstr(s, "Not enough energy.\r\n");
+        return 0;
+    }
+    store64(s + SS_ENERGY, load64(s + SS_ENERGY) - cost);
+    store64(cda, cd);
+    return 1;
+}
+
+# Same gate for an offensive ability; also requires an engaged, present,
+# living target. Returns the target mob on success, else 0 (reason sent).
+fn off_prep(s, owner, slot, cost, cd, vname): i64 {
+    if (cl_id_eq(load64(s + SS_CLASS), owner) == 0) {
+        session_appendtx_cstr(s, "You don't know how to ");
+        session_appendtx_cstr(s, vname);
+        session_appendtx_cstr(s, ".\r\n");
+        return 0;
+    }
+    var m = load64(s + SS_TARGET);
+    if (m == 0) { session_appendtx_cstr(s, "You aren't fighting anything.\r\n"); return 0; }
+    if (mi_hp(m) <= 0) { store64(s + SS_TARGET, 0); session_appendtx_cstr(s, "Your target is already down.\r\n"); return 0; }
+    if (mi_room(m) != load64(s + SS_ROOM)) { session_appendtx_cstr(s, "Your target isn't here.\r\n"); return 0; }
+    var cda = s + SS_CD0 + slot * 8;
+    if (load64(cda) > 0) {
+        session_appendtx_cstr(s, vname);
+        session_appendtx_cstr(s, " isn't ready — ");
+        session_appendtx_num(s, load64(cda));
+        session_appendtx_cstr(s, " more tick(s).\r\n");
+        return 0;
+    }
+    if (load64(s + SS_ENERGY) < cost) {
+        session_appendtx_cstr(s, "Not enough energy.\r\n");
+        return 0;
+    }
+    store64(s + SS_ENERGY, load64(s + SS_ENERGY) - cost);
+    store64(cda, cd);
+    return m;
+}
+
+# Deal `dmg` to mob `m` with a lead-in line; handles the kill.
+fn ability_strike(s, m, dmg, lead): i64 {
+    mi_set_hp(m, mi_hp(m) - dmg);
+    session_appendtx_cstr(s, ansi_hit());
+    session_appendtx_cstr(s, lead);
+    session_appendtx_cstr(s, mi_name_ptr(m));
+    session_appendtx_cstr(s, " for ");
+    session_appendtx_num(s, dmg);
+    session_appendtx_cstr(s, " damage!");
+    session_appendtx_cstr(s, ansi_reset());
+    session_appendtx_cstr(s, "\r\n");
+    if (mi_hp(m) <= 0) { mob_died(s, m); }
+    return 0;
+}
+
+# Heal the player by `amt` (capped at max HP).
+fn ability_heal(s, amt): i64 {
+    var hp = load64(s + SS_HP) + amt;
+    if (hp > load64(s + SS_MAXHP)) { hp = load64(s + SS_MAXHP); }
+    store64(s + SS_HP, hp);
+    session_appendtx_cstr(s, "Wounds close — +");
+    session_appendtx_num(s, amt);
+    session_appendtx_cstr(s, " hp.\r\n");
+    return 0;
+}
+
+# Common tail: status line, prompt, flush.
+fn ability_tail(s): i64 {
+    session_append_condition(s);
+    session_send_cmd_prompt(s);
+    combat_flush(s);
+    return 0;
+}
+
+# Append the player's class abilities to the help text (M5).
+fn class_append_abilities(s): i64 {
+    var cls = load64(s + SS_CLASS);
+    if (cls < 0) { return 0; }
+    session_appendtx_cstr(s, "abilities (");
+    session_appendtx(s, class_name_ptr(cls), class_name_len(cls));
+    session_appendtx_cstr(s, "): ");
+    if (cl_id_eq(cls, "pikeman")  == 1) { session_appendtx_cstr(s, "bash brace cleave"); }
+    if (cl_id_eq(cls, "splicer")  == 1) { session_appendtx_cstr(s, "hack overload emp"); }
+    if (cl_id_eq(cls, "courier")  == 1) { session_appendtx_cstr(s, "sneak backstab bypass"); }
+    if (cl_id_eq(cls, "chaplain") == 1) { session_appendtx_cstr(s, "patch stim rally"); }
+    session_appendtx_cstr(s, "\r\n");
+    return 0;
+}
+
+# === cmd_ability — dispatch the 12 class abilities (M5-C..F). ===
+fn cmd_ability(s, pa, verb): i64 {
+    var tec = load64(s + SS_TEC);
+    var dex = load64(s + SS_DEX);
+
+    # --- Pikeman (STR/CON melee) ---
+    if (verb == VERB_BASH) {
+        var m = off_prep(s, "pikeman", 0, 6, 2, "bash");
+        if (m != 0) {
+            mi_set_stun(m, 1);
+            ability_strike(s, m, roll(load64(s + SS_NDICE), load64(s + SS_DSIZE), load64(s + SS_DMOD)) + 2, "You smash your shock-pike into ");
+            session_appendtx_cstr(s, "It reels, stunned.\r\n");
+        }
+        return ability_tail(s);
+    }
+    if (verb == VERB_BRACE) {
+        if (self_prep(s, "pikeman", 1, 5, 3, "brace") == 1) {
+            store64(s + SS_GUARD, 3);
+            session_appendtx_cstr(s, "You set your feet and raise your guard.\r\n");
+        }
+        return ability_tail(s);
+    }
+    if (verb == VERB_CLEAVE) {
+        var m = off_prep(s, "pikeman", 2, 8, 3, "cleave");
+        if (m != 0) {
+            var d = roll(load64(s + SS_NDICE), load64(s + SS_DSIZE), load64(s + SS_DMOD));
+            d = d + roll(load64(s + SS_NDICE), load64(s + SS_DSIZE), load64(s + SS_DMOD));
+            ability_strike(s, m, d, "You cleave a brutal arc through ");
+        }
+        return ability_tail(s);
+    }
+
+    # --- Splicer (TEC caster) ---
+    if (verb == VERB_HACK) {
+        var m = off_prep(s, "splicer", 0, 6, 1, "hack");
+        if (m != 0) { ability_strike(s, m, roll(1, 6, 0) + tec / 2, "Your intrusion spikes through "); }
+        return ability_tail(s);
+    }
+    if (verb == VERB_OVERLOAD) {
+        var m = off_prep(s, "splicer", 1, 12, 4, "overload");
+        if (m != 0) { ability_strike(s, m, roll(3, 6, 0) + tec, "You overvolt every circuit in "); }
+        return ability_tail(s);
+    }
+    if (verb == VERB_EMP) {
+        var m = off_prep(s, "splicer", 2, 8, 4, "emp");
+        if (m != 0) {
+            mi_set_stun(m, 2);
+            ability_strike(s, m, roll(1, 4, 0), "An EMP burst seizes the systems of ");
+            session_appendtx_cstr(s, "Its servos lock up.\r\n");
+        }
+        return ability_tail(s);
+    }
+
+    # --- Courier (DEX rogue) ---
+    if (verb == VERB_SNEAK) {
+        if (self_prep(s, "courier", 0, 4, 2, "sneak") == 1) {
+            store64(s + SS_STEALTH, 1);
+            session_appendtx_cstr(s, "You melt into the shadows, blade ready.\r\n");
+        }
+        return ability_tail(s);
+    }
+    if (verb == VERB_BACKSTAB) {
+        var m = off_prep(s, "courier", 1, 6, 2, "backstab");
+        if (m != 0) {
+            var base = roll(load64(s + SS_NDICE), load64(s + SS_DSIZE), load64(s + SS_DMOD));
+            var d = base + dex / 2;
+            if (load64(s + SS_STEALTH) > 0) {
+                d = base * 3 + dex;
+                store64(s + SS_STEALTH, 0);
+                ability_strike(s, m, d, "From the dark you drive your monoblade into ");
+            } else {
+                ability_strike(s, m, d, "You slip past the guard of ");
+            }
+        }
+        return ability_tail(s);
+    }
+    if (verb == VERB_BYPASS) {
+        if (self_prep(s, "courier", 2, 5, 3, "bypass") == 1) {
+            store64(s + SS_GUARD, 2);
+            session_appendtx_cstr(s, "You shift onto the balls of your feet, ready to slip every blow.\r\n");
+        }
+        return ability_tail(s);
+    }
+
+    # --- Chaplain (TEC/CON support) ---
+    if (verb == VERB_PATCH) {
+        if (self_prep(s, "chaplain", 0, 6, 1, "patch") == 1) { ability_heal(s, roll(2, 6, 0) + tec / 2); }
+        return ability_tail(s);
+    }
+    if (verb == VERB_STIM) {
+        if (self_prep(s, "chaplain", 1, 6, 3, "stim") == 1) {
+            store64(s + SS_STIM, 3);
+            session_appendtx_cstr(s, "A combat stimulant floods your system — you feel fast and strong.\r\n");
+        }
+        return ability_tail(s);
+    }
+    if (verb == VERB_RALLY) {
+        if (self_prep(s, "chaplain", 2, 12, 5, "rally") == 1) {
+            ability_heal(s, roll(3, 6, 0) + tec);
+            store64(s + SS_STIM, 3);
+            session_appendtx_cstr(s, "You rally — blood up, faith harder than the steel around you.\r\n");
+        }
+        return ability_tail(s);
+    }
+
+    session_appendtx_cstr(s, "You can't do that.\r\n");
+    return ability_tail(s);
+}

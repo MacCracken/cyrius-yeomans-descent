@@ -4,6 +4,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-09
+
+M5 — the four classes go from text-table flavor to playable mechanics.
+Character creation now asks your calling; each class brings its own
+attributes, combat profile, and three abilities that compose with the
+2.5 s tick rather than replacing it ([ADR 0001](docs/adr/0001-tick-based-combat-over-cooldowns.md)).
+All four can clear the Hub solo and kill the Foundry Sentinel boss
+without dying — each through its own identity (the Pikeman tanks, the
+Splicer bursts, the Courier strikes from the dark, the Chaplain sustains).
+
+### Added
+
+- **Classes** (`src/classes.cyr`, `data/classes.cyml`). Pikeman / Splicer /
+  Courier / Chaplain, each with STR/DEX/CON/TEC, a derived combat profile
+  (HP/AC/hit/damage), and an energy pool. `world_load_classes` parses the
+  CYML; `apply_class` stamps the chosen class onto the session, replacing
+  the M4 flat defaults.
+- **M5-A — Class selection.** A login sub-phase (`PHASE_CLASS`) between the
+  name prompt and world entry: a numbered menu; pick by number or name
+  (prefix-matched); invalid picks re-prompt.
+- **M5-G — Ability framework.** Per-session energy (regenerates each tick),
+  three tick-counted cooldown slots, class-gating, and status effects —
+  mob stun, an AC buff (brace/bypass), a damage+hit buff (stim), and
+  stealth (backstab priming) — all folded into `combat_round`. Abilities
+  resolve the instant they're typed, composing with the auto-attack.
+- **M5-C/D/E/F — twelve abilities.** Pikeman `bash` (stun) / `brace` /
+  `cleave`; Splicer `hack` / `overload` / `emp` (TEC-scaled, stun);
+  Courier `sneak` / `backstab` (triple damage from stealth) / `bypass`;
+  Chaplain `patch` / `stim` / `rally` (heal + buff). Cooldown / energy
+  state is legible in the per-round condition line.
+- **M5-H — solo verification.** A fresh-server-per-class harness confirms
+  each class kills the Sentinel without dying twice.
+- **`examine me`** is now a character sheet (class, HP/energy, attributes,
+  AC); in-game `help` lists the player's class abilities.
+- **`YD_TICK_MS`** env override for the combat-tick interval (mirrors
+  `YD_IDLE_MS`) — fast ticks make combat verification quick.
+- Unit suite grown 203 → 232 assertions (class load + fields, `class_by_input`
+  number/prefix/trim/invalid, `apply_class`, `classes_upkeep` regen/decay,
+  effective-stat buff helpers).
+
+### Changed
+
+- The login flow gained the class step: `login_on_name` now advances to
+  `PHASE_CLASS` (not straight to the world); `login_on_class` applies the
+  class and enters the world.
+- `combat_round` reads buffed effective stats (`player_eff_ac` /
+  `player_eff_hit` / `player_dmg_bonus`) and skips a stunned mob's turn;
+  `combat_tick_all` runs `classes_upkeep` for every logged-in session.
+- The combat load bench (`bench_combat.bcyr`) now includes `classes.cyr`
+  and exercises per-tick upkeep alongside combat (p99 ≈ 57 µs).
+
 ## [0.5.0] — 2026-06-09
 
 M4 — the tick gets a job. The placeholder 2.5 s Combat Tick from M1 now

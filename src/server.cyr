@@ -104,6 +104,11 @@ var g_session_head = 0;
 # startup via the YD_IDLE_MS env var (testing / ops tuning).
 var g_idle_timeout_ms = 300000;
 
+# Combat-tick interval (ms). ADR 0001's 2.5 s by default; overridable via
+# YD_TICK_MS for testing / ops (a fast tick makes combat verification
+# quick). Read once at serve start.
+var g_tick_ms = 2500;
+
 # Prepend a session to the active list.
 fn session_list_push(s): i64 {
     store64(s + SS_PREV, 0);
@@ -353,6 +358,7 @@ fn combat_tick_all(): i64 {
         var nxt = load64(s + SS_NEXT);
         if (load64(s + SS_PHASE) == PHASE_CMD) {
             if (load64(s + SS_TARGET) != 0) { combat_round(s); }
+            classes_upkeep(s);   # energy regen + cooldown / buff decay (M5)
         }
         s = nxt;
     }
@@ -486,9 +492,15 @@ fn dispatch_session(epfd, s, events, now_ms): i64 {
 # positive integer. Invalid / absent → keep the 5-minute default.
 fn apply_idle_env(): i64 {
     var v = getenv("YD_IDLE_MS");
-    if (v == 0) { return 0; }
-    var ms = atoi(v);
-    if (ms > 0) { g_idle_timeout_ms = ms; }
+    if (v != 0) {
+        var ms = atoi(v);
+        if (ms > 0) { g_idle_timeout_ms = ms; }
+    }
+    var tv = getenv("YD_TICK_MS");
+    if (tv != 0) {
+        var tms = atoi(tv);
+        if (tms > 0) { g_tick_ms = tms; }
+    }
     return 0;
 }
 
@@ -519,6 +531,10 @@ fn cmd_serve(port): i64 {
         print_num(wl);
         println("");
     }
+    # Player classes (M5).
+    var cc = world_load_classes("data/classes.cyml");
+    if (cc >= 0) { print_num(cc); println(" player classes"); }
+    else { println("world: no classes loaded — players spawn classless"); }
     combat_seed(clock_now_ms());   # seed the hidden-roll RNG (M4)
     println("yeoman's descent — starting event-loop listener");
     println("server: listening on port");
@@ -552,7 +568,7 @@ fn cmd_serve(port): i64 {
     epoll_add_in(epfd, lfd, TAG_LISTENER);
     epoll_add_in(epfd, sigfd, TAG_SIGNAL);
     var events_buf = alloc(MAX_EPOLL_EVENTS * EPOLL_EVENT_SIZE);
-    var next_tick = clock_now_ms() + TICK_MS;
+    var next_tick = clock_now_ms() + g_tick_ms;
     var stop = 0;
     while (stop == 0) {
         var now = clock_now_ms();
@@ -585,8 +601,8 @@ fn cmd_serve(port): i64 {
             record_tick_drift(now - next_tick);
             advance_tick();
             sweep_idle(epfd, now);
-            next_tick = next_tick + TICK_MS;
-            while (next_tick <= now) { next_tick = next_tick + TICK_MS; }
+            next_tick = next_tick + g_tick_ms;
+            while (next_tick <= now) { next_tick = next_tick + g_tick_ms; }
         }
     }
     println("server: shutdown signal received; closing listener.");

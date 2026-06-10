@@ -254,6 +254,20 @@ enum Verb {
     VERB_QUIT      = 24;
     VERB_SAVE      = 25;
     VERB_HELP      = 26;
+
+    # class abilities (M5) — gated to the owning class at dispatch.
+    VERB_BASH      = 27;   # Pikeman
+    VERB_BRACE     = 28;
+    VERB_CLEAVE    = 29;
+    VERB_HACK      = 30;   # Splicer
+    VERB_OVERLOAD  = 31;
+    VERB_EMP       = 32;
+    VERB_SNEAK     = 33;   # Courier
+    VERB_BACKSTAB  = 34;
+    VERB_BYPASS    = 35;
+    VERB_PATCH     = 36;   # Chaplain
+    VERB_STIM      = 37;
+    VERB_RALLY     = 38;
 }
 
 # === verb_lookup — resolve token `i` to a Verb id (aliases folded in).
@@ -308,7 +322,27 @@ fn verb_lookup(pa, i): i64 {
     if (tok_eq(pa, i, "save") == 1) { return VERB_SAVE; }
     if (tok_eq(pa, i, "help") == 1) { return VERB_HELP; }
 
+    # class abilities (M5)
+    if (tok_eq(pa, i, "bash")     == 1) { return VERB_BASH; }
+    if (tok_eq(pa, i, "brace")    == 1) { return VERB_BRACE; }
+    if (tok_eq(pa, i, "cleave")   == 1) { return VERB_CLEAVE; }
+    if (tok_eq(pa, i, "hack")     == 1) { return VERB_HACK; }
+    if (tok_eq(pa, i, "overload") == 1) { return VERB_OVERLOAD; }
+    if (tok_eq(pa, i, "emp")      == 1) { return VERB_EMP; }
+    if (tok_eq(pa, i, "sneak")    == 1) { return VERB_SNEAK; }
+    if (tok_eq(pa, i, "backstab") == 1) { return VERB_BACKSTAB; }
+    if (tok_eq(pa, i, "bypass")   == 1) { return VERB_BYPASS; }
+    if (tok_eq(pa, i, "patch")    == 1) { return VERB_PATCH; }
+    if (tok_eq(pa, i, "stim")     == 1) { return VERB_STIM; }
+    if (tok_eq(pa, i, "rally")    == 1) { return VERB_RALLY; }
+
     return VERB_UNKNOWN;
+}
+
+# True for the 12 class-ability verbs (M5).
+fn verb_is_ability(v): i64 {
+    if (v >= VERB_BASH) { if (v <= VERB_RALLY) { return 1; } }
+    return 0;
 }
 
 # === verb_name — canonical lowercase name of a Verb id (for prose). ===

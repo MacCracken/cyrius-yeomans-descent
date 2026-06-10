@@ -8,6 +8,7 @@ include "src/mob.cyr"
 include "src/session.cyr"
 include "src/item.cyr"
 include "src/combat.cyr"
+include "src/classes.cyr"
 
 # Feed a byte and assert the returned TelEvent.
 fn feed_is(ts, b, want_ev, name): i64 {
@@ -566,6 +567,70 @@ fn test_combat(): i64 {
     return 0;
 }
 
+# === M5 — classes, selection, abilities ===
+fn test_classes(): i64 {
+    test_group("classes");
+
+    assert_eq(world_load_classes("data/classes.cyml"), 4, "4 classes load");
+    var pk = cl_at(0);
+    assert_eq(cl_str(pk), 16, "pikeman STR 16");
+    assert_eq(cl_hp(pk),  40, "pikeman HP 40");
+    assert_eq(cl_ac(pk),  5,  "pikeman AC 5");
+    assert_eq(cl_id_eq(0, "pikeman"),  1, "class 0 is pikeman");
+    assert_eq(cl_id_eq(1, "splicer"),  1, "class 1 is splicer");
+    assert_eq(cl_id_eq(0, "splicer"),  0, "class 0 is not splicer");
+    assert_eq(cl_id_eq(0 - 1, "pikeman"), 0, "no class → no match");
+
+    # class_by_input: number, prefix, trimmed, invalid, out-of-range.
+    assert_eq(class_by_input("1", 1),          0,     "'1' → pikeman");
+    assert_eq(class_by_input("4", 1),          3,     "'4' → chaplain");
+    assert_eq(class_by_input("spli", 4),       1,     "'spli' → splicer");
+    assert_eq(class_by_input("  courier ", 10), 2,    "trimmed → courier");
+    assert_eq(class_by_input("wizard", 6),     0 - 1, "unknown → -1");
+    assert_eq(class_by_input("5", 1),          0 - 1, "digit out of range → -1");
+
+    # apply_class onto a fabricated session slab.
+    var s = fl_alloc(SS_SIZE);
+    memset(s, 0, SS_SIZE);
+    apply_class(s, 0);
+    assert_eq(load64(s + SS_CLASS),     0,  "class index set");
+    assert_eq(load64(s + SS_HP),        40, "hp from class");
+    assert_eq(load64(s + SS_MAXHP),     40, "maxhp from class");
+    assert_eq(load64(s + SS_STR),       16, "str from class");
+    assert_eq(load64(s + SS_ENERGY),    20, "energy from class");
+
+    # classes_upkeep: energy regen caps, cooldown + buff decay floor at 0.
+    store64(s + SS_ENERGY, 19);
+    store64(s + SS_CD0, 2);
+    store64(s + SS_GUARD, 2);
+    store64(s + SS_STIM, 1);
+    classes_upkeep(s);
+    assert_eq(load64(s + SS_ENERGY), 20, "energy regen caps at max");
+    assert_eq(load64(s + SS_CD0),    1,  "cooldown -1");
+    assert_eq(load64(s + SS_GUARD),  1,  "guard -1");
+    assert_eq(load64(s + SS_STIM),   0,  "stim expired");
+    classes_upkeep(s);
+    classes_upkeep(s);
+    assert_eq(load64(s + SS_CD0), 0, "cooldown floors at 0");
+    fl_free(s);
+
+    # Effective-stat helpers (combat.cyr buffs).
+    var s2 = fl_alloc(SS_SIZE);
+    memset(s2, 0, SS_SIZE);
+    store64(s2 + SS_AC, 8);
+    store64(s2 + SS_HIT, 1);
+    assert_eq(player_eff_ac(s2),  8, "no guard → base AC");
+    assert_eq(player_eff_hit(s2), 1, "no stim → base hit");
+    store64(s2 + SS_GUARD, 2);
+    assert_eq(player_eff_ac(s2),  5, "guard lowers AC by 3");
+    store64(s2 + SS_STIM, 2);
+    assert_eq(player_eff_hit(s2),    3, "stim +2 hit");
+    assert_eq(player_dmg_bonus(s2),  2, "stim +2 damage");
+    fl_free(s2);
+
+    return 0;
+}
+
 # === M1-F — idle predicate ===
 fn test_idle(): i64 {
     test_group("idle");
@@ -597,6 +662,7 @@ fn main() {
     test_qual();
     test_world();
     test_combat();
+    test_classes();
     test_idle();
 
     return assert_summary();

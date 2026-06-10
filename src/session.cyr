@@ -49,7 +49,21 @@ enum SS {
     SS_DSIZE      = 200;  #                die size
     SS_DMOD       = 208;  #                flat modifier
     SS_INV        = 216;  # head of the player's inventory list (M4-E)
-    SS_SIZE       = 224;
+    # Class + attributes + ability state (M5).
+    SS_CLASS      = 224;  # class index (-1 until chosen)
+    SS_STR        = 232;  # strength    — physical damage
+    SS_DEX        = 240;  # dexterity   — accuracy / evasion
+    SS_CON        = 248;  # constitution — max HP
+    SS_TEC        = 256;  # tech        — ability power
+    SS_ENERGY     = 264;  # current ability energy
+    SS_MAXENERGY  = 272;
+    SS_CD0        = 280;  # ability-slot 0 cooldown (ticks remaining)
+    SS_CD1        = 288;  # ability-slot 1 cooldown
+    SS_CD2        = 296;  # ability-slot 2 cooldown
+    SS_GUARD      = 304;  # AC-buff ticks remaining (brace / bypass)
+    SS_STIM       = 312;  # damage/hit-buff ticks remaining (stim)
+    SS_STEALTH    = 320;  # 1 while sneaking (backstab primed)
+    SS_SIZE       = 328;
 }
 
 # The published epoll fd, used by room broadcasts (M3-C) and combat
@@ -80,8 +94,9 @@ enum SessConst {
 }
 
 enum Phase {
-    PHASE_NAME = 0;       # awaiting name entry (first prompt after MOTD)
-    PHASE_CMD  = 1;       # accepting commands (echo stub until M2)
+    PHASE_NAME  = 0;      # awaiting name entry (first prompt after MOTD)
+    PHASE_CLASS = 2;      # awaiting class selection (M5-A)
+    PHASE_CMD   = 1;      # in the world, accepting commands
 }
 
 # === session_new — alloc + zero-init a Session for an accepted fd. ===
@@ -110,6 +125,7 @@ fn session_new(fd, now_ms): i64 {
     store64(s + SS_NDICE, PC_NDICE);
     store64(s + SS_DSIZE, PC_DSIZE);
     store64(s + SS_DMOD, PC_DMOD);
+    store64(s + SS_CLASS, 0 - 1);   # no class until selected (M5)
     return s;
 }
 
@@ -322,16 +338,14 @@ fn login_on_name(s, buf, len): i64 {
         session_send_name_prompt(s);
         return 0;
     }
-    # Capture the name (unauthenticated) and advance to the command phase.
+    # Capture the name (unauthenticated) and advance to class selection.
     memcpy(load64(s + SS_NAME_BUF), buf, len);
     store64(s + SS_NAME_LEN, len);
-    store64(s + SS_PHASE, PHASE_CMD);
+    store64(s + SS_PHASE, PHASE_CLASS);
     session_appendtx_cstr(s, "\r\nWelcome, ");
     session_appendtx(s, buf, len);
     session_appendtx_cstr(s, ". The Under-Grid stirs.\r\n");
-    session_appendtx_cstr(s, "Type \"help\" for commands. (items and combat arrive at M4-M5.)\r\n");
-    session_enter_world(s);
-    session_send_cmd_prompt(s);
+    class_send_prompt(s);   # forward ref → classes.cyr (M5-A)
     return 0;
 }
 
@@ -471,6 +485,7 @@ fn cmd_help_text(s): i64 {
     session_appendtx_cstr(s, "fight   : kill flee\r\n");
     session_appendtx_cstr(s, "social  : say tell emote\r\n");
     session_appendtx_cstr(s, "session : quit save help   admin: @stats\r\n");
+    class_append_abilities(s);   # forward ref → classes.cyr (M5)
     return 0;
 }
 
@@ -647,7 +662,33 @@ fn examine_self(s): i64 {
     session_appendtx_cstr(s, ansi_actor());
     session_appendtx(s, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
     session_appendtx_cstr(s, ansi_reset());
-    session_appendtx_cstr(s, ", a wanderer of the Under-Grid. Unburdened, for now.\r\n");
+    var cls = load64(s + SS_CLASS);
+    if (cls >= 0) {
+        session_appendtx_cstr(s, ", ");
+        session_appendtx(s, class_name_ptr(cls), class_name_len(cls));   # forward ref → classes.cyr
+    }
+    session_appendtx_cstr(s, ".\r\n");
+    # Vitals + attributes.
+    session_appendtx_cstr(s, "  HP ");
+    session_appendtx_num(s, load64(s + SS_HP));
+    session_appendtx_cstr(s, "/");
+    session_appendtx_num(s, load64(s + SS_MAXHP));
+    session_appendtx_cstr(s, "   Energy ");
+    session_appendtx_num(s, load64(s + SS_ENERGY));
+    session_appendtx_cstr(s, "/");
+    session_appendtx_num(s, load64(s + SS_MAXENERGY));
+    session_appendtx_cstr(s, "\r\n");
+    session_appendtx_cstr(s, "  STR ");
+    session_appendtx_num(s, load64(s + SS_STR));
+    session_appendtx_cstr(s, "  DEX ");
+    session_appendtx_num(s, load64(s + SS_DEX));
+    session_appendtx_cstr(s, "  CON ");
+    session_appendtx_num(s, load64(s + SS_CON));
+    session_appendtx_cstr(s, "  TEC ");
+    session_appendtx_num(s, load64(s + SS_TEC));
+    session_appendtx_cstr(s, "   AC ");
+    session_appendtx_num(s, load64(s + SS_AC));
+    session_appendtx_cstr(s, "\r\n");
     return 0;
 }
 
@@ -702,6 +743,7 @@ fn cmd_dispatch(s, pa, buf, len): i64 {
 
     if (verb == VERB_KILL)  { return cmd_kill(s, pa); }
     if (verb == VERB_FLEE)  { return cmd_flee(s); }
+    if (verb_is_ability(verb) == 1) { return cmd_ability(s, pa, verb); }
 
     # Remaining item verbs all take a direct object.
     return cmd_object(s, pa, verb);
@@ -730,6 +772,9 @@ fn cmd_on_line(s, buf, len): i64 {
 fn session_on_line(s, buf, len): i64 {
     if (load64(s + SS_PHASE) == PHASE_NAME) {
         return login_on_name(s, buf, len);
+    }
+    if (load64(s + SS_PHASE) == PHASE_CLASS) {
+        return login_on_class(s, buf, len);   # forward ref → classes.cyr
     }
     return cmd_on_line(s, buf, len);
 }

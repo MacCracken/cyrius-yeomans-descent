@@ -7,16 +7,16 @@
 
 ## Version
 
-**0.5.0** — M4 close, 2026-06-09. The Combat Tick has a job. Mobs
-(`src/mob.cyr`) and items/corpses (`src/item.cyr`) load from CYML; combat
-(`src/combat.cyr`) resolves a hidden-roll round per 2.5 s tick inside
-`advance_tick`. A player `kill`s a mob, both trade `d20`-vs-AC attacks
-each tick, mobs die into lootable corpses (`get all from corpse`), and
-players respawn at the Hub. The full loop — explore, fight, loot, carry,
-die, respawn — is playable end to end. Load-proven: 32 players × 64 mobs
-tick at p99 ≈ 62 µs, well inside the 50 ms budget. The world (0.4.0),
-parser (0.3.0), wire (0.2.0), and tick scheduler (0.1.0) underneath are
-intact. Classes (M5) turn the player's flat default stats into mechanics.
+**0.6.0** — M5 close, 2026-06-09. The four classes are playable. Character
+creation asks your calling (Pikeman / Splicer / Courier / Chaplain,
+`src/classes.cyr` + `data/classes.cyml`); each brings its own attributes,
+combat profile, and three abilities on an energy + tick-cooldown + status
+framework that composes with the 2.5 s auto-attack. Every class clears the
+Hub solo and kills the Foundry Sentinel without dying — the Pikeman tanks,
+the Splicer bursts, the Courier strikes from stealth, the Chaplain
+sustains. Combat (0.5.0), world (0.4.0), parser (0.3.0), wire (0.2.0), and
+tick (0.1.0) underneath are intact. **Players still vanish on restart —
+persistence (M6) is next.**
 
 ## Toolchain
 
@@ -38,20 +38,26 @@ src/
                  dangling-ref rejection, verb→dir; pure, no session I/O
   mob.cyr        M4 mobs: templates (CYML kind=mob) + live instances,
                  room-occupant list, keyword lookup, dice parse, spawn
-  session.cyr    Session struct (224 B), login (M1-E) + world entry,
-                 M2/M3/M4 dispatch (movement, render w/ mobs+objs, examine,
-                 social, kill/flee→combat, get/drop/inv→items), ANSI SGR,
-                 combat stats (SS_HP/AC/TARGET/dice) + SS_INV, g_epfd
+  session.cyr    Session struct (328 B), login (M1-E) + class select (M5-A)
+                 + world entry, dispatch (movement, render, examine sheet,
+                 social, kill/flee, abilities, get/drop/inv), ANSI SGR,
+                 combat + class + ability state (SS_HP..SS_STEALTH), g_epfd
   item.cyr       M4-E/F objects: templates (CYML kind=obj) + instances,
                  corpses + loot, get/drop/inventory, room object render
   combat.cyr     M4 combat: xorshift RNG, d20 hit + NdM damage, kill/flee,
-                 per-tick round (combat_round), mob death + player respawn
-  server.cyr     event loop, listener, signalfd shutdown, tick scheduler,
-                 epoll dispatch, idle sweep (M1-F), observability (M1-H),
-                 zone+mob+obj load at boot, room broadcast / presence / who
-                 (M3-C/F, non-dropping), combat_tick_all from advance_tick
+                 per-tick round (combat_round), mob death + player respawn,
+                 M5 effective-stat buffs (guard/stim) + condition line
+  classes.cyr    M5 classes: load data/classes.cyml, selection login phase,
+                 apply_class, ability framework (energy/cooldown/status),
+                 the 12 class abilities (cmd_ability), classes_upkeep
+  server.cyr     event loop, listener, signalfd shutdown, tick scheduler
+                 (YD_TICK_MS override), epoll dispatch, idle sweep (M1-F),
+                 observability (M1-H), zone+mob+obj+class load at boot,
+                 room broadcast / presence / who (M3-C/F), combat_tick_all
   test.cyr       top-level test entrypoint (per cyrius.cyml [build].test)
 
+data/
+  classes.cyml                  the 4 player classes (M5-B)
 data/zones/
   hub.rooms.cyml                the authored 21-room Hub starter zone (M3-G)
   hub.mobs.cyml                 Hub bestiary: scavver → Sentinel boss (M4)
@@ -77,7 +83,7 @@ benches/
                                p99 < 50 ms); `cyrius bench` runs benches/
 ```
 
-Binary at `build/cyrius-yeomans-descent` (~209 KB with `CYRIUS_DCE=1`).
+Binary at `build/cyrius-yeomans-descent` (~229 KB with `CYRIUS_DCE=1`).
 
 ## Design
 
@@ -88,7 +94,7 @@ Binary at `build/cyrius-yeomans-descent` (~209 KB with `CYRIUS_DCE=1`).
 
 ## Tests
 
-`cyrius test tests/cyrius-yeomans-descent.tcyr` — 203 unit assertions:
+`cyrius test tests/cyrius-yeomans-descent.tcyr` — 232 unit assertions:
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -114,28 +120,33 @@ Binary at `build/cyrius-yeomans-descent` (~209 KB with `CYRIUS_DCE=1`).
   `roll` bounds, `combat_try_hit` hit/miss distribution, mob + object
   template loading + field values, spawn / keyword-find / remove, corpse
   synthesis + loot population
+- **classes** (M5) — class load + field values, `cl_id_eq`,
+  `class_by_input` (number / prefix / trim / invalid / out-of-range),
+  `apply_class`, `classes_upkeep` (energy regen cap, cooldown + buff
+  decay), effective-stat buff helpers (`player_eff_ac/hit`, dmg bonus)
 - **idle** — the `session_is_idle` threshold predicate
 
 Fuzz: `cyrius fuzz` → `fuzz/parser_fuzz.fcyr`, 100k random inputs +
 directed adversarial cases, all invariants hold (token/buffer bounds,
 index ranges, no `resolve_all` overrun), no crash / hang / leak.
 
-End-to-end smokes validated locally on Linux x86_64 at the 0.5.0 cut:
+End-to-end smokes validated locally on Linux x86_64 at the 0.6.0 cut:
 
-- combat loop: engage a scavver, watch per-tick rounds (hit/miss + damage
-  both ways, HP condition line); kill → corpse appears, `get all from
-  corpse` loots it, `inventory` / `drop` move items; the boss Sentinel
-  kills the player → death prose + respawn at the gate with full HP
-- mobs / objects render in rooms (red mobs, yellow objects); `examine`
-  resolves a mob to its description
-- 0.4.0 two-player walk + social smokes still hold (M4 is additive)
+- class selection: name → numbered class menu; pick by number or name
+  prefix; invalid re-prompts; `examine me` shows the class character sheet
+- abilities: class-gating ("you don't know how to hack"), energy spend,
+  tick cooldowns, `bash` stun, `brace`/`stim` buffs in the condition line
+- **solo verification (M5-H)**: a fresh server per class — Pikeman /
+  Splicer / Courier / Chaplain each engage and kill the Foundry Sentinel
+  with zero deaths (run at `YD_TICK_MS=200`)
+- 0.5.0 combat / loot + 0.4.0 walk / social smokes still hold (M5 additive)
 
 Benchmark: `cyrius bench` →
 - `bench_telnet` — telnet_feed ≈ 6 ns/byte (mixed), ≈ 5 ns/byte (pure
   data), 16 M iterations, stable since 0.2.0
-- `bench_combat` (M4-H) — 32 players × 64 mobs through 120 real ticks;
-  **p99 ≈ 62 µs, max ≈ 70 µs** against the 50 ms drift budget (≈ 800×
-  headroom). Combat is O(engaged combatants) per tick, off the accept path.
+- `bench_combat` (M4-H) — 32 players × 64 mobs through 120 real ticks,
+  now including per-tick `classes_upkeep`; **p99 ≈ 57 µs** against the
+  50 ms drift budget. Combat is O(engaged combatants) per tick.
 - (parser / world p99 baselines land at M9-C.)
 
 `cyrius test src/test.cyr` exits 0 (CI uses this explicit form — see
@@ -156,74 +167,70 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** M4 closed at 0.5.0. Pick up the next slot per the
+**No active cycle.** M5 closed at 0.6.0. Pick up the next slot per the
 boot guide below.
 
 ---
 
 ## Next-agent boot guide
 
-You are picking up at **M5-A — class selection** ([roadmap.md M5 sub-bites](roadmap.md#m5--classes--abilities-v060)). M5 turns the four classes (Pikeman / Splicer / Courier / Chaplain) from text-table flavor into playable mechanics: class pick at character creation, per-class attribute scaling, three abilities each, and tick-composed cooldowns ([ADR 0001](../adr/0001-tick-based-combat-over-cooldowns.md) negative consequence — abilities *compose* with the 2.5 s tick, they don't replace it). Ships at v0.6.0.
+You are picking up at **M6 — persistence via T.Ron** ([roadmap.md M6 sub-bites](roadmap.md#m6--persistence-via-tron-v070)). Players survive a server restart; writes are crash-safe and **queued, never inline** in the loop ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md) negative consequence — disk I/O can't block the single-thread tick). Ships at v0.7.0. **M6 opens with two decisions before any code:** ADR 0004 (identity / auth — name+password vs sigil Ed25519) and ADR 0006 (persistence shape with T.Ron). M6-A also lands the **first external (non-stdlib) dependency**, T.Ron.
 
-### What's already built (0.5.0)
+### What's already built (0.6.0)
 
-- **Combat (M4)** — `src/combat.cyr`. `combat_round(s)` resolves one tick
-  for an engaged session; `advance_tick` → `combat_tick_all()` runs it for
-  everyone. Hit = `d20 + hit + AC >= 20` (`combat_try_hit`), damage =
-  `roll(ndice, dsize, dmod)`. **Player stats are flat defaults** in the
-  `PlayerStat` enum (session.cyr: HP 30, AC 8, hit +1, 1d6+1) — **M5-B
-  replaces these with per-class attribute scaling.**
-- **Combat state** lives in SS_ slots (`SS_HP`/`SS_MAXHP`/`SS_AC`/
-  `SS_TARGET`/`SS_HIT`/`SS_NDICE`/`SS_DSIZE`/`SS_DMOD`/`SS_INV`). The
-  `SS_PLAYER` slot (offset 80, reserved since M1-B) still awaits the M6
-  persistence handle; the session is the actor for now. **M5 adds a class
-  id + attribute (STR/DEX/CON/TEC) slots here.**
-- **Mobs (M4)** — `src/mob.cyr`: templates (`world_load_mobs`) + instances
-  (`mob_spawn`, `mob_in_room_by_kw`, `mob_remove`), room-occupant list.
-- **Items (M4)** — `src/item.cyr`: object templates + instances, corpses +
-  loot, `get`/`drop`/`inventory`. Abilities that consume/grant items (e.g.
-  a Chaplain's stims) hook here.
-- **Login flow** — `login_on_name` (session.cyr) captures the name then
-  calls `session_enter_world`. **M5-A inserts class selection between the
-  name prompt and world entry** (a new login phase, or a sub-prompt).
-- **Tick** — `advance_tick` (server.cyr) is the one place per-tick work
-  runs. **Ability cooldowns (M5-G) decrement here**, composed with combat.
+- **The full character is in `SS_` slots** (session.cyr) and is exactly
+  what M6 must persist: name (`SS_NAME_BUF`/`LEN`), class (`SS_CLASS`),
+  attributes (`SS_STR`/`DEX`/`CON`/`TEC`), vitals (`SS_HP`/`SS_MAXHP`/
+  `SS_ENERGY`/`SS_MAXENERGY`), combat profile (`SS_AC`/`SS_HIT`/`SS_NDICE`/
+  `SS_DSIZE`/`SS_DMOD`), location (`SS_ROOM`), and inventory (`SS_INV` → an
+  `item.cyr` object-instance list). **The save shape (M6-C) is this set.**
+- **`SS_PLAYER` slot** (offset 80, reserved since M1-B) is still 0 — it is
+  the natural home for a persistent player/account handle (M6-E load).
+- **Classes load from CYML** (`world_load_classes`, `classes.cyr`) — the
+  same load-at-boot pattern T.Ron data will follow; `apply_class` is how a
+  fresh character is built, and a loaded save will set the same `SS_` slots.
+- **Login flow** — `login_on_name` → `PHASE_CLASS` → `login_on_class` →
+  world. **M6-E inserts a load step**: look up the name; if a save exists,
+  restore it (skipping class selection); else fall through to class pick.
+- **Item instances** (`item.cyr`) are heap objects with name/keywords/desc
+  copied inline + a template-less corpse variant — serializable by
+  template id + a small amount of state.
+- **Tick** — `advance_tick` (server.cyr) is where the M6-D debounced
+  save-timer would enqueue (never write inline). `YD_TICK_MS` overrides
+  the interval for testing.
 
-### What M5 needs
+### What M6 needs (in order)
 
-1. **Class data (M5-B).** A `data/classes.cyml` (single-entry or one entry
-   per class) with per-class STR/DEX/CON/TEC start values + growth, and the
-   derived HP/AC/hit/damage that replace the flat `PlayerStat` defaults.
-   This is the same CYML format ([ADR 0005](../adr/0005-zone-file-format.md) precedent).
-2. **Class selection (M5-A).** A login sub-phase after the name prompt.
-3. **Abilities (M5-C..F).** Three per class, as new verbs that act inside /
-   alongside combat; **tick-composed cooldowns (M5-G)** decremented in
-   `advance_tick`.
-4. **Solo-playable verification (M5-H).** Each class clears the Hub solo,
-   killing the Foundry Sentinel boss (`foundry.overseer`) without dying
-   twice. Tune class stats against the existing bestiary.
+1. **ADR 0004** (identity/auth) + **ADR 0006** (persistence shape) — decide
+   before code. Note [ADR 0002](../adr/0002-raw-tcp-telnet-protocol.md): Telnet has no TLS, so a
+   plaintext password on the wire is the same exposure as a sigil — weigh
+   that in 0004.
+2. **M6-A** — land T.Ron in `cyrius.cyml [deps]` (first external dep; if
+   T.Ron isn't ready, the milestone moves — track the gap here).
+3. **M6-C/D/E/F** — save shape, queued save triggers (quit / save / level /
+   debounced timer), load-on-login, crash-safe atomic writes (`.tmp` +
+   rename). Gate: `kill -9` mid-combat → restart → no data loss.
 
 ### Reference
 
-- Class table (roles, core commands, attribute focus): [`../architecture/overview.md` §3](../architecture/overview.md).
-- Attributes → combat math: [`../architecture/overview.md` §2.2-2.3](../architecture/overview.md).
-- Cooldowns compose with the tick: [ADR 0001](../adr/0001-tick-based-combat-over-cooldowns.md) (negative consequence).
-- Combat hooks: `src/combat.cyr` (`combat_round`, `roll`, `combat_try_hit`).
+- Save shape + triggers + crash-safety: [roadmap.md M6](roadmap.md#m6--persistence-via-tron-v070).
+- Identity options: [roadmap.md § Open ADRs](roadmap.md#open-adrs) (ADR 0004).
+- Character state to persist: the `SS_` enum in `src/session.cyr`.
 
 ### Quick boot sanity
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test tests/cyrius-yeomans-descent.tcyr   # 203 assertions
+cyrius test tests/cyrius-yeomans-descent.tcyr   # 232 assertions
 cyrius fuzz                                      # parser fuzz, 100k inputs
 cyrius bench                                     # telnet baseline + combat load test
 ./build/cyrius-yeomans-descent serve 4000
-# telnet 127.0.0.1 4000 — log in, `n`, `kill scavver`, wait a tick, loot the corpse
+# telnet 127.0.0.1 4000 — log in, pick a class, `n`, `kill scavver`, `bash`, loot
+# fast combat: YD_TICK_MS=200 ./build/cyrius-yeomans-descent serve 4000
 ```
 
 ### Open ADRs
 
-ADR 0005 (zone-file format) was resolved at M3-A. Two remain ahead of
-their consumers — see [roadmap.md § Open ADRs](roadmap.md#open-adrs):
-**0004** (identity/auth, gates M6) and **0006** (T.Ron persistence shape,
-M6). Neither blocks M4.
+ADR 0005 (zone-file format) was resolved at M3-A. Two remain — both now
+**due, gating M6** — see [roadmap.md § Open ADRs](roadmap.md#open-adrs):
+**0004** (identity / auth) and **0006** (T.Ron persistence shape).

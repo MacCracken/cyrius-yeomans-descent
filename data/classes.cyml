@@ -1,0 +1,74 @@
+game = "yeomans-descent"
+name = "Player Classes"
+[[entries]]
+kind = "class"
+id = "pikeman"
+name = "Pikeman"
+role = "Tank / Melee"
+str = 16
+dex = 11
+con = 16
+tec = 8
+hp = 40
+ac = 5
+hit = 2
+damage = "1d10+3"
+energy = 20
+---
+The arcology's front line — heavy infantry in salvaged riot-plate, drilled to
+hold a corridor against anything that comes down it. Strength and Constitution
+are your trade; the shock-pike does the talking. (bash, brace, cleave)
+[[entries]]
+kind = "class"
+id = "splicer"
+name = "Splicer"
+role = "Caster / Hacker"
+str = 9
+dex = 13
+con = 11
+tec = 17
+hp = 26
+ac = 8
+hit = 1
+damage = "1d4+1"
+energy = 30
+---
+A back-alley netrunner who fights with intrusion software and overvolted
+capacitors. Weak in a brawl, lethal at range: your Tech turns a target's own
+systems against it. (hack, overload, emp)
+[[entries]]
+kind = "class"
+id = "courier"
+name = "Courier"
+role = "Rogue / Stealth"
+str = 12
+dex = 17
+con = 12
+tec = 10
+hp = 30
+ac = 6
+hit = 4
+damage = "1d6+1"
+energy = 24
+---
+A smuggler of the under-tiers, fast and quiet, who ends fights before they
+start. Dexterity is everything — slip into the dark, then drive a monoblade
+between the plates. (sneak, backstab, bypass)
+[[entries]]
+kind = "class"
+id = "chaplain"
+name = "Chaplain"
+role = "Healer / Support"
+str = 11
+dex = 11
+con = 14
+tec = 15
+hp = 34
+ac = 7
+hit = 2
+damage = "1d6+2"
+energy = 28
+---
+A field-medic of one of the Grid's salvage-cults, mending flesh and morale with
+equal faith. Tech and Constitution keep you and yours standing long after you
+should have fallen. (patch, stim, rally)

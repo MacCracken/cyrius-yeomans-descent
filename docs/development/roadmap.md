@@ -21,8 +21,8 @@
 | **0.3.0** | M2 — verb-noun parser + fuzz harness | ✅ 2026-06-09 |
 | **0.4.0** | M3 — world / rooms / movement + starter zone | ✅ 2026-06-09 |
 | **0.5.0** | M4 — combat tick + hit/damage math + corpses | ✅ 2026-06-09 |
-| **0.6.0** | M5 — four classes playable solo through the starter zone | next |
-| **0.7.0** | M6 — T.Ron-backed player persistence + crash-safe writes | |
+| **0.6.0** | M5 — four classes playable solo through the starter zone | ✅ 2026-06-09 |
+| **0.7.0** | M6 — T.Ron-backed player persistence + crash-safe writes | next |
 | **0.8.0** | M7 — zone resets with player-presence gating | |
 | **0.9.0** | M8 — Joshua operator interface | |
 | **0.9.x** | Security sweep + closeout pass | |
@@ -32,7 +32,7 @@
 
 ## In progress
 
-**No active cycle.** M4 closed at 0.5.0. Next slot is **M5-A — class selection** ([§M5 sub-bites](#m5--classes--abilities-v060)) — the four classes go from text-table flavor to playable mechanics. Pickup pointer + boot guide in [`state.md`](state.md).
+**No active cycle.** M5 closed at 0.6.0. Next slot is **M6-A — T.Ron dep landing** ([§M6 sub-bites](#m6--persistence-via-tron-v070)) — players survive restart via crash-safe, queued (never-inline) saves. **Opens with ADR 0004** (identity model) and ADR 0006 (persistence shape). Pickup pointer + boot guide in [`state.md`](state.md).
 
 ---
 
@@ -181,6 +181,7 @@ Brief one-liners; per-tag chronology in [`../../CHANGELOG.md`](../../CHANGELOG.m
 - **M2 (0.3.0)** — the verb-noun parser (`src/parser.cyr`), pure and fuzz-clean. Tokenizer (M2-A) → verb table + aliases (M2-B) → keyword-prefix direct-object resolution (M2-C) → preposition / indirect-object split (M2-D) → `all.X` / `N.X` qualifiers (M2-E) → 100k-input fuzz harness (M2-F, `fuzz/parser_fuzz.fcyr`). `cmd_on_line` routes through the parser; `quit` disconnects via the new `SS_QUIT` flag. Object/world binding deferred to M3 — the resolution matchers run against synthetic scopes for now. Gate met: fuzz clean against 100k random inputs; verb table covered by the 154-assertion suite.
 - **M3 (0.4.0)** — the world becomes physical. [ADR 0005](../adr/0005-zone-file-format.md) picks CYML for zone files; the loader (`src/world.cyr`, M3-B) builds an in-memory room tree at boot and rejects dangling exits. Movement (M3-C) with onlooker broadcasts, ANSI room rendering (M3-D), inspection verbs (M3-E, `examine` resolving the M2 parser against live room presence), room-scoped `say`/`emote` + cross-room `tell` + `who` (M3-F), and the authored 21-room Hub starter zone (M3-G, `data/zones/hub.rooms.cyml`). Gate met: two players walk the Hub end-to-end seeing each other's arrivals / departures / says; 174-assertion suite.
 - **M4 (0.5.0)** — the combat tick. Mobs (`src/mob.cyr`) and items/corpses (`src/item.cyr`) load from `<zone>.mobs/.objs.cyml`; combat (`src/combat.cyr`) resolves a hidden-roll round per tick inside `advance_tick` (M4-A/B/C/D), with `kill`/`flee`, death → corpse + loot, and player respawn (M4-E/F). The Hub gains a bestiary (scavver → Foundry Sentinel boss) and loot tables. Gate met: `benches/bench_combat.bcyr` ticks 32 players × 64 mobs at p99 ≈ 62 µs (50 ms budget); 203-assertion suite.
+- **M5 (0.6.0)** — the four classes (`src/classes.cyr`, `data/classes.cyml`). Class selection at login (M5-A), per-class attributes + combat profile (M5-B), and twelve abilities (M5-C..F) on an energy + tick-cooldown + status framework (M5-G) that composes with the auto-attack. Gate met: each class clears the Hub solo and kills the Foundry Sentinel without dying (M5-H); 232-assertion suite.
 
 ---
 

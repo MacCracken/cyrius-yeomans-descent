@@ -76,6 +76,41 @@ fn combat_flush(s): i64 {
     return 0;
 }
 
+# === Effective combat stats, after M5 ability buffs. ===
+# brace / bypass lower AC (better defence) while SS_GUARD is up; stim
+# raises hit + damage while SS_STIM is up.
+enum BuffAmt { GUARD_AC = 3; STIM_HIT = 2; STIM_DMG = 2; }
+
+fn player_eff_ac(s): i64 {
+    var ac = load64(s + SS_AC);
+    if (load64(s + SS_GUARD) > 0) { ac = ac - GUARD_AC; }
+    return ac;
+}
+fn player_eff_hit(s): i64 {
+    var h = load64(s + SS_HIT);
+    if (load64(s + SS_STIM) > 0) { h = h + STIM_HIT; }
+    return h;
+}
+fn player_dmg_bonus(s): i64 {
+    if (load64(s + SS_STIM) > 0) { return STIM_DMG; }
+    return 0;
+}
+
+# The per-round status line: HP, energy, and any active buff markers.
+fn session_append_condition(s): i64 {
+    session_appendtx_cstr(s, "[ hp ");
+    session_appendtx_num(s, load64(s + SS_HP));
+    session_appendtx_cstr(s, "/");
+    session_appendtx_num(s, load64(s + SS_MAXHP));
+    session_appendtx_cstr(s, " | nrg ");
+    session_appendtx_num(s, load64(s + SS_ENERGY));
+    if (load64(s + SS_GUARD) > 0) { session_appendtx_cstr(s, " | braced"); }
+    if (load64(s + SS_STIM) > 0)  { session_appendtx_cstr(s, " | stimmed"); }
+    if (load64(s + SS_STEALTH) > 0) { session_appendtx_cstr(s, " | hidden"); }
+    session_appendtx_cstr(s, " ]\r\n");
+    return 0;
+}
+
 # ANSI for combat lines (red for harm to the player, dim for misses).
 fn ansi_hit(): i64  { return "\x1b[1;31m"; }   # bold red
 fn ansi_miss(): i64 { return "\x1b[2m"; }      # dim
@@ -186,9 +221,12 @@ fn combat_round(s): i64 {
 
     var tpl = mi_tpl(m);
 
+    # A normal swing breaks stealth (the backstab verb is what spends it).
+    store64(s + SS_STEALTH, 0);
+
     # Player strikes first.
-    if (combat_try_hit(load64(s + SS_HIT), mt_ac(tpl)) == 1) {
-        var dmg = roll(load64(s + SS_NDICE), load64(s + SS_DSIZE), load64(s + SS_DMOD));
+    if (combat_try_hit(player_eff_hit(s), mt_ac(tpl)) == 1) {
+        var dmg = roll(load64(s + SS_NDICE), load64(s + SS_DSIZE), load64(s + SS_DMOD)) + player_dmg_bonus(s);
         mi_set_hp(m, mi_hp(m) - dmg);
         session_appendtx_cstr(s, "You strike ");
         session_appendtx_cstr(s, mi_name_ptr(m));
@@ -205,8 +243,22 @@ fn combat_round(s): i64 {
         session_appendtx_cstr(s, "\r\n");
     }
 
-    # The mob strikes back.
-    if (combat_try_hit(mt_hit(tpl), load64(s + SS_AC)) == 1) {
+    # A stunned mob loses its turn.
+    if (mi_stun(m) > 0) {
+        mi_set_stun(m, mi_stun(m) - 1);
+        session_appendtx_cstr(s, ansi_miss());
+        session_appendtx_cstr(s, mi_name_ptr(m));
+        session_appendtx_cstr(s, " is reeling and cannot act.");
+        session_appendtx_cstr(s, ansi_reset());
+        session_appendtx_cstr(s, "\r\n");
+        session_append_condition(s);
+        session_send_cmd_prompt(s);
+        combat_flush(s);
+        return 0;
+    }
+
+    # The mob strikes back (against the player's buffed AC).
+    if (combat_try_hit(mt_hit(tpl), player_eff_ac(s)) == 1) {
         var dmg = roll(mt_ndice(tpl), mt_dsize(tpl), mt_dmod(tpl));
         store64(s + SS_HP, load64(s + SS_HP) - dmg);
         session_appendtx_cstr(s, ansi_hit());
@@ -226,11 +278,7 @@ fn combat_round(s): i64 {
     }
 
     # Condition line, then a fresh prompt.
-    session_appendtx_cstr(s, "[ you ");
-    session_appendtx_num(s, load64(s + SS_HP));
-    session_appendtx_cstr(s, "/");
-    session_appendtx_num(s, load64(s + SS_MAXHP));
-    session_appendtx_cstr(s, " hp ]\r\n");
+    session_append_condition(s);
     session_send_cmd_prompt(s);
     combat_flush(s);
     return 0;
