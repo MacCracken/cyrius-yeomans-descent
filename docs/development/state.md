@@ -7,6 +7,16 @@
 
 ## Version
 
+**0.9.1** — surface freeze, 2026-06-10. The public surface is enumerated and
+locked for 1.0 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)): command verbs +
+`@`-namespace, save-record schema v1, Telnet/wire behaviour, zone format, env
+knobs. Save records now stamp `schema = 1` (signed); the loader rejects records
+newer than `SCHEMA_VERSION` and reads 0.7.0–0.9.0 (no `schema`) as v1 — the
+post-1.0 migration hook. The `@`-admin namespace (`@stats`/`@who`/`@reset`) is
+gated behind `YD_ADMIN` (default off): disabled → unknown commands, hidden from
+`help`; operator auth stays deferred to M8. **Behaviour change**: `@stats` now
+needs `YD_ADMIN=1`. 298 tests pass; admin gate live-verified both ways.
+
 **0.9.0** — security sweep, 2026-06-10. A CVE-informed audit of the
 network-input + save-file surface. Four issues found and fixed, all reachable
 from a raw TCP connection or a planted save: two heap overflows (`ident_derive`
@@ -255,75 +265,74 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** 0.9.0 (security sweep) closed. Next slot is **0.9.1 —
-surface freeze**, then **1.0.0 — clean release**. **M8 (Joshua) is deferred to
-post-1.0.** Pick up per the boot guide below.
+**No active cycle.** 0.9.1 (surface freeze) closed. Next slot is **1.0.0 —
+clean release**. **M8 (Joshua) is deferred to post-1.0.** Pick up per the boot
+guide below.
 
 ---
 
 ## Next-agent boot guide
 
-You are picking up at **0.9.1 — surface freeze**: the path to 1.0.0 is
-stabilisation, not new features. The job is to **lock the public surface** so
-1.0.0 changes nothing observable, then 1.0.0 is final hardening + a playtest
-sign-off.
+You are picking up at **1.0.0 — clean release**: a *stabilisation-only* release.
+No new verbs / save fields / zone fields / env knobs — the surface is frozen
+([ADR 0007](../adr/0007-frozen-1.0-surface.md)). The job is to prove the game is
+sound end-to-end and sign it off. Anything that changes observable behaviour
+belongs after 1.0.
 
-### What "surface" means here (enumerate + lock)
+### What 1.0.0 is (and isn't)
 
-- **Command verbs** — the verb table in `parser.cyr` (`VERB_*`, aliases) +
-  the `@`-admin namespace (`@stats`/`@who`/`@reset`). Freeze the names + syntax.
-- **Save-record fields** — the `[player]` schema in `persist.cyr` (`_build_record`
-  / `player_auth_load`). Once frozen, new fields need a versioned migration, not
-  a silent add. Consider stamping a `schema = 1` field now so 1.x can migrate.
-- **Wire behaviour** — Telnet negotiation (`telnet.cyr`), the echo salvo
-  (0.8.1), line handling. Freeze.
-- **Zone-file format** — already ADR 0005; the `objects`/`mobs`/`reset_secs`
-  fields are now load-bearing. Freeze the field set.
-- **Env knobs** — `YD_TICK_MS` / `YD_IDLE_MS` / `YD_RESET_SECS`. Freeze names.
+- **Is**: a final adversarial/security pass, a full playtest, doc/CHANGELOG
+  polish, and the version bump. Allowed code changes are bug/security fixes that
+  don't change the frozen surface.
+- **Isn't**: features. M8 (Joshua operator interface) and any new content/verbs
+  are post-1.0.
 
-### Suggested 0.9.1 work
+### 1.0.0 checklist
 
-1. **Audit + document the surface** (a `docs/` reference or an ADR "frozen
-   surface for 1.0"). This is the deliverable.
-2. **Gate the `@`-namespace** — the 0.9.0 sweep noted `@who`/`@reset` are
-   unguarded; freezing the surface is the moment to decide operator auth (or
-   explicitly defer it with `@`-verbs disabled-by-default behind an env flag).
-   This is the one real security item left before 1.0.
-3. **Schema-version stamp** on save records, so post-1.0 fields migrate cleanly.
-4. Resist scope creep — anything that adds a verb/field/knob belongs after 1.0.
+1. **Adversarial pass** (extends the 0.9.0 sweep): long/binary inputs at every
+   prompt; out-of-range / missing / duplicated save fields; truncated and
+   over-long records; rapid connect/disconnect; idle-reap under load; a forced
+   `kill -9` during combat + during a save. The `security` + `persist` test
+   groups are the regression floor — add any new case you try.
+2. **Full playtest** (the 1.0 gate): each class clears the Hub solo; reconnect
+   restores state + room + inventory; zone resets restock an emptied Hub; the
+   four classes' abilities all fire; `passwd` re-keys; `save`/`quit` round-trip.
+3. **Surface conformance** — diff observable behaviour against [ADR 0007](../adr/0007-frozen-1.0-surface.md);
+   nothing outside it changed. Confirm a 0.8.x save still loads (schema back-compat).
+4. **Release mechanics** — `VERSION`/`cyrius.cyml`/`CHANGELOG`/`VERSION_STRING`
+   to `1.0.0`; CHANGELOG closeout entry; tag is the user's job (do not commit).
 
-### Security posture (post-0.9.0)
+### Security posture (current)
 
 The 0.9.0 sweep fixed two heap overflows (one pre-auth), an OOB read, and a DoS
-— all in `persist.cyr`'s load path, rooted in trusting signed-but-unvalidated
-save fields. **Principle now in force**: a record signature proves *authorship*,
-not field *validity* — every loaded field is bounded (`_clamp`, exact hex
-lengths, `class` range, passphrase length). `security` test group guards it.
-Re-run a quick adversarial pass before 1.0 (long inputs, out-of-range fields,
-truncated/duplicated records).
+in `persist.cyr`'s load path. **Principle in force**: a record signature proves
+*authorship*, not field *validity* — every loaded field is bounded (`_clamp`,
+exact hex lengths, `class` range, passphrase length, `schema` ≤ current). The
+`@`-admin namespace is off unless `YD_ADMIN=1`. `security`/`freeze` test groups
+guard these.
 
 ### Quick boot sanity
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test                                      # 293 assertions, all pass
+cyrius test                                      # 298 assertions, all pass
 ./build/cyrius-yeomans-descent serve 4000
 # new name → passphrase (echo-suppressed) → class → play; `save`/`passwd`/`quit`,
 # reconnect → restored + "last seen". kill -9 after a save → restart → no loss.
 # resets: YD_RESET_SECS=5 ...; empty the zone, watch `zone=hub reset (...)`.
-# admin: @stats / @who / @reset.
+# admin (opt-in): YD_ADMIN=1 ./build/... → @stats / @who / @reset.
 ```
 
 ### Deferred — M8 (Joshua), post-1.0
 
 An operator interface to steer a running server (list/boot players, reload a
 zone, force a reset, read counters/logs). Most hooks already exist:
-`@stats`/`@who`/`@reset` (server.cyr `render_*`), `g_session_head` for sessions,
-`g_zone_last_reset_ms = 0` to force a reset, the libro audit chain + reset log.
-The real work is the control channel + operator auth — see [roadmap M8](roadmap.md#m8--joshua-management-interface-v090).
+`@stats`/`@who`/`@reset` (server.cyr `render_*`, behind `YD_ADMIN`),
+`g_session_head` for sessions, `g_zone_last_reset_ms = 0` to force a reset, the
+libro audit chain + reset log. The real work is the control channel + operator
+auth (replacing the `YD_ADMIN` gate) — see [roadmap M8](roadmap.md#m8--joshua-management-interface-v090).
 
 ### Open ADRs
 
-None outstanding. 0001–0006 all Accepted. 0.9.1 likely earns a "frozen 1.0
-surface" ADR; M8 (post-1.0) earns one if the operator channel adds a new
-wire/auth surface.
+None outstanding. 0001–0007 all Accepted. M8 (post-1.0) earns one if the
+operator channel adds a new wire/auth surface.

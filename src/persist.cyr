@@ -32,6 +32,11 @@ enum PersistConst {
     SAVE_CAP    = 4096;   # serialized record scratch
     SLURP_CAP   = 8192;   # file-read scratch
     PATH_CAP    = 320;
+    # Save-record schema version (0.9.1 surface freeze). Bumped only on a
+    # breaking change to the [player] field set; a server rejects records
+    # stamped newer than it understands. Records from 0.7.0-0.9.0 carry no
+    # `schema` field and are treated as v1 (back-compatible).
+    SCHEMA_VERSION = 1;
 }
 
 # rename(2) is not wrapped in the x86_64 stdlib (only sys_mkdir is); the
@@ -192,6 +197,7 @@ fn _build_record(s): i64 {
     var blk = sess_ident(s);
     var off = 0;
     off = _ac(off, "[player]\n");
+    off = _fint(off, "schema", SCHEMA_VERSION);   # 0.9.1 migration hook
     off = _fstr(off, "name", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
     off = _fstr(off, "salt",   hex_encode(blk, SALT_LEN), SALT_LEN * 2);
     off = _fstr(off, "pubkey", hex_encode(blk + IDENT_PK, PK_LEN), PK_LEN * 2);
@@ -352,6 +358,13 @@ fn player_auth_load(s, pass, passlen): i64 {
     if (prefix < 0) { return 0 - 2; }
     if (ed25519_verify(filepk, g_persist_slurp, prefix, filesig) != 1) {
         audit_event(SEV_SECURITY, "load.tamper", nm, nl);
+        return 0 - 2;
+    }
+
+    # 0.9.1 — reject a record stamped with a newer schema than this server
+    # understands (post-1.0 migration hook). A missing `schema` field
+    # (0.7.0-0.9.0 records) defaults to the current version, so they load.
+    if (toml_int(pairs, "schema", SCHEMA_VERSION) > SCHEMA_VERSION) {
         return 0 - 2;
     }
 

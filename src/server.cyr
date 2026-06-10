@@ -657,6 +657,10 @@ fn apply_idle_env(): i64 {
         var rs = atoi(rv);
         if (rs > 0) { g_reset_secs_override = rs; }
     }
+    var ad = getenv("YD_ADMIN");        # 0.9.1 — enable the @-admin namespace
+    if (ad != 0) {
+        if (atoi(ad) > 0) { g_admin_enabled = 1; }
+    }
     return 0;
 }
 

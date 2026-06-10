@@ -4,6 +4,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-06-10
+
+**Surface freeze.** The public surface is enumerated and locked for 1.0 so the
+final release is stabilisation-only ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)).
+Two behaviour-affecting changes land here; 1.0.0 changes nothing observable.
+
+### Added
+
+- **Save-record schema version** ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md) §3).
+  Every record now stamps `schema = 1` (in the signed prefix); the loader
+  rejects any record stamped newer than it understands. Records from
+  0.7.0–0.9.0 carry no `schema` field and load as v1 (back-compatible). This is
+  the migration hook for post-1.0 field changes.
+- **ADR 0007 — frozen 1.0 surface.** Documents the locked surface: command
+  verbs + aliases + `@`-namespace, save schema v1 fields, Telnet/wire
+  behaviour, zone-file format, env knobs.
+
+### Changed
+
+- **The `@`-admin namespace is gated behind `YD_ADMIN` (default off).**
+  `@stats`/`@who`/`@reset` only work when the server is started with
+  `YD_ADMIN=1`; otherwise they read as unknown commands and are hidden from
+  `help`. Closes the last unguarded surface in the default build; full operator
+  authentication remains deferred to M8 (post-1.0). **Behaviour change:**
+  `@stats`, always-on since M1-H, now requires `YD_ADMIN=1`.
+
 ## [0.9.0] — 2026-06-10
 
 **Security sweep & audit.** A focused pass over the network-input and

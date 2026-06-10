@@ -79,6 +79,13 @@ enum SS {
 # then no-op safely (drain to a real fd happens only when armed).
 var g_epfd = 0;
 
+# 0.9.1 surface freeze — the @-admin namespace (@stats/@who/@reset) is gated
+# behind YD_ADMIN (default off): unguarded admin verbs are a production-surface
+# concern, and full operator auth is deferred to M8. cmd_serve sets this from
+# the env at startup. Declared here (ahead of server.cyr) so cmd_on_line /
+# cmd_help_text can read it.
+var g_admin_enabled = 0;
+
 # Starting combatant profile (a scavenged sidearm). Replaced by class +
 # attribute scaling at M5, restored from save at M6.
 enum PlayerStat {
@@ -518,7 +525,10 @@ fn cmd_help_text(s): i64 {
     session_appendtx_cstr(s, "items   : get drop put give wear remove wield\r\n");
     session_appendtx_cstr(s, "fight   : kill flee\r\n");
     session_appendtx_cstr(s, "social  : say tell emote\r\n");
-    session_appendtx_cstr(s, "session : quit save passwd help   admin: @stats @who @reset\r\n");
+    session_appendtx_cstr(s, "session : quit save passwd help\r\n");
+    if (g_admin_enabled == 1) {   # 0.9.1 — only advertise admin when enabled
+        session_appendtx_cstr(s, "admin   : @stats @who @reset\r\n");
+    }
     class_append_abilities(s);   # forward ref → classes.cyr (M5)
     return 0;
 }
@@ -816,20 +826,24 @@ fn cmd_dispatch(s, pa, buf, len): i64 {
 # through the M2 verb-noun parser. render_stats lives in server.cyr,
 # where the observability counters do (resolved as a forward reference).
 fn cmd_on_line(s, buf, len): i64 {
-    if (name_eq_ci(buf, len, "@stats") == 1) {
-        render_stats(s);
-        session_send_cmd_prompt(s);
-        return 0;
-    }
-    if (name_eq_ci(buf, len, "@who") == 1) {        # 0.8.3 (server.cyr)
-        render_who(s);
-        session_send_cmd_prompt(s);
-        return 0;
-    }
-    if (name_eq_ci(buf, len, "@reset") == 1) {      # 0.8.3 (server.cyr)
-        render_reset(s);
-        session_send_cmd_prompt(s);
-        return 0;
+    # @-admin namespace — only live when YD_ADMIN enabled it (0.9.1). When
+    # off, these fall through to the parser and read as unknown commands.
+    if (g_admin_enabled == 1) {
+        if (name_eq_ci(buf, len, "@stats") == 1) {
+            render_stats(s);
+            session_send_cmd_prompt(s);
+            return 0;
+        }
+        if (name_eq_ci(buf, len, "@who") == 1) {        # 0.8.3 (server.cyr)
+            render_who(s);
+            session_send_cmd_prompt(s);
+            return 0;
+        }
+        if (name_eq_ci(buf, len, "@reset") == 1) {      # 0.8.3 (server.cyr)
+            render_reset(s);
+            session_send_cmd_prompt(s);
+            return 0;
+        }
     }
     if (g_parser == 0) { g_parser = parser_new(); }
     parser_parse(g_parser, buf, len);

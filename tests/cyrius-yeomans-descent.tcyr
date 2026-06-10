@@ -930,6 +930,66 @@ fn test_security(): i64 {
     return 0;
 }
 
+# === 0.9.1 — surface freeze: save schema stamp + admin gate ===
+fn _contains(buf, n, needle): i64 {
+    var nl = strlen(needle);
+    var i = 0;
+    while (i + nl <= n) {
+        var j = 0;
+        var same = 1;
+        while (j < nl) {
+            if ((load8(buf + i + j) & 0xFF) != (load8(needle + j) & 0xFF)) { same = 0; j = nl; }
+            else { j = j + 1; }
+        }
+        if (same == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_freeze(): i64 {
+    test_group("freeze");
+    persist_init();
+
+    # The @-admin namespace is off unless YD_ADMIN enabled it (default 0).
+    assert_eq(g_admin_enabled, 0, "admin namespace disabled by default");
+
+    # Save stamps schema = 1; the record loads back.
+    var s = _mk_sess("FreezeHero", 10);
+    var blk = sess_ident(s);
+    random_bytes(blk, SALT_LEN);
+    ident_derive(blk, "freezepass", 10, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 1);
+    store64(s + SS_ROOM, 0 - 1); store64(s + SS_AUTHED, 1);
+    store64(s + SS_HP, 20); store64(s + SS_MAXHP, 20); store64(s + SS_CLASS, 0);
+    assert_eq(player_save(s), 1, "save ok");
+
+    _path_for("FreezeHero", 10, g_persist_path);
+    var n = file_read_all(g_persist_path, g_persist_slurp, SLURP_CAP - 1);
+    assert(_contains(g_persist_slurp, n, "schema = 1") == 1, "record stamps schema = 1");
+    var s2 = _mk_sess("FreezeHero", 10);
+    assert_eq(player_auth_load(s2, "freezepass", 10), 1, "v1 record loads");
+
+    # Forge a validly-signed schema = 2 record (we own the key) → rejected as
+    # too new for this server. Proves the migration gate.
+    var rec = alloc(1024);
+    var o = _str_into(rec, 0, "[player]\nschema = 2\nsalt = \"");
+    o = _str_into(rec, o, hex_encode(blk, SALT_LEN));
+    o = _str_into(rec, o, "\"\npubkey = \"");
+    o = _str_into(rec, o, hex_encode(blk + IDENT_PK, PK_LEN));
+    o = _str_into(rec, o, "\"\n");
+    var sig = alloc(SIG_LEN);
+    ed25519_sign(blk + IDENT_SK, rec, o, sig);   # sign the prefix
+    o = _str_into(rec, o, "sig = \"");
+    o = _str_into(rec, o, hex_encode(sig, SIG_LEN));
+    o = _str_into(rec, o, "\"\n");
+    file_write_all(g_persist_path, rec, o);
+    var s3 = _mk_sess("FreezeHero", 10);
+    assert_eq(player_auth_load(s3, "freezepass", 10), 0 - 2, "schema = 2 record rejected (too new)");
+
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -953,6 +1013,7 @@ fn main() {
     test_reset();
     test_login_polish();
     test_security();
+    test_freeze();
 
     return assert_summary();
 }
