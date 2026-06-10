@@ -101,12 +101,66 @@ fn save_sweep(): i64 {
     return 0;
 }
 
+# === M7 — zone resets ====================================================
+# Reset interval override (seconds) for testing/ops; 0 = use the authored
+# g_zone_reset_secs. Read from YD_RESET_SECS at serve start.
+var g_reset_secs_override = 0;
+
+# M7-B presence gate — is any in-world session standing in this zone? A
+# session with SS_ROOM in [0, room_count) is placed in the world (login
+# leaves it at -1). Single-writer (ADR 0003), so this snapshot can't race.
+fn zone_has_player(): i64 {
+    var s = g_session_head;
+    while (s != 0) {
+        var room = load64(s + SS_ROOM);
+        if (room >= 0) {
+            if (room < world_room_count()) { return 1; }
+        }
+        s = load64(s + SS_NEXT);
+    }
+    return 0;
+}
+
+# M7-E reset event log — one line Joshua reads at M8.
+fn zone_reset_log(mobs, objs): i64 {
+    print("[", 1);
+    print_num(get_epoch_secs());
+    print("] zone=", 7);
+    if (g_zone_id != 0) { print(str_data(g_zone_id), str_len(g_zone_id)); }
+    print(" reset (rooms=", 14);
+    print_num(world_room_count());
+    print(", mobs=", 7);
+    print_num(mobs);
+    print(", objs=", 7);
+    print_num(objs);
+    println(")");
+    return 0;
+}
+
+# Reset the zone if its interval has elapsed AND no player is present.
+# Deferred (player present) resets do NOT advance g_zone_last_reset_ms, so
+# the reset fires on the first empty tick after the window passes.
+fn maybe_zone_reset(): i64 {
+    if (world_room_count() == 0) { return 0; }
+    var interval_ms = g_zone_reset_secs * 1000;
+    if (g_reset_secs_override > 0) { interval_ms = g_reset_secs_override * 1000; }
+    var now = clock_now_ms();
+    if (now - g_zone_last_reset_ms < interval_ms) { return 0; }   # window not elapsed
+    if (zone_has_player() == 1) { return 0; }                     # M7-B defer
+    var mobs = zone_reset_mobs();   # M7-C
+    var objs = zone_reset_objs();   # M7-D
+    g_zone_last_reset_ms = now;
+    zone_reset_log(mobs, objs);     # M7-E
+    return 1;
+}
+
 fn advance_tick(): i64 {
     g_tick_count = g_tick_count + 1;
     combat_tick_all();   # resolve a combat round for every engaged session
     if (g_save_interval_ticks > 0) {
         if (g_tick_count % g_save_interval_ticks == 0) { save_sweep(); }
     }
+    maybe_zone_reset();  # M7 — respawn mobs/loot when the zone empties out
     return 0;
 }
 
@@ -552,6 +606,11 @@ fn apply_idle_env(): i64 {
         var tms = atoi(tv);
         if (tms > 0) { g_tick_ms = tms; }
     }
+    var rv = getenv("YD_RESET_SECS");   # M7 — fast zone resets for testing
+    if (rv != 0) {
+        var rs = atoi(rv);
+        if (rs > 0) { g_reset_secs_override = rs; }
+    }
     return 0;
 }
 
@@ -572,7 +631,8 @@ fn cmd_serve(port): i64 {
         var mc = world_load_mobs("data/zones/hub.mobs.cyml");
         if (mc >= 0) {
             var sp = world_spawn_all();
-            print_num(mc); print(" mob templates, ", 16); print_num(sp); println(" spawned");
+            var so = zone_reset_objs();   # M7-D: place authored room objects
+            print_num(mc); print(" mob templates, ", 16); print_num(sp); print(" mobs, ", 7); print_num(so); println(" objs spawned");
         } else {
             println("world: no mobs loaded (code below)");
             print_num(mc); println("");
@@ -593,6 +653,10 @@ fn cmd_serve(port): i64 {
     g_save_interval_ticks = 300000 / g_tick_ms;
     if (g_save_interval_ticks < 1) { g_save_interval_ticks = 1; }
     println("persist: player saves + audit chain ready");
+    # M7: start the zone-reset clock from boot (resets are measured since
+    # last reset, not server start — but boot IS the first "reset").
+    g_zone_last_reset_ms = clock_now_ms();
+    println("world: zone-reset timer armed");
     println("yeoman's descent — starting event-loop listener");
     println("server: listening on port");
     print_num(port);

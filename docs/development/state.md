@@ -7,6 +7,20 @@
 
 ## Version
 
+**0.8.0** — M7 close, 2026-06-10. Zones heal themselves. The zone header's
+`reset_secs` (Hub: 900) drives a reset that respawns mobs and loot to the
+authored layout — but `maybe_zone_reset` (in `advance_tick`) defers while any
+in-world player occupies the zone, retrying each tick until it empties. Mob
+respawn tops each room up to its authored multiset (`zone_reset_mobs`: spawn
+`authored − alive`, never duplicating); object respawn reapplies room `objects`
+spawns without double-up (`zone_reset_objs`, matched by the new `OI_TPL_ID`).
+Each reset logs `[<epoch>] zone=<id> reset (rooms=N, mobs=M, objs=O)` for
+Joshua (M8). `YD_RESET_SECS` overrides the cadence for testing. **Gate met**:
+empty zone resets in window, occupied zone defers, log matches state. 272
+tests pass; live presence-gate verified. Also bumped the toolchain pin to
+**6.1.21** and removed a duplicate room-id lookup (`world_room_by_id` →
+`room_index_by_id`).
+
 **0.7.0** — M6 close, 2026-06-09. Players persist across restart. Identity is
 a sigil Ed25519 keypair derived from the player's passphrase ([ADR 0004](../adr/0004-identity-and-authentication.md)):
 a new name forges + confirms a passphrase, a known name presents it; only
@@ -38,7 +52,7 @@ persistence (M6) is next.**
 
 ## Toolchain
 
-- **Cyrius pin**: `6.1.17` (`cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.1.21` (`cyrius.cyml [package].cyrius`)
 
 ## Source layout
 
@@ -53,15 +67,18 @@ src/
                  all.X / N.X qualifiers; pure, no session I/O
   world.cyr      M3 world tree: CYML zone loader, Room struct (240 B,
                  +mob/obj list heads + spawn lists), exit resolution +
-                 dangling-ref rejection, verb→dir; pure, no session I/O
+                 dangling-ref rejection, verb→dir; pure, no session I/O;
+                 M7 zone-reset cadence (g_zone_reset_secs/_id, last-reset)
   mob.cyr        M4 mobs: templates (CYML kind=mob) + live instances,
-                 room-occupant list, keyword lookup, dice parse, spawn
+                 room-occupant list, keyword lookup, dice parse, spawn;
+                 M7 mob respawn (zone_reset_mobs — top-up to authored)
   session.cyr    Session struct (328 B), login (M1-E) + class select (M5-A)
                  + world entry, dispatch (movement, render, examine sheet,
                  social, kill/flee, abilities, get/drop/inv), ANSI SGR,
                  combat + class + ability state (SS_HP..SS_STEALTH), g_epfd
   item.cyr       M4-E/F objects: templates (CYML kind=obj) + instances,
-                 corpses + loot, get/drop/inventory, room object render
+                 corpses + loot, get/drop/inventory, room object render;
+                 OI_TPL_ID (M6 persist); M7 object respawn (zone_reset_objs)
   combat.cyr     M4 combat: xorshift RNG, d20 hit + NdM damage, kill/flee,
                  per-tick round (combat_round), mob death + player respawn,
                  M5 effective-stat buffs (guard/stim) + condition line
@@ -77,7 +94,8 @@ src/
                  (YD_TICK_MS override), epoll dispatch, idle sweep (M1-F),
                  observability (M1-H), zone+mob+obj+class load at boot,
                  room broadcast / presence / who (M3-C/F), combat_tick_all,
-                 persist_init + debounced save sweep + save-on-disconnect (M6)
+                 persist_init + debounced save sweep + save-on-disconnect (M6),
+                 M7 zone reset (maybe_zone_reset/presence gate/log) + YD_RESET_SECS
   test.cyr       top-level test entrypoint (per cyrius.cyml [build].test)
 
 data/
@@ -202,55 +220,55 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** M6 closed at 0.7.0. Next slot is **M7 — zone resets with
-player-presence gating** (v0.8.0). Pick up per the boot guide below.
+**No active cycle.** M7 closed at 0.8.0. Next slot is **M8 — Joshua operator
+interface** (v0.9.0). Pick up per the boot guide below.
 
 ---
 
 ## Next-agent boot guide
 
-You are picking up at **M7 — zone resets** ([roadmap.md M7](roadmap.md#m7--zone-resets-v080)): a zone periodically respawns its mobs and objects back to the authored layout, but **gated on player presence** — a room with a player in it doesn't yank the world out from under them. Builds on the zone loader (M3) + spawn system (M4) + the tick (M1/M4).
+You are picking up at **M8 — Joshua management interface** ([roadmap.md M8](roadmap.md#m8--joshua-management-interface-v090)): an out-of-band operator surface to inspect and steer a running server — list/boot players, reload a zone, force a reset, read the observability counters and event logs. The hooks it consumes already exist; M8 is mostly wiring them to a control channel.
 
-### What M6 left in place (persistence is done)
+### What M7 left in place (zone resets done)
 
-- **`src/persist.cyr`** owns identity (Ed25519 from passphrase, ADR 0004),
-  the save shape, crash-safe `.tmp`+rename writes, load+auth, the login phase
-  handlers, and the libro audit chain. Saves trigger on `save` / disconnect /
-  creation / a debounced tick sweep (`save_sweep` in server.cyr).
-- **Login flow now** — `login_on_name` → (`PHASE_PASS` if a record exists, else
-  `PHASE_NEWPASS`→`PHASE_CONFIRMPASS`) → `PHASE_CLASS` (new chars only) →
-  world. Returning players skip class select and `session_resume_world`s into
-  their saved room.
-- **`SS_IDENT`/`SS_AUTHED`/`SS_SAVE_DIRTY`/`SS_LAST_SAVE_MS`** are the new
-  session slots; `OI_TPL_ID` on item instances makes inventory serializable.
-- **Transient combat state is intentionally not persisted** — a restored player
-  respawns at their room, not mid-fight. M7's reset logic can lean on that.
+- **Reset engine** — `maybe_zone_reset` / `zone_has_player` / `zone_reset_log`
+  (server.cyr), `zone_reset_mobs` (mob.cyr), `zone_reset_objs` (item.cyr). The
+  timer is `g_zone_reset_secs` (from the zone header) + `g_zone_last_reset_ms`;
+  `YD_RESET_SECS` overrides. **Joshua's "force reset now" is a one-liner** —
+  set `g_zone_last_reset_ms = 0` (or call the reset directly).
+- **Observability counters** (M1-H, server.cyr) — live connections, sessions,
+  ticks, tick-drift p99 — already surfaced by the `@stats` admin verb. Joshua
+  reads the same.
+- **Event logs Joshua tails** — the reset line (`zone=<id> reset (…)`) and the
+  libro audit chain (`data/audit.libro`: logins/saves/security).
+- **`g_zone_id` / `g_zone_name`** are read from the zone header; the world is
+  still single-zone (one `g_rooms` block) — multi-zone is a pre-req if M8 wants
+  per-zone control, otherwise it operates on the one loaded zone.
 
-### What M7 needs
+### What M8 needs (sketch)
 
-1. **Reset cadence** — per-zone timer (authored in the zone header? add a field)
-   or a global interval; enqueue from `advance_tick`, never reset inline.
-2. **Presence gate** — skip respawning a room (or the whole zone) while a player
-   occupies it; reset on the next cycle once empty. Room occupant lists already
-   exist (`RM_MOB_HEAD` / players via the session list + `SS_ROOM`).
-3. **Respawn semantics** — restore authored mob/object spawns (`world_spawn_all`
-   is the M4 entry point) without duplicating live instances.
+1. **Control channel** — decide the surface: a privileged Telnet verb set
+   (`@who`/`@reload`/`@reset`/`@boot <name>`), a separate admin socket, or a
+   signal/file trigger. ADR-worthy if it adds a new wire/auth surface.
+2. **Operations** — list/boot sessions (walk `g_session_head`), reload a zone
+   (re-run `world_load_*` + respawn), force a reset, dump counters/logs.
+3. **Auth** — operator authentication (reuse the sigil/ADR-0004 machinery, or
+   a separate operator credential). Telnet-no-TLS caveat applies.
 
 ### Quick boot sanity
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test                                      # 256 assertions, all pass
-./build/persist_smoke 2>/dev/null || cyrius build programs/persist_smoke.cyr build/persist_smoke && ./build/persist_smoke
+cyrius test                                      # 272 assertions, all pass
 ./build/cyrius-yeomans-descent serve 4000
-# telnet 127.0.0.1 4000 — new name → set a passphrase → pick a class → play;
-# `save`, `quit`, reconnect with the same name+passphrase → restored in place.
-# kill -9 the server after a save → restart → reconnect → no data loss.
-# fast tick: YD_TICK_MS=200 ./build/cyrius-yeomans-descent serve 4000
+# telnet 127.0.0.1 4000 — new name → passphrase → class → play; `save`/`quit`,
+# reconnect → restored. kill -9 after a save → restart → reconnect → no loss.
+# zone resets: YD_TICK_MS=200 YD_RESET_SECS=5 ./build/...; kill a mob, leave the
+# zone empty, watch the server log for `zone=hub reset (... mobs=N ...)`.
 ```
 
 ### Open ADRs
 
 None outstanding. 0001–0003 (combat / wire / concurrency), 0004 (identity),
-0005 (zone format), 0006 (persistence shape) are all Accepted. M7 may earn a
-new ADR if reset cadence/gating has a non-obvious trade-off.
+0005 (zone format), 0006 (persistence shape) are all Accepted. M8 likely earns
+a new ADR if the operator channel adds a new wire/auth surface.

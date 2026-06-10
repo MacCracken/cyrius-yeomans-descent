@@ -387,3 +387,63 @@ fn cmd_inventory(s): i64 {
     }
     return 0;
 }
+
+# === M7-D — object respawn (reapply authored room object spawns) ==========
+# A room's `objects` spawn list is reapplied without duplicating objects
+# already present: an authored id is (re)spawned only if no object instance
+# in the room already carries that template id (OI_TPL_ID). Used both at
+# boot (room empty → spawns all authored) and on zone reset. Corpses /
+# dropped loot carry no template id, so they never block or get matched.
+
+fn _obj_id_present(ri, idptr, idlen): i64 {
+    var o = room_obj_head(room_at(ri));
+    while (o != 0) {
+        if (oi_tpl_id_len(o) == idlen) {
+            var j = 0;
+            var same = 1;
+            while (j < idlen) {
+                if ((load8(oi_tpl_id_ptr(o) + j) & 0xFF) != (load8(idptr + j) & 0xFF)) { same = 0; j = idlen; }
+                else { j = j + 1; }
+            }
+            if (same == 1) { return 1; }
+        }
+        o = oi_next(o);
+    }
+    return 0;
+}
+
+fn zone_reset_room_objs(ri): i64 {
+    var s = room_objspawn(room_at(ri));
+    if (s == 0) { return 0; }
+    var p = str_data(s);
+    var len = str_len(s);
+    var spawned = 0;
+    var i = 0;
+    while (i < len) {
+        if ((load8(p + i) & 0xFF) == 32) { i = i + 1; continue; }
+        var start = i;
+        while (i < len) { if ((load8(p + i) & 0xFF) == 32) { break; } i = i + 1; }
+        var idlen = i - start;
+        if (_obj_id_present(ri, p + start, idlen) == 0) {
+            var tpl = obj_tpl_by_id(p + start, idlen);
+            if (tpl != 0) {
+                ilist_push(room_at(ri) + RM_OBJ_HEAD, item_new(tpl));
+                spawned = spawned + 1;
+            }
+        }
+    }
+    return spawned;
+}
+
+# Reapply object spawns across every room. Returns objects spawned. At boot
+# the rooms are empty so this places the full authored set; on reset it only
+# refills what's gone.
+fn zone_reset_objs(): i64 {
+    var spawned = 0;
+    var ri = 0;
+    while (ri < g_room_count) {
+        spawned = spawned + zone_reset_room_objs(ri);
+        ri = ri + 1;
+    }
+    return spawned;
+}

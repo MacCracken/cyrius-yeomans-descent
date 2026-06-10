@@ -23,7 +23,7 @@
 | **0.5.0** | M4 — combat tick + hit/damage math + corpses | ✅ 2026-06-09 |
 | **0.6.0** | M5 — four classes playable solo through the starter zone | ✅ 2026-06-09 |
 | **0.7.0** | M6 — libro+sigil player persistence (Ed25519 identity) + crash-safe writes | ✅ 2026-06-09 |
-| **0.8.0** | M7 — zone resets with player-presence gating | |
+| **0.8.0** | M7 — zone resets with player-presence gating | ✅ 2026-06-10 |
 | **0.9.0** | M8 — Joshua operator interface | |
 | **0.9.x** | Security sweep + closeout pass | |
 | **1.0.0** | Hardening + internal Summer-of-Games playtest signed off | |
@@ -32,7 +32,7 @@
 
 ## In progress
 
-**No active cycle.** M6 closed at 0.7.0 — players persist across restart (Ed25519 identity via sigil, per-player signed `data/players/<name>.cyml` with atomic `.tmp`+rename, libro audit chain). Gate met: `kill -9` mid-session → restart → player restores at their last room with full attrs/inventory. ADR 0004 + 0006 resolved. Next slot is **M7 — zone resets with player-presence gating** (v0.8.0). Pickup pointer in [`state.md`](state.md).
+**No active cycle.** M7 closed at 0.8.0 — zones reset mobs/loot to the authored layout on the `reset_secs` timer, gated on player presence (a populated zone defers until empty). Gate met: empty zone resets within its window; an occupied zone does not; the reset log matches observed state. Next slot is **M8 — Joshua operator interface** (v0.9.0). Pickup pointer in [`state.md`](state.md).
 
 ---
 

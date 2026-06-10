@@ -744,6 +744,68 @@ fn test_persist(): i64 {
     return 0;
 }
 
+# === M7 — zone resets: mob top-up + object no-double-up ===
+fn _count_all_mobs(): i64 {
+    var total = 0;
+    var ri = 0;
+    while (ri < world_room_count()) {
+        var m = room_mob_head(room_at(ri));
+        while (m != 0) { total = total + 1; m = mi_next(m); }
+        ri = ri + 1;
+    }
+    return total;
+}
+
+fn test_reset(): i64 {
+    test_group("reset");
+
+    # Load the real Hub (rooms + mob/obj templates) and spawn it.
+    assert_eq(world_load_rooms("data/zones/hub.rooms.cyml"), WL_OK, "hub rooms load");
+    assert(world_load_objs("data/zones/hub.objs.cyml") >= 0, "hub obj templates load");
+    assert(world_load_mobs("data/zones/hub.mobs.cyml") >= 0, "hub mob templates load");
+    assert(g_zone_reset_secs > 0, "reset_secs read from zone header");
+
+    var n0 = world_spawn_all();
+    assert(n0 > 0, "boot spawns mobs");
+    assert_eq(_count_all_mobs(), n0, "all spawned mobs alive");
+
+    # Reset with a full zone is a no-op (no deficit, no duplicates).
+    assert_eq(zone_reset_mobs(), 0, "full zone → reset spawns nothing");
+    assert_eq(_count_all_mobs(), n0, "mob count unchanged");
+
+    # Clear the whole zone, then reset → full authored repopulation.
+    var ri = 0;
+    while (ri < world_room_count()) {
+        var m = room_mob_head(room_at(ri));
+        while (m != 0) { var nx = mi_next(m); mob_remove(m); m = nx; }
+        ri = ri + 1;
+    }
+    assert_eq(_count_all_mobs(), 0, "zone cleared");
+    assert_eq(zone_reset_mobs(), n0, "reset respawns the full authored population");
+    assert_eq(_count_all_mobs(), n0, "zone repopulated to authored count");
+
+    # Partial: remove one mob, reset tops up exactly one (multiset-correct,
+    # so a 'scavver scavver' room refills only the missing one).
+    var first = 0;
+    ri = 0;
+    while (ri < world_room_count()) {
+        var h = room_mob_head(room_at(ri));
+        if (h != 0) { first = h; ri = world_room_count(); }
+        else { ri = ri + 1; }
+    }
+    mob_remove(first);
+    assert_eq(_count_all_mobs(), n0 - 1, "one mob removed");
+    assert_eq(zone_reset_mobs(), 1, "reset spawns exactly the missing one");
+    assert_eq(_count_all_mobs(), n0, "back to full population");
+
+    # M7-D object respawn: synthesize an objspawn on room 0 and reapply.
+    store64(room_at(0) + RM_OBJSPAWN, str_from("scrip"));
+    assert_eq(zone_reset_room_objs(0), 1, "objspawn places the authored object");
+    assert_eq(zone_reset_room_objs(0), 0, "no double-up — object already present");
+
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -764,6 +826,7 @@ fn main() {
     test_classes();
     test_idle();
     test_persist();
+    test_reset();
 
     return assert_summary();
 }

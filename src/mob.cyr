@@ -303,3 +303,84 @@ fn world_spawn_all(): i64 {
     }
     return spawned;
 }
+
+# === M7-C — mob respawn (top-up to the authored multiset) =================
+# A reset restores each room to its authored mob population WITHOUT
+# duplicating mobs still alive: for template T authored k times in a room,
+# spawn (k - currently-alive-of-T) fresh instances. Each token is acted on
+# only at its first occurrence so duplicate tokens ("scavver scavver")
+# resolve to a count, not k separate spawns. Spawned mobs are full-HP at
+# their authored room (mob_spawn).
+
+# Living instances of `tpl` currently in room `ri`.
+fn _mob_alive_count(ri, tpl): i64 {
+    var m = room_mob_head(room_at(ri));
+    var n = 0;
+    while (m != 0) {
+        if (mi_tpl(m) == tpl) { n = n + 1; }
+        m = mi_next(m);
+    }
+    return n;
+}
+
+# How many tokens in spawn string [p,len) resolve to `tpl`.
+fn _spawn_count_of(p, len, tpl): i64 {
+    var n = 0;
+    var i = 0;
+    while (i < len) {
+        if ((load8(p + i) & 0xFF) == 32) { i = i + 1; continue; }
+        var st = i;
+        while (i < len) { if ((load8(p + i) & 0xFF) == 32) { break; } i = i + 1; }
+        if (mob_tpl_by_id(p + st, i - st) == tpl) { n = n + 1; }
+    }
+    return n;
+}
+
+# Is the token at byte offset `start` the FIRST token resolving to `tpl`?
+fn _spawn_is_first(p, len, start, tpl): i64 {
+    var i = 0;
+    while (i < len) {
+        if ((load8(p + i) & 0xFF) == 32) { i = i + 1; continue; }
+        var st = i;
+        while (i < len) { if ((load8(p + i) & 0xFF) == 32) { break; } i = i + 1; }
+        if (mob_tpl_by_id(p + st, i - st) == tpl) {
+            if (st == start) { return 1; }
+            return 0;
+        }
+    }
+    return 0;
+}
+
+# Top one room up to its authored mob population. Returns mobs spawned.
+fn zone_reset_room_mobs(ri): i64 {
+    var s = room_mobspawn(room_at(ri));
+    if (s == 0) { return 0; }
+    var p = str_data(s);
+    var len = str_len(s);
+    var spawned = 0;
+    var i = 0;
+    while (i < len) {
+        if ((load8(p + i) & 0xFF) == 32) { i = i + 1; continue; }
+        var start = i;
+        while (i < len) { if ((load8(p + i) & 0xFF) == 32) { break; } i = i + 1; }
+        var tpl = mob_tpl_by_id(p + start, i - start);
+        if (tpl != 0) {
+            if (_spawn_is_first(p, len, start, tpl) == 1) {
+                var deficit = _spawn_count_of(p, len, tpl) - _mob_alive_count(ri, tpl);
+                while (deficit > 0) { mob_spawn(tpl, ri); spawned = spawned + 1; deficit = deficit - 1; }
+            }
+        }
+    }
+    return spawned;
+}
+
+# Top up every room in the zone. Returns total mobs spawned this reset.
+fn zone_reset_mobs(): i64 {
+    var spawned = 0;
+    var ri = 0;
+    while (ri < g_room_count) {
+        spawned = spawned + zone_reset_room_mobs(ri);
+        ri = ri + 1;
+    }
+    return spawned;
+}

@@ -4,6 +4,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-06-10
+
+**M7 — zone resets.** The world heals itself: mobs and loot respawn to the
+authored layout on a timer, but never while a player is standing in the zone.
+Gate met: an empty zone resets within its window; a zone with a player in any
+room defers until it empties.
+
+### Added
+
+- **M7-A — per-zone reset timer.** The zone header's `reset_secs` (Hub: 900)
+  is read into `g_zone_reset_secs`; the clock tracks time since the last reset
+  (armed at boot), not since server start. `YD_RESET_SECS` overrides it for
+  testing/ops, alongside `YD_TICK_MS` / `YD_IDLE_MS`.
+- **M7-B — player-presence gate.** `maybe_zone_reset` (in `advance_tick`)
+  defers a due reset while any in-world session occupies the zone, retrying
+  each tick until it empties — single-writer, so the snapshot can't race
+  ([ADR 0003](docs/adr/0003-single-thread-event-loop-concurrency.md)).
+- **M7-C — mob respawn.** `zone_reset_mobs` tops each room up to its authored
+  mob multiset: for a template authored *k* times, it spawns *k − alive* fresh
+  full-HP instances, so living mobs are never duplicated and a `scavver
+  scavver` room refills only what died.
+- **M7-D — object respawn.** `zone_reset_objs` reapplies each room's `objects`
+  spawn list without duplicating objects already present (matched by the new
+  `OI_TPL_ID`); corpses/dropped loot never match or block. Also wired at boot,
+  so authored room objects now spawn (no Hub room declares any yet — mechanism
+  is in place for future zones).
+- **M7-E — reset event log.** Each reset emits one line for Joshua (M8):
+  `[<epoch>] zone=<id> reset (rooms=N, mobs=M, objs=O)`.
+
+### Changed
+
+- Boot now reports `… mobs, … objs spawned` and arms the zone-reset timer.
+
+### Fixed
+
+- Removed a duplicate room-id lookup: M6's `world_room_by_id` re-implemented
+  the existing `room_index_by_id` (M3-B); `persist.cyr` now calls the latter.
+
 ## [0.7.0] — 2026-06-09
 
 **M6 — player persistence.** Players now survive a server restart. The gate

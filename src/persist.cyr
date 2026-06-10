@@ -358,7 +358,7 @@ fn player_auth_load(s, pass, passlen): i64 {
     var roomv = toml_get(pairs, "room");
     var ridx = 0 - 1;
     if (roomv != 0) {
-        if (str_len(roomv) > 0) { ridx = world_room_by_id(str_data(roomv), str_len(roomv)); }
+        if (str_len(roomv) > 0) { ridx = room_index_by_id(str_data(roomv), str_len(roomv)); }
     }
     if (ridx < 0) { ridx = world_start_room(); }
     store64(s + SS_ROOM, ridx);

@@ -24,7 +24,7 @@ include "src/classes.cyr"
 include "src/persist.cyr"   # uses sigil/libro + session/item/world/classes enums
 include "src/server.cyr"
 
-var VERSION_STRING = "0.7.0";
+var VERSION_STRING = "0.8.0";
 
 fn print_banner(): i64 {
     println("yeoman's descent — a cyrius-native text MUD");
