@@ -3,9 +3,21 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-06-10 (v1.0.0)
+> **Last refresh**: 2026-06-10 (v1.0.1)
 
 ## Version
+
+**1.0.1** — gateway-verified maintenance, 2026-06-10. No observable change from
+1.0.0 — the frozen 1.0 surface ([ADR 0007](../adr/0007-frozen-1.0-surface.md))
+holds (no new verbs / save fields / zone fields / env knobs; no source change).
+Records Yeoman's Descent as the verified target of the **agora Descent link**
+(agora 1.4.0, its ADR 0017): agora bridges a logged-in citizen here as a
+*transparent TCP byte-proxy*, so the MUD's own telnet negotiation + Ed25519
+login flow through unchanged — the MUD authenticates the player itself. Sigil
+identity hand-off from agora is **deferred** (needs an external-identity path the
+frozen surface doesn't expose — a future two-repo bite). Verified end-to-end by
+agora's `20-descent.sh` smoke. Toolchain pin 6.1.23 (unchanged); tests unchanged
+and green.
 
 **0.9.1** — surface freeze, 2026-06-10. The public surface is enumerated and
 locked for 1.0 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)): command verbs +

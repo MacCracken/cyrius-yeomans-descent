@@ -4,6 +4,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-06-10
+
+**Gateway-verified maintenance release.** Nothing observable changed from 1.0.0 — the frozen 1.0 surface ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)) holds: no new verbs, save fields, zone fields, or env knobs, and no source change. This bump records Yeoman's Descent as the verified target of the **agora Descent link** (agora 1.4.0, its [ADR 0017](https://github.com/MacCracken/agora/blob/main/docs/adr/0017-descent-link-gateway.md)): a logged-in agora citizen can now step through a portal and reach this MUD over the shared telnet substrate.
+
+- **How the gateway works (no MUD change required).** agora dials this server as a *transparent TCP byte-proxy* and shuttles bytes both ways. Because the proxy is byte-transparent, the MUD's own RFC 1143 telnet negotiation, passphrase echo suppression, and Ed25519-from-passphrase login (ADR 0004 / 0006) flow through to the agora client unchanged — **the MUD authenticates the player itself**, exactly as for a direct connection. The two projects stay decoupled: the wire is the only contract, and each keeps its own release cycle.
+- **Identity hand-off is deferred.** Carrying agora's sigil identity across the link (single-sign-on) would require an external-identity / pre-authenticated-session path that the frozen 1.0 surface deliberately does not expose. That is a future, two-repo bite (agora ADR 0017 § Decision); for now a citizen logs into the MUD on arrival.
+- **Verification.** Exercised end-to-end by agora's `docs/examples/20-descent.sh` smoke — agora builds and starts this server, a logged-in citizen runs `descent`, and the MUD's own login banner ("By what name are you known?") proxies back through the gateway.
+- Toolchain pin unchanged (cyrius 6.1.23). Test suite unchanged and green.
+
 ## [1.0.0] — 2026-06-10
 
 **Yeoman's Descent 1.0 — feature-complete.** The clean cut: a stabilisation-only
