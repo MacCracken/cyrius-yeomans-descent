@@ -18,4 +18,10 @@ output = "cyrius-yeomans-descent"
 # by net.cyr's Result return shape), fnptr (vec internals), freelist
 # (per-session arena freed at disconnect per ADR 0003).
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "net", "chrono", "result", "tagged", "fnptr", "freelist", "cyml", "toml"]
+
+# M6 (persistence) is BLOCKED on a sigil bug: sigil's NI-accelerated
+# crypto SIGILLs under cyrius 6.1.20 (filed P1 on sigil's roadmap,
+# 2026-06-09). The chosen ADR 0004 identity model is Ed25519 via sigil;
+# it can't link/run here until sigil ships a 6.1.x-compatible build.
+# No external deps land until then.
 ---
