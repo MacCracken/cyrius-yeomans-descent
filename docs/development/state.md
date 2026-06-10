@@ -7,6 +7,19 @@
 
 ## Version
 
+**0.9.0** — security sweep, 2026-06-10. A CVE-informed audit of the
+network-input + save-file surface. Four issues found and fixed, all reachable
+from a raw TCP connection or a planted save: two heap overflows (`ident_derive`
+copied the passphrase using the raw line length — **pre-auth**; `player_auth_load`
+hex-decoded `salt`/`pubkey`/`sig` with no length bound **before** signature
+verification), an OOB read (unvalidated `class` index → `g_classes + cls*CL_SIZE`),
+and a DoS (unvalidated `ndice` → unbounded `roll()` loop). Root cause: a save's
+Ed25519 signature proves its *author*, not its field *values*, so every loaded
+field is now bounded/validated. Ed25519 malleability (CVE-2020-36843 class) was
+researched and judged non-applicable (integrity use, not uniqueness; verifier is
+vendored sigil). 293 tests pass (9 new `security`); remote pre-auth vector
+live-verified non-crashing. Pin → 6.1.23.
+
 **0.8.3** — operator verbs, 2026-06-10. `@who` lists in-world sessions (name +
 room) and `@reset` forces an immediate zone reset (idempotent top-up, re-arms
 the timer, logs it) — read-only Joshua groundwork (`render_who`/`render_reset`
@@ -74,7 +87,7 @@ persistence (M6) is next.**
 
 ## Toolchain
 
-- **Cyrius pin**: `6.1.22` (`cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.1.23` (`cyrius.cyml [package].cyrius`)
 
 ## Source layout
 
@@ -233,8 +246,8 @@ including `dist/sigil.cyr` without listing the modules its crypto calls
 undefined — cyrius 6.1.x only *warns* and emits a `ud2`, so it built then
 SIGILL'd (exit 132) the instant `sha256`/`ed25519` ran. Sigil 3.7.8's
 CHANGELOG diagnosed it against this repo; the fix is the opt-in list now in
-`cyrius.cyml [deps] stdlib`. Joshua still lands at M8 — see
-[roadmap M8](roadmap.md#m8--joshua-management-interface-v090).
+`cyrius.cyml [deps] stdlib`. (Joshua/M8 is now deferred to post-1.0 — see the
+boot guide below.)
 
 ## Consumers
 
@@ -242,61 +255,75 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** M7 closed at 0.8.0. Next slot is **M8 — Joshua operator
-interface** (v0.9.0). Pick up per the boot guide below.
+**No active cycle.** 0.9.0 (security sweep) closed. Next slot is **0.9.1 —
+surface freeze**, then **1.0.0 — clean release**. **M8 (Joshua) is deferred to
+post-1.0.** Pick up per the boot guide below.
 
 ---
 
 ## Next-agent boot guide
 
-You are picking up at **M8 — Joshua management interface** ([roadmap.md M8](roadmap.md#m8--joshua-management-interface-v090)): an out-of-band operator surface to inspect and steer a running server — list/boot players, reload a zone, force a reset, read the observability counters and event logs. The hooks it consumes already exist; M8 is mostly wiring them to a control channel.
+You are picking up at **0.9.1 — surface freeze**: the path to 1.0.0 is
+stabilisation, not new features. The job is to **lock the public surface** so
+1.0.0 changes nothing observable, then 1.0.0 is final hardening + a playtest
+sign-off.
 
-### What M7 left in place (zone resets done)
+### What "surface" means here (enumerate + lock)
 
-- **Reset engine** — `maybe_zone_reset` / `zone_has_player` / `zone_reset_log`
-  (server.cyr), `zone_reset_mobs` (mob.cyr), `zone_reset_objs` (item.cyr). The
-  timer is `g_zone_reset_secs` (from the zone header) + `g_zone_last_reset_ms`;
-  `YD_RESET_SECS` overrides. **Joshua's "force reset now" is a one-liner** —
-  set `g_zone_last_reset_ms = 0` (or call the reset directly).
-- **Observability counters** (M1-H, server.cyr) — live connections, sessions,
-  ticks, tick-drift p99 — already surfaced by the `@stats` admin verb. Joshua
-  reads the same.
-- **Event logs Joshua tails** — the reset line (`zone=<id> reset (…)`) and the
-  libro audit chain (`data/audit.libro`: logins/saves/security).
-- **`g_zone_id` / `g_zone_name`** are read from the zone header; the world is
-  still single-zone (one `g_rooms` block) — multi-zone is a pre-req if M8 wants
-  per-zone control, otherwise it operates on the one loaded zone.
+- **Command verbs** — the verb table in `parser.cyr` (`VERB_*`, aliases) +
+  the `@`-admin namespace (`@stats`/`@who`/`@reset`). Freeze the names + syntax.
+- **Save-record fields** — the `[player]` schema in `persist.cyr` (`_build_record`
+  / `player_auth_load`). Once frozen, new fields need a versioned migration, not
+  a silent add. Consider stamping a `schema = 1` field now so 1.x can migrate.
+- **Wire behaviour** — Telnet negotiation (`telnet.cyr`), the echo salvo
+  (0.8.1), line handling. Freeze.
+- **Zone-file format** — already ADR 0005; the `objects`/`mobs`/`reset_secs`
+  fields are now load-bearing. Freeze the field set.
+- **Env knobs** — `YD_TICK_MS` / `YD_IDLE_MS` / `YD_RESET_SECS`. Freeze names.
 
-### What M8 needs (sketch)
+### Suggested 0.9.1 work
 
-1. **Control channel** — `@stats`/`@who`/`@reset` already exist (0.8.3,
-   `render_*` in server.cyr) but are **unguarded**. Decide the full surface
-   (add `@reload`/`@boot <name>`?) and whether it stays in-band Telnet verbs or
-   moves to a separate admin socket / signal trigger. ADR-worthy if it adds a
-   new wire/auth surface.
-2. **Operations** — `@who` (done) lists sessions; still want boot-session
-   (walk `g_session_head` + `drop_session`), reload a zone (re-run
-   `world_load_*` + `world_spawn_all`/`zone_reset_*`), `@reset` (done), dump
-   counters/logs.
-3. **Auth** — gate the `@`-namespace behind operator authentication (reuse the
-   sigil/ADR-0004 machinery, or a separate operator credential). Telnet-no-TLS
-   caveat applies. **This is the main new work** — the operations are mostly
-   wired already.
+1. **Audit + document the surface** (a `docs/` reference or an ADR "frozen
+   surface for 1.0"). This is the deliverable.
+2. **Gate the `@`-namespace** — the 0.9.0 sweep noted `@who`/`@reset` are
+   unguarded; freezing the surface is the moment to decide operator auth (or
+   explicitly defer it with `@`-verbs disabled-by-default behind an env flag).
+   This is the one real security item left before 1.0.
+3. **Schema-version stamp** on save records, so post-1.0 fields migrate cleanly.
+4. Resist scope creep — anything that adds a verb/field/knob belongs after 1.0.
+
+### Security posture (post-0.9.0)
+
+The 0.9.0 sweep fixed two heap overflows (one pre-auth), an OOB read, and a DoS
+— all in `persist.cyr`'s load path, rooted in trusting signed-but-unvalidated
+save fields. **Principle now in force**: a record signature proves *authorship*,
+not field *validity* — every loaded field is bounded (`_clamp`, exact hex
+lengths, `class` range, passphrase length). `security` test group guards it.
+Re-run a quick adversarial pass before 1.0 (long inputs, out-of-range fields,
+truncated/duplicated records).
 
 ### Quick boot sanity
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test                                      # 272 assertions, all pass
+cyrius test                                      # 293 assertions, all pass
 ./build/cyrius-yeomans-descent serve 4000
-# telnet 127.0.0.1 4000 — new name → passphrase → class → play; `save`/`quit`,
-# reconnect → restored. kill -9 after a save → restart → reconnect → no loss.
-# zone resets: YD_TICK_MS=200 YD_RESET_SECS=5 ./build/...; kill a mob, leave the
-# zone empty, watch the server log for `zone=hub reset (... mobs=N ...)`.
+# new name → passphrase (echo-suppressed) → class → play; `save`/`passwd`/`quit`,
+# reconnect → restored + "last seen". kill -9 after a save → restart → no loss.
+# resets: YD_RESET_SECS=5 ...; empty the zone, watch `zone=hub reset (...)`.
+# admin: @stats / @who / @reset.
 ```
+
+### Deferred — M8 (Joshua), post-1.0
+
+An operator interface to steer a running server (list/boot players, reload a
+zone, force a reset, read counters/logs). Most hooks already exist:
+`@stats`/`@who`/`@reset` (server.cyr `render_*`), `g_session_head` for sessions,
+`g_zone_last_reset_ms = 0` to force a reset, the libro audit chain + reset log.
+The real work is the control channel + operator auth — see [roadmap M8](roadmap.md#m8--joshua-management-interface-v090).
 
 ### Open ADRs
 
-None outstanding. 0001–0003 (combat / wire / concurrency), 0004 (identity),
-0005 (zone format), 0006 (persistence shape) are all Accepted. M8 likely earns
-a new ADR if the operator channel adds a new wire/auth surface.
+None outstanding. 0001–0006 all Accepted. 0.9.1 likely earns a "frozen 1.0
+surface" ADR; M8 (post-1.0) earns one if the operator channel adds a new
+wire/auth surface.

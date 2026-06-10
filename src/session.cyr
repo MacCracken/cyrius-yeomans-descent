@@ -65,7 +65,7 @@ enum SS {
     SS_STEALTH    = 320;  # 1 while sneaking (backstab primed)
     # M6 identity / persistence (transient — the seckey is NEVER serialized;
     # it is re-derived from the typed passphrase at login per ADR 0004).
-    SS_IDENT        = 328; # ptr to 112B ident block: salt(16)|pubkey(32)|seckey(64)
+    SS_IDENT        = 328; # ptr to 120B ident block: salt(16)|pubkey(32)|seckey(64)|created(8)
     SS_AUTHED       = 336; # 1 once the passphrase verified / char created
     SS_SAVE_DIRTY   = 344; # 1 if state changed since the last save (debounce)
     SS_LAST_SAVE_MS = 352; # monotonic ms of the last successful save

@@ -118,13 +118,28 @@ fn _path_for(name, len, out): i64 {
 # Derive the Ed25519 keypair for (salt, passphrase): seed = SHA-256(salt||pass).
 # Writes 64-byte secret to sk_out and 32-byte public key to pk_out.
 fn ident_derive(salt, pass, passlen, sk_out, pk_out): i64 {
+    # SECURITY (0.9.0): g_ident_scratch is 256 bytes with the seed at offset
+    # 200, so the passphrase copy region is [16, 200) = 184 bytes. Hard-clamp
+    # passlen to PASS_MAX (64) so a missed caller-side bound can never overflow
+    # — the returning-login path passes the raw line length (up to LINE_CAP).
+    var n = passlen;
+    if (n > PASS_MAX) { n = PASS_MAX; }
+    if (n < 0) { n = 0; }
     var msg = g_ident_scratch;
     memcpy(msg, salt, SALT_LEN);
-    memcpy(msg + SALT_LEN, pass, passlen);
+    memcpy(msg + SALT_LEN, pass, n);
     var seed = g_ident_scratch + 200;
-    sha256(msg, SALT_LEN + passlen, seed);
+    sha256(msg, SALT_LEN + n, seed);
     ed25519_keypair(seed, sk_out, pk_out);
     return 0;
+}
+
+# Clamp v into [lo, hi]. Used to bound every field loaded from a (player-
+# owned, signed-but-not-value-validated) save record.
+fn _clamp(v, lo, hi): i64 {
+    if (v < lo) { return lo; }
+    if (v > hi) { return hi; }
+    return v;
 }
 
 # Lazily allocate the per-session identity block (zeroed). Returns its ptr.
@@ -320,6 +335,14 @@ fn player_auth_load(s, pass, passlen): i64 {
     var salt   = g_persist_dec;          # [0,16)
     var filepk = g_persist_dec + 16;     # [16,48)
     var filesig = g_persist_dec + 48;    # [48,112)
+    # SECURITY (0.9.0): hex_decode_into writes str_len/2 bytes with NO
+    # destination bound, and this runs BEFORE signature verification — an
+    # over-long salt/pubkey/sig hex would overflow the 256-byte g_persist_dec.
+    # Require the exact hex lengths up front so a corrupt/planted record is
+    # rejected before any decode.
+    if (str_len(saltv) != SALT_LEN * 2) { return 0 - 2; }
+    if (str_len(pkv)   != PK_LEN * 2)   { return 0 - 2; }
+    if (str_len(sigv)  != SIG_LEN * 2)  { return 0 - 2; }
     if (hex_decode_into(str_data(saltv), str_len(saltv), salt) == 0) { return 0 - 2; }
     if (hex_decode_into(str_data(pkv), str_len(pkv), filepk) == 0) { return 0 - 2; }
     if (hex_decode_into(str_data(sigv), str_len(sigv), filesig) == 0) { return 0 - 2; }
@@ -333,28 +356,39 @@ fn player_auth_load(s, pass, passlen): i64 {
     }
 
     # Authentication: derive the keypair from the typed passphrase + stored
-    # salt and require the public key to match the record's.
+    # salt and require the public key to match the record's. SECURITY: bound
+    # the passphrase length first — ident_derive copies it into a fixed
+    # scratch (it also clamps, but reject cleanly here as a wrong passphrase).
+    if (passlen < PASS_MIN) { return 0; }
+    if (passlen > PASS_MAX) { return 0; }
     var blk = sess_ident(s);
     ident_derive(salt, pass, passlen, blk + IDENT_SK, blk + IDENT_PK);
     if (_bytes_eq(blk + IDENT_PK, filepk, PK_LEN) == 0) { return 0; }
     memcpy(blk, salt, SALT_LEN);
     store64(blk + IDENT_CREATED, toml_int(pairs, "created", get_epoch_secs()));
 
-    # Restore state.
-    store64(s + SS_CLASS, toml_int(pairs, "class", 0 - 1));
-    store64(s + SS_HP,    toml_int(pairs, "hp", PC_HP));
-    store64(s + SS_MAXHP, toml_int(pairs, "maxhp", PC_HP));
-    store64(s + SS_AC,    toml_int(pairs, "ac", PC_AC));
-    store64(s + SS_HIT,   toml_int(pairs, "hit", PC_HIT));
-    store64(s + SS_NDICE, toml_int(pairs, "ndice", PC_NDICE));
-    store64(s + SS_DSIZE, toml_int(pairs, "dsize", PC_DSIZE));
-    store64(s + SS_DMOD,  toml_int(pairs, "dmod", PC_DMOD));
-    store64(s + SS_STR, toml_int(pairs, "str", 10));
-    store64(s + SS_DEX, toml_int(pairs, "dex", 10));
-    store64(s + SS_CON, toml_int(pairs, "con", 10));
-    store64(s + SS_TEC, toml_int(pairs, "tec", 10));
-    store64(s + SS_ENERGY,    toml_int(pairs, "energy", 0));
-    store64(s + SS_MAXENERGY, toml_int(pairs, "maxenergy", 0));
+    # Restore state. SECURITY (0.9.0): the Ed25519 signature proves the record's
+    # AUTHOR, not its field values — a player owns their key and can re-sign a
+    # record with any numbers. So validate every loaded field. The class index
+    # feeds class_name_ptr() pointer math (`g_classes + cls*CL_SIZE`) → OOB read
+    # if unbounded; ndice feeds the roll() loop → DoS. Clamp them all.
+    var cls = toml_int(pairs, "class", 0 - 1);
+    if (cls < 0) { cls = 0 - 1; }
+    if (cls >= g_class_count) { cls = 0 - 1; }   # out-of-range → classless, not OOB
+    store64(s + SS_CLASS, cls);
+    store64(s + SS_HP,    _clamp(toml_int(pairs, "hp", PC_HP), 0, 1000000));
+    store64(s + SS_MAXHP, _clamp(toml_int(pairs, "maxhp", PC_HP), 1, 1000000));
+    store64(s + SS_AC,    _clamp(toml_int(pairs, "ac", PC_AC), 0 - 100, 100));
+    store64(s + SS_HIT,   _clamp(toml_int(pairs, "hit", PC_HIT), 0 - 100, 1000));
+    store64(s + SS_NDICE, _clamp(toml_int(pairs, "ndice", PC_NDICE), 1, 100));
+    store64(s + SS_DSIZE, _clamp(toml_int(pairs, "dsize", PC_DSIZE), 1, 1000));
+    store64(s + SS_DMOD,  _clamp(toml_int(pairs, "dmod", PC_DMOD), 0 - 1000, 10000));
+    store64(s + SS_STR, _clamp(toml_int(pairs, "str", 10), 1, 1000));
+    store64(s + SS_DEX, _clamp(toml_int(pairs, "dex", 10), 1, 1000));
+    store64(s + SS_CON, _clamp(toml_int(pairs, "con", 10), 1, 1000));
+    store64(s + SS_TEC, _clamp(toml_int(pairs, "tec", 10), 1, 1000));
+    store64(s + SS_ENERGY,    _clamp(toml_int(pairs, "energy", 0), 0, 1000000));
+    store64(s + SS_MAXENERGY, _clamp(toml_int(pairs, "maxenergy", 0), 0, 1000000));
     store64(s + SS_TARGET, 0);
 
     var roomv = toml_get(pairs, "room");
@@ -455,6 +489,13 @@ fn login_on_newpass(s, buf, len): i64 {
 
 fn login_on_confirm(s, buf, len): i64 {
     var blk = sess_ident(s);
+    # A valid passphrase is <= PASS_MAX (the new-pass step enforced it), so an
+    # over-long confirm cannot match — treat as a mismatch (ident_derive also
+    # clamps, so this is purely for clean behaviour).
+    if (len > PASS_MAX) {
+        session_appendtx_cstr(s, "\r\nThose don't match. Let's begin again.\r\n");
+        return login_begin_newpass(s);
+    }
     var pk2 = g_persist_dec + 128;
     var sk2 = g_persist_dec + 160;
     ident_derive(blk, buf, len, sk2, pk2);
@@ -507,6 +548,11 @@ fn chpass_on_confirm(s, buf, len): i64 {
     var cand = g_persist_dec;
     var pk2 = g_persist_dec + 128;
     var sk2 = g_persist_dec + 192;
+    if (len > PASS_MAX) {   # over-long → cannot match the (<=PASS_MAX) candidate
+        store64(s + SS_PHASE, PHASE_CHPASS_NEW);
+        session_appendtx_cstr(s, "\r\nThose don't match. New passphrase (4-64 chars): ");
+        return 0;
+    }
     ident_derive(cand, buf, len, sk2, pk2);
     if (_bytes_eq(pk2, cand + IDENT_PK, PK_LEN) == 0) {
         store64(s + SS_PHASE, PHASE_CHPASS_NEW);

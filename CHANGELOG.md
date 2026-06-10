@@ -4,6 +4,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-06-10
+
+**Security sweep & audit.** A focused pass over the network-input and
+save-file attack surface, informed by current CVE classes (telnet pre-auth
+overflows à la CVE-2026-32746, Ed25519 malleability à la CVE-2020-36843).
+Four memory-safety / DoS issues found and fixed; all reachable from a raw TCP
+connection or a planted save file. New `security` test group (9 assertions);
+the remote pre-auth vector is live-verified to no longer crash the server.
+
+### Security
+
+- **[Critical] Two heap buffer overflows in the auth path, both bounded now.**
+  (1) `ident_derive` copied the passphrase into a 256-byte scratch using the
+  raw line length (up to `LINE_CAP` = 4096) — reachable **pre-auth** at the
+  returning-login passphrase prompt. (2) `player_auth_load` hex-decoded the
+  record's `salt`/`pubkey`/`sig` into 16/32/64-byte slots with no length check
+  **before** signature verification, so an over-long hex field in a planted
+  record overflowed the heap. Fixes: `ident_derive` hard-clamps the passphrase
+  to `PASS_MAX`; every derive call site bounds its length; the loader requires
+  exact hex lengths before decoding.
+- **[High] OOB read from an unvalidated `class` index.** A loaded `class` fed
+  `class_name_ptr(cls) = g_classes + cls*CL_SIZE` with no bound — a player owns
+  their Ed25519 key and can re-sign their own record with `class = <huge>`,
+  leaking heap memory to the wire on the next `examine`/`help`. Now clamped to
+  `[0, g_class_count)` (out-of-range → classless).
+- **[Medium] Server-wide DoS from an unvalidated `ndice`.** A re-signed save
+  with `ndice = 2e9` spun the `roll()` loop for billions of iterations inside
+  the single-thread combat tick. Every numeric save field is now clamped to a
+  sane range on load.
+- **Hardening principle.** A save's Ed25519 signature proves its **author**,
+  not its field **values** — so every field loaded from a player-owned record
+  is now validated/clamped, not trusted on the strength of the signature.
+
+### Notes
+
+- **Ed25519 signature malleability** (CVE-2020-36843 / CVE-2026-33895 class:
+  missing `S < L` check) was researched and judged **non-applicable**: the
+  record signature is used for integrity, not signature uniqueness or
+  replay-prevention, so a malleable variant cannot tamper a record; and the
+  verifier lives in vendored `sigil`. No code change.
+- Toolchain pin → **6.1.23**.
+
 ## [0.8.3] — 2026-06-10
 
 Operator read-only verbs — groundwork for the M8 Joshua interface, surfacing

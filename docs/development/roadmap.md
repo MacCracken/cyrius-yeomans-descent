@@ -24,15 +24,19 @@
 | **0.6.0** | M5 — four classes playable solo through the starter zone | ✅ 2026-06-09 |
 | **0.7.0** | M6 — libro+sigil player persistence (Ed25519 identity) + crash-safe writes | ✅ 2026-06-09 |
 | **0.8.0** | M7 — zone resets with player-presence gating | ✅ 2026-06-10 |
-| **0.9.0** | M8 — Joshua operator interface | |
-| **0.9.x** | Security sweep + closeout pass | |
-| **1.0.0** | Hardening + internal Summer-of-Games playtest signed off | |
+| **0.8.1** | Login/identity polish — password echo, last-seen, `passwd` | ✅ 2026-06-10 |
+| **0.8.2** | Lived-in Hub content — room objects (exercises M7-D) | ✅ 2026-06-10 |
+| **0.8.3** | Operator read-only verbs — `@who` / `@reset` | ✅ 2026-06-10 |
+| **0.9.0** | Security sweep & audit — CVE-class review + memory-safety fixes | ✅ 2026-06-10 |
+| **0.9.1** | Surface freeze — lock the public command / save / wire surface | |
+| **1.0.0** | Clean release — final hardening + playtest sign-off | |
+| _future_ | M8 — Joshua operator interface (deferred post-1.0) | |
 
 ---
 
 ## In progress
 
-**No active cycle.** M7 closed at 0.8.0 — zones reset mobs/loot to the authored layout on the `reset_secs` timer, gated on player presence (a populated zone defers until empty). Gate met: empty zone resets within its window; an occupied zone does not; the reset log matches observed state. Next slot is **M8 — Joshua operator interface** (v0.9.0). Pickup pointer in [`state.md`](state.md).
+**No active cycle.** 0.9.0 closed — security sweep done: a CVE-informed audit of the network-input + save-file surface found and fixed two heap overflows (one pre-auth), an OOB-read, and a DoS, all rooting in "a signature proves authorship, not field validity." Next slot is **0.9.1 — surface freeze**: stop adding to the public surface (commands, save-record fields, wire/Telnet behaviour, the `@`-admin namespace) and lock it so 1.0.0 is a stabilisation-only release. **M8 (Joshua) is deferred to post-1.0** at the user's direction. Pickup pointer in [`state.md`](state.md).
 
 ---
 

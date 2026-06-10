@@ -870,6 +870,66 @@ fn test_login_polish(): i64 {
     return 0;
 }
 
+# === 0.9.0 — security sweep regressions ===
+fn _str_into(buf, off, cstr): i64 {
+    var i = 0;
+    while ((load8(cstr + i) & 0xFF) != 0) { store8(buf + off + i, load8(cstr + i)); i = i + 1; }
+    return off + i;
+}
+
+fn test_security(): i64 {
+    test_group("security");
+    persist_init();
+
+    # Build a real signed record, but with out-of-range class + ndice (a
+    # player owns their key, so they can sign any field values).
+    var s = _mk_sess("SecHero", 7);
+    var blk = sess_ident(s);
+    random_bytes(blk, SALT_LEN);
+    ident_derive(blk, "rightpass", 9, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 1);
+    store64(s + SS_ROOM, 0 - 1); store64(s + SS_AUTHED, 1);
+    store64(s + SS_HP, 20); store64(s + SS_MAXHP, 20);
+    store64(s + SS_CLASS, 99999999);     # would index g_classes + cls*CL_SIZE → OOB read
+    store64(s + SS_NDICE, 2000000000);   # would spin the roll() loop → DoS
+    assert_eq(player_save(s), 1, "save with extreme fields");
+
+    # On load, the signature verifies (we own the key) but fields are clamped.
+    var s2 = _mk_sess("SecHero", 7);
+    assert_eq(player_auth_load(s2, "rightpass", 9), 1, "loads with right pass");
+    assert_eq(load64(s2 + SS_CLASS), 0 - 1, "out-of-range class → classless (no OOB read)");
+    assert(load64(s2 + SS_NDICE) <= 100, "huge ndice clamped (no DoS loop)");
+
+    # Over-long passphrase is rejected as wrong — must not overflow ident_derive.
+    var bigpass = alloc(5000);
+    memset(bigpass, 65, 5000);   # 5000 'A's, far past PASS_MAX
+    var s3 = _mk_sess("SecHero", 7);
+    assert_eq(player_auth_load(s3, bigpass, 5000), 0, "over-long passphrase rejected, no crash");
+
+    # Over-long hex field in a planted record is rejected BEFORE decode — the
+    # critical pre-verify heap overflow. Forge a record with a 5000-char salt.
+    var fbuf = alloc(8000);
+    var o = _str_into(fbuf, 0, "[player]\nsalt = \"");
+    var k = 0;
+    while (k < 5000) { store8(fbuf + o, 97); o = o + 1; k = k + 1; }   # 'a' x5000
+    o = _str_into(fbuf, o, "\"\npubkey = \"");
+    k = 0; while (k < 64) { store8(fbuf + o, 48); o = o + 1; k = k + 1; }
+    o = _str_into(fbuf, o, "\"\nsig = \"");
+    k = 0; while (k < 128) { store8(fbuf + o, 48); o = o + 1; k = k + 1; }
+    o = _str_into(fbuf, o, "\"\n");
+    _path_for("Forged", 6, g_persist_path);
+    file_write_all(g_persist_path, fbuf, o);
+    var s4 = _mk_sess("Forged", 6);
+    assert_eq(player_auth_load(s4, "x", 1), 0 - 2, "over-long salt hex rejected before decode (no overflow)");
+
+    # _clamp sanity.
+    assert_eq(_clamp(5, 1, 10), 5, "clamp in-range");
+    assert_eq(_clamp(0 - 9, 1, 10), 1, "clamp below");
+    assert_eq(_clamp(99, 1, 10), 10, "clamp above");
+
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -892,6 +952,7 @@ fn main() {
     test_persist();
     test_reset();
     test_login_polish();
+    test_security();
 
     return assert_summary();
 }
