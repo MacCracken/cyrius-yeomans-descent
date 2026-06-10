@@ -2,6 +2,7 @@
 # Stdlib auto-included via cyrius.cyml; project modules included explicitly.
 
 include "src/telnet.cyr"
+include "src/parser.cyr"
 include "src/session.cyr"
 
 # Feed a byte and assert the returned TelEvent.
@@ -173,6 +174,277 @@ fn test_login(): i64 {
     return 0;
 }
 
+# === M2-A — tokenizer ===
+# Tokenize a NUL-terminated literal; return the token count.
+fn tok_cstr(pa, lit): i64 { return parser_tokenize(pa, lit, strlen(lit)); }
+
+fn test_tokenize(): i64 {
+    test_group("tokenize");
+    var pa = parser_new();
+
+    # K1: plain two-token split.
+    assert_eq(tok_cstr(pa, "get sword"), 2, "two tokens");
+    assert_eq(tok_eq(pa, 0, "get"),   1, "tok0 = get");
+    assert_eq(tok_eq(pa, 1, "sword"), 1, "tok1 = sword");
+
+    # K2: lowercase normalization.
+    tok_cstr(pa, "GET Sword");
+    assert_eq(tok_eq(pa, 0, "get"),   1, "GET → get");
+    assert_eq(tok_eq(pa, 1, "sword"), 1, "Sword → sword");
+
+    # K3: runs of spaces + leading/trailing whitespace collapse.
+    assert_eq(tok_cstr(pa, "  look   north  "), 2, "collapsed whitespace → 2");
+    assert_eq(tok_eq(pa, 0, "look"),  1, "tok0 = look");
+    assert_eq(tok_eq(pa, 1, "north"), 1, "tok1 = north");
+
+    # K4: tab is a delimiter too.
+    assert_eq(tok_cstr(pa, "say\thi"), 2, "tab splits");
+
+    # K5: a double-quoted run is one multi-word token (quotes stripped).
+    assert_eq(tok_cstr(pa, "get \"rusted drone\""), 2, "quoted phrase = 1 tok");
+    assert_eq(tok_eq(pa, 0, "get"), 1, "tok0 = get");
+    assert_eq(tok_eq(pa, 1, "rusted drone"), 1, "tok1 = 'rusted drone'");
+
+    # K6: empty quotes emit no token.
+    assert_eq(tok_cstr(pa, "say \"\""), 1, "empty quotes drop");
+    assert_eq(tok_eq(pa, 0, "say"), 1, "only token is say");
+
+    # K7: an unterminated quote runs to end of line.
+    assert_eq(tok_cstr(pa, "get \"rusted"), 2, "unterminated quote → 2 toks");
+    assert_eq(tok_eq(pa, 1, "rusted"), 1, "tok1 = rusted");
+
+    # K8: an empty line yields zero tokens.
+    assert_eq(tok_cstr(pa, ""), 0, "empty line → 0 tokens");
+    assert_eq(tok_cstr(pa, "      "), 0, "all-whitespace → 0 tokens");
+
+    # K9: tok_eq guards out-of-range indices.
+    tok_cstr(pa, "look");
+    assert_eq(tok_eq(pa, 5, "look"), 0, "oob index → no match");
+    assert_eq(tok_eq(pa, 0, "looking"), 0, "literal longer than token");
+    assert_eq(tok_eq(pa, 0, "lo"), 0, "literal shorter than token");
+
+    parser_free(pa);
+    return 0;
+}
+
+# === M2-B — verb table + aliases ===
+# Tokenize a one-word literal and return the Verb id of token 0.
+fn verb_of(pa, lit): i64 { tok_cstr(pa, lit); return verb_lookup(pa, 0); }
+
+fn test_verbs(): i64 {
+    test_group("verbs");
+    var pa = parser_new();
+
+    # canonical words resolve.
+    assert_eq(verb_of(pa, "look"),      VERB_LOOK,      "look");
+    assert_eq(verb_of(pa, "get"),       VERB_GET,       "get");
+    assert_eq(verb_of(pa, "kill"),      VERB_KILL,      "kill");
+    assert_eq(verb_of(pa, "inventory"), VERB_INVENTORY, "inventory");
+    assert_eq(verb_of(pa, "quit"),      VERB_QUIT,      "quit");
+
+    # aliases fold into their canonical verb.
+    assert_eq(verb_of(pa, "l"),   VERB_LOOK,      "l → look");
+    assert_eq(verb_of(pa, "i"),   VERB_INVENTORY, "i → inventory");
+    assert_eq(verb_of(pa, "inv"), VERB_INVENTORY, "inv → inventory");
+
+    # every cardinal direction, word + single-letter.
+    assert_eq(verb_of(pa, "north"), VERB_NORTH, "north");
+    assert_eq(verb_of(pa, "n"),     VERB_NORTH, "n → north");
+    assert_eq(verb_of(pa, "s"),     VERB_SOUTH, "s → south");
+    assert_eq(verb_of(pa, "e"),     VERB_EAST,  "e → east");
+    assert_eq(verb_of(pa, "w"),     VERB_WEST,  "w → west");
+    assert_eq(verb_of(pa, "u"),     VERB_UP,    "u → up");
+    assert_eq(verb_of(pa, "d"),     VERB_DOWN,  "d → down");
+
+    # case-insensitivity rides on tokenizer lowercasing.
+    assert_eq(verb_of(pa, "LOOK"), VERB_LOOK, "LOOK → look");
+
+    # unknown words + empty.
+    assert_eq(verb_of(pa, "xyzzy"), VERB_UNKNOWN, "xyzzy unknown");
+    assert_eq(verb_of(pa, ""),      VERB_UNKNOWN, "empty → unknown");
+
+    # taxonomy + name round-trip.
+    assert_eq(verb_is_movement(VERB_NORTH), 1, "north is movement");
+    assert_eq(verb_is_movement(VERB_LOOK),  0, "look is not movement");
+    assert_eq(streq(verb_name(VERB_GET), "get"), 1, "verb_name(GET) = get");
+
+    parser_free(pa);
+    return 0;
+}
+
+# === M2-C — direct-object resolution ===
+# Resolve a one-token noun literal against a scope (names/n).
+fn resolve_lit(pa, lit, names, n): i64 {
+    tok_cstr(pa, lit);
+    return resolve_tok(pa, 0, names, n);
+}
+
+fn test_resolve(): i64 {
+    test_group("resolve");
+    var pa = parser_new();
+
+    # Synthetic scope: 3 entities, each a space-separated keyword string.
+    # (M3 builds this array from live room / inventory contents.)
+    var names[24];                       # 3 pointers × 8 bytes
+    store64(&names + 0,  "rusted security drone");
+    store64(&names + 8,  "shock pike");
+    store64(&names + 16, "battered drone");
+    var n = 3;
+
+    # unique keyword prefix → that entity's index.
+    assert_eq(resolve_lit(pa, "pike",  &names, n), 1, "pike → e1");
+    assert_eq(resolve_lit(pa, "shock", &names, n), 1, "shock → e1");
+    assert_eq(resolve_lit(pa, "sec",   &names, n), 0, "sec (prefix) → e0");
+    assert_eq(resolve_lit(pa, "rust",  &names, n), 0, "rust (prefix) → e0");
+    assert_eq(resolve_lit(pa, "p",     &names, n), 1, "single-char prefix p → e1");
+
+    # a keyword shared by two entities is ambiguous.
+    assert_eq(resolve_lit(pa, "drone", &names, n), RES_AMBIGUOUS, "drone ambiguous");
+
+    # no match.
+    assert_eq(resolve_lit(pa, "xyzzy", &names, n), RES_NOTFOUND, "xyzzy not found");
+
+    # case-insensitive (token lowercased; keyword lowercased on the fly).
+    assert_eq(resolve_lit(pa, "PIKE", &names, n), 1, "PIKE → e1");
+
+    # primitive-level checks.
+    assert_eq(kw_matches("dro",  3, "battered drone"), 1, "dro prefixes drone");
+    assert_eq(kw_matches("ron",  3, "battered drone"), 0, "mid-word no match");
+    assert_eq(kw_matches("drone7", 6, "battered drone"), 0, "noun longer than kw");
+    assert_eq(resolve_count("drone", 5, &names, n), 2, "two drones in scope");
+    assert_eq(resolve_count("nope",  4, &names, n), 0, "no matches counted");
+
+    parser_free(pa);
+    return 0;
+}
+
+# === M2-D — preposition / indirect-object split ===
+fn parse_lit(pa, lit): i64 { return parser_parse(pa, lit, strlen(lit)); }
+
+fn test_prep(): i64 {
+    test_group("prep");
+    var pa = parser_new();
+
+    # "put rations in pack" — verb/dobj/prep/iobj all present.
+    parse_lit(pa, "put rations in pack");
+    assert_eq(parsed_verb(pa), VERB_PUT,  "verb = put");
+    assert_eq(parsed_prep(pa), PREP_IN,   "prep = in");
+    assert_eq(tok_eq(pa, parsed_dobj(pa), "rations"), 1, "dobj = rations");
+    assert_eq(tok_eq(pa, parsed_iobj(pa), "pack"),    1, "iobj = pack");
+
+    # "give monoblade to kiran".
+    parse_lit(pa, "give monoblade to kiran");
+    assert_eq(parsed_verb(pa), VERB_GIVE, "verb = give");
+    assert_eq(parsed_prep(pa), PREP_TO,   "prep = to");
+    assert_eq(tok_eq(pa, parsed_dobj(pa), "monoblade"), 1, "dobj = monoblade");
+    assert_eq(tok_eq(pa, parsed_iobj(pa), "kiran"),     1, "iobj = kiran");
+
+    # "get all from corpse" — qualifier word stays a dobj token (M2-E reads it).
+    parse_lit(pa, "get all from corpse");
+    assert_eq(parsed_verb(pa), VERB_GET,  "verb = get");
+    assert_eq(parsed_prep(pa), PREP_FROM, "prep = from");
+    assert_eq(tok_eq(pa, parsed_dobj(pa), "all"),    1, "dobj = all");
+    assert_eq(tok_eq(pa, parsed_iobj(pa), "corpse"), 1, "iobj = corpse");
+
+    # "look at drone" — empty dobj phrase, iobj only.
+    parse_lit(pa, "look at drone");
+    assert_eq(parsed_verb(pa), VERB_LOOK, "verb = look");
+    assert_eq(parsed_prep(pa), PREP_AT,   "prep = at");
+    assert_eq(parsed_has_dobj(pa), 0,     "no dobj before 'at'");
+    assert_eq(tok_eq(pa, parsed_iobj(pa), "drone"), 1, "iobj = drone");
+
+    # "get sword" — dobj, no preposition.
+    parse_lit(pa, "get sword");
+    assert_eq(parsed_prep(pa), PREP_NONE, "no prep");
+    assert_eq(tok_eq(pa, parsed_dobj(pa), "sword"), 1, "dobj = sword");
+    assert_eq(parsed_has_iobj(pa), 0, "no iobj");
+
+    # head-noun rule: unquoted multi-word dobj resolves on its last token.
+    parse_lit(pa, "examine rusted drone");
+    assert_eq(parsed_verb(pa), VERB_EXAMINE, "verb = examine");
+    assert_eq(tok_eq(pa, parsed_dobj(pa), "drone"), 1, "head noun = drone");
+
+    # bare verb — no objects.
+    parse_lit(pa, "look");
+    assert_eq(parsed_verb(pa), VERB_LOOK, "verb = look");
+    assert_eq(parsed_has_dobj(pa), 0, "bare verb: no dobj");
+    assert_eq(parsed_has_iobj(pa), 0, "bare verb: no iobj");
+
+    # empty line.
+    assert_eq(parse_lit(pa, ""), VERB_UNKNOWN, "empty → unknown verb");
+
+    parser_free(pa);
+    return 0;
+}
+
+# === M2-E — qualifiers (all.X / X.N) ===
+fn test_qual(): i64 {
+    test_group("qual");
+    var pa = parser_new();
+
+    var kind[8]; var num[8]; var bp[8]; var bl[8];
+
+    # "all.rations" → QUAL_ALL, base "rations".
+    parse_lit(pa, "get all.rations");
+    qual_parse(pa, parsed_dobj(pa), &kind, &num, &bp, &bl);
+    assert_eq(load64(&kind), QUAL_ALL, "all.rations → ALL");
+    assert_eq(load64(&bl), 7, "base len = len('rations')");
+
+    # bare "all" → QUAL_ALL, zero-length base (everything).
+    parse_lit(pa, "get all from corpse");
+    qual_parse(pa, parsed_dobj(pa), &kind, &num, &bp, &bl);
+    assert_eq(load64(&kind), QUAL_ALL, "bare all → ALL");
+    assert_eq(load64(&bl), 0, "bare all → empty base");
+
+    # "2.drone" → QUAL_NTH n=2, base "drone".
+    parse_lit(pa, "kill 2.drone");
+    qual_parse(pa, parsed_dobj(pa), &kind, &num, &bp, &bl);
+    assert_eq(load64(&kind), QUAL_NTH, "2.drone → NTH");
+    assert_eq(load64(&num), 2, "n = 2");
+
+    # plain noun → QUAL_NONE, whole token is the base.
+    parse_lit(pa, "kill drone");
+    qual_parse(pa, parsed_dobj(pa), &kind, &num, &bp, &bl);
+    assert_eq(load64(&kind), QUAL_NONE, "drone → NONE");
+    assert_eq(load64(&bl), 5, "base len = len('drone')");
+
+    # parse_uint / is_word_all primitives.
+    assert_eq(parse_uint("12", 2), 12, "parse_uint 12");
+    assert_eq(parse_uint("3x", 2), 0 - 1, "parse_uint non-digit → -1");
+    assert_eq(is_word_all("all", 3), 1, "is_word_all yes");
+    assert_eq(is_word_all("ale", 3), 0, "is_word_all no");
+
+    # Resolution against a synthetic scope with three drones + a pike.
+    var names[32];
+    store64(&names + 0,  "alpha drone");
+    store64(&names + 8,  "beta drone");
+    store64(&names + 16, "gamma drone");
+    store64(&names + 24, "shock pike");
+    var n = 4;
+
+    # resolve_nth picks the Nth in scan order.
+    assert_eq(resolve_nth("drone", 5, &names, n, 1), 0, "1st drone → e0");
+    assert_eq(resolve_nth("drone", 5, &names, n, 2), 1, "2nd drone → e1");
+    assert_eq(resolve_nth("drone", 5, &names, n, 3), 2, "3rd drone → e2");
+    assert_eq(resolve_nth("drone", 5, &names, n, 4), RES_NOTFOUND, "no 4th drone");
+    assert_eq(resolve_nth("drone", 5, &names, n, 0), RES_NOTFOUND, "0th → notfound");
+
+    # resolve_all collects every match in scan order.
+    var out[64];
+    assert_eq(resolve_all("drone", 5, &names, n, &out, 8), 3, "all drones → 3");
+    assert_eq(load64(&out + 0), 0, "out[0] = e0");
+    assert_eq(load64(&out + 16), 2, "out[2] = e2");
+
+    # bare all (zero-length noun) matches everything.
+    assert_eq(resolve_all("", 0, &names, n, &out, 8), 4, "bare all → 4");
+
+    # the max cap bounds how many are collected.
+    assert_eq(resolve_all("drone", 5, &names, n, &out, 2), 2, "cap at 2");
+
+    parser_free(pa);
+    return 0;
+}
+
 # === M1-F — idle predicate ===
 fn test_idle(): i64 {
     test_group("idle");
@@ -197,6 +469,11 @@ fn main() {
     test_telnet();
     test_negotiation();
     test_login();
+    test_tokenize();
+    test_verbs();
+    test_resolve();
+    test_prep();
+    test_qual();
     test_idle();
 
     return assert_summary();

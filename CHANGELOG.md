@@ -4,6 +4,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-09
+
+M2 — the verb-noun parser. Lines typed at the command prompt are now
+tokenized, resolved to a canonical verb, and decomposed into direct
+object / preposition / indirect object with `all.X` / `N.X` qualifiers.
+The echo stub behind the login gate is gone; `cmd_on_line` routes through
+the parser. The world the verbs act on still lands at M3 — until then the
+handlers acknowledge the *parse* rather than fake world state. Pure and
+fuzz-clean: 100k random inputs, no crash / hang / unbounded growth.
+
+### Added
+
+- **M2-A — Tokenizer** (`src/parser.cyr`). Whitespace-split (space / tab)
+  with double-quote grouping for multi-word objects and lowercase
+  normalization. Tokens are length-counted copies in a norm buffer —
+  never NUL-terminated — so an embedded NUL is content, not a terminator.
+  One shared `Parser` (lazily allocated) serves every session; parsing is
+  synchronous and never spans calls.
+- **M2-B — Verb table + aliases.** The canonical v1.0 verb set (movement,
+  inspection, item manipulation, combat, social, session) resolves the
+  first token to a `Verb` id; aliases fold in (`n`→north, `l`→look,
+  `i`/`inv`→inventory). `verb_name` / `verb_is_movement` keep the taxonomy
+  in one place.
+- **M2-C — Direct-object resolution.** DikuMUD-style keyword prefix
+  matching against an abstract scope (array of keyword strings). A unique
+  match returns its index; zero → `RES_NOTFOUND`; many → `RES_AMBIGUOUS`.
+  The live scope (room + inventory + equipment) is wired at M3 — the
+  matcher is the deliverable, exercised here with synthetic scopes.
+- **M2-D — Preposition / indirect-object.** Preposition table
+  (`in`/`on`/`to`/`from`/`at`/`with`); the first preposition after the
+  verb splits the line into direct- and indirect-object phrases, each
+  resolved on its head noun (`give monoblade to kiran`,
+  `put rations in pack`, `get all from corpse`).
+- **M2-E — Qualifiers.** `all.X` (every match), `N.X` (the Nth match in
+  deterministic scan order), and bare `all` (everything in scope).
+  `qual_parse` splits the qualifier off the noun; `resolve_all` /
+  `resolve_nth` collect against the scope under a caller-supplied cap.
+- **M2-F — Fuzz harness** (`fuzz/parser_fuzz.fcyr`, run by `cyrius fuzz`).
+  Deterministic xorshift PRNG, 100k iterations of parser-significant
+  random bytes plus directed adversarial cases. Every iteration asserts:
+  token count ≤ cap, norm buffer ≤ cap, each token inside the buffer,
+  every parse-result index in range, `resolve_all` never overruns. One
+  reused parser proves no per-line leak.
+- Unit suite grown 52 → 154 assertions (tokenizer, verb table, resolution,
+  preposition split, qualifiers).
+
+### Changed
+
+- `cmd_on_line` (`src/session.cyr`) replaces the M1-E echo stub with full
+  verb dispatch. Social verbs echo the case-preserved message; object
+  verbs reflect the parsed structure; movement / look / inventory return
+  M3-pending placeholders; unknown verbs prompt `help`.
+- **`quit` now disconnects.** A new `SS_QUIT` session flag, set by the
+  verb and checked in `dispatch_session` after the goodbye flushes, tears
+  the session down cleanly.
+- The login welcome no longer advertises the echo stub — it points new
+  players at `help`.
+
 ## [0.2.0] — 2026-06-09
 
 M1 close — the binary now opens a port, walks the Telnet protocol,

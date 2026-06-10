@@ -6,10 +6,11 @@
 # need explicit `include` per first-party convention.
 
 include "src/telnet.cyr"
+include "src/parser.cyr"
 include "src/session.cyr"
 include "src/server.cyr"
 
-var VERSION_STRING = "0.2.0";
+var VERSION_STRING = "0.3.0";
 
 fn print_banner(): i64 {
     println("yeoman's descent — a cyrius-native text MUD");

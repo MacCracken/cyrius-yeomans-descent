@@ -1,14 +1,13 @@
-# cyrius-yeomans-descent fuzz harness
-
-fn fuzz_main(data, len) {
-    if (len == 0) { return 0; }
-    return 0;
-}
+# cyrius-yeomans-descent — fuzz entrypoint (scaffold family).
+#
+# The real M2 parser fuzz harness lives at `fuzz/parser_fuzz.fcyr` and is
+# run by `cyrius fuzz` (which discovers fuzz/*.fcyr). This scaffold-family
+# stub is retained only so the tests/ tree keeps its .tcyr/.bcyr/.fcyr
+# triple; it is intentionally a no-op that exits clean.
 
 fn main() {
     alloc_init();
-    fuzz_main("test", 4);
-    println("fuzz: ok");
+    println("fuzz: see fuzz/parser_fuzz.fcyr (run via `cyrius fuzz`)");
     return 0;
 }
 

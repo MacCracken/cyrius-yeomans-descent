@@ -1,0 +1,156 @@
+# Fuzz: M2 verb-noun parser — parser_parse + resolve_* must never crash,
+# hang, or grow memory without bound on hostile input.
+#
+# Discovered + run by `cyrius fuzz` (scans fuzz/*.fcyr). The roadmap M2-F
+# gate: 100k random byte sequences, every byte value (incl. embedded NUL
+# and 0xFF), every length from empty to over-long. Invariants checked
+# every iteration:
+#   - the token count never exceeds MAX_TOKENS
+#   - the norm buffer never exceeds NORM_CAP
+#   - every token's [off, off+len) stays inside the norm buffer
+#   - every parse-result token index is in range (or the -1 sentinel)
+#   - resolve_all never writes past its caller-supplied cap
+# A non-zero exit code flags the first violated invariant; a clean run
+# prints "parser_fuzz: ok" and exits 0.
+#
+# One Parser is reused across all iterations — a per-iteration leak would
+# show as the freelist growing without bound, which the long loop surfaces.
+
+include "src/parser.cyr"
+
+alloc_init();
+
+# Deterministic xorshift64 PRNG (no wall-clock seed — the run must be
+# reproducible so a failing seed is debuggable).
+var rng_state = 0x9E3779B97F4A7C15;
+fn rng_next(): i64 {
+    var x = rng_state;
+    x = x ^ (x << 13);
+    x = x ^ ((x >> 7) & 0x01FFFFFFFFFFFFFF);   # logical-ish shift via mask
+    x = x ^ (x << 17);
+    rng_state = x;
+    return x;
+}
+
+# Bias random bytes toward parser-significant values: space, tab, quote,
+# dot, digits, letters, NUL, 0xFF — the bytes most likely to expose an
+# edge in tokenization, prep split, or qualifier parsing.
+fn fuzz_byte(r): i64 {
+    var k = r & 15;
+    if (k == 0) { return 32; }        # space
+    if (k == 1) { return 32; }        # space (weighted — drives token splits)
+    if (k == 2) { return 9; }         # tab
+    if (k == 3) { return 34; }        # quote
+    if (k == 4) { return 46; }        # dot (qualifier separator)
+    if (k == 5) { return 48 + ((r >> 8) % 10); }   # digit
+    if (k == 6) { return 0; }         # embedded NUL
+    if (k == 7) { return 255; }       # 0xFF
+    # letters a..z, biased so verb/keyword words can form
+    return 97 + ((r >> 8) % 26);
+}
+
+# A small synthetic scope to drive the resolve_* paths during fuzzing.
+var names[32];
+store64(&names + 0,  "rusted drone");
+store64(&names + 8,  "shock pike");
+store64(&names + 16, "battered drone");
+store64(&names + 24, "ration pack");
+var scope_n = 4;
+
+var pa = parser_new();
+var inbuf = alloc(512);
+var out = alloc(MAX_TOKENS * 8);
+
+# --- Directed adversarial cases first (each must survive) ---
+parser_parse(pa, "", 0);
+parser_parse(pa, "   ", 3);
+parser_parse(pa, "\"\"\"\"\"\"", 6);            # only quotes
+parser_parse(pa, "all.", 4);                     # qualifier, empty base
+parser_parse(pa, "2.", 2);                       # nth, empty base
+parser_parse(pa, ".....", 5);                    # only dots
+parser_parse(pa, "get . in .", 10);              # dots as nouns
+parser_parse(pa, "put a in b on c with d", 22);  # many prepositions
+
+# An over-long all-letters line: more tokens than MAX_TOKENS can hold.
+var li = 0;
+while (li < 500) {
+    var c = 97;
+    if ((li % 2) == 1) { c = 32; }               # alternate letter / space
+    store8(inbuf + li, c);
+    li = li + 1;
+}
+parser_parse(pa, inbuf, 500);
+if (parser_count(pa) > MAX_TOKENS) { syscall(60, 10); }
+
+# --- 100k random iterations ---
+var iter = 0;
+while (iter < 100000) {
+    var r = rng_next();
+    var len = r % 320;                           # 0..319 bytes
+    var i = 0;
+    while (i < len) {
+        store8(inbuf + i, fuzz_byte(rng_next()) & 0xFF);
+        i = i + 1;
+    }
+    parser_parse(pa, inbuf, len);
+
+    # Invariant 1: token count bounded.
+    var count = parser_count(pa);
+    if (count < 0)          { syscall(60, 20); }
+    if (count > MAX_TOKENS) { syscall(60, 21); }
+
+    # Invariant 2: norm buffer bounded.
+    var norm_len = load64(pa + PA_NORM_LEN);
+    if (norm_len < 0)        { syscall(60, 22); }
+    if (norm_len > NORM_CAP) { syscall(60, 23); }
+
+    # Invariant 3: every token lies inside the norm buffer.
+    var t = 0;
+    while (t < count) {
+        var off = tok_off(pa, t);
+        var tl  = tok_len(pa, t);
+        if (off < 0)            { syscall(60, 24); }
+        if (tl  < 1)            { syscall(60, 25); }
+        if (off + tl > norm_len) { syscall(60, 26); }
+        t = t + 1;
+    }
+
+    # Invariant 4: parse-result indices are in range or the -1 sentinel.
+    var di = parsed_dobj(pa);
+    var ii = parsed_iobj(pa);
+    var pi = load64(pa + PA_PREP_IDX);
+    if (di < 0 - 1)      { syscall(60, 30); }
+    if (di >= count)     { syscall(60, 31); }
+    if (ii < 0 - 1)      { syscall(60, 32); }
+    if (ii >= count)     { syscall(60, 33); }
+    if (pi < 0 - 1)      { syscall(60, 34); }
+    if (pi >= count)     { syscall(60, 35); }
+
+    # Drive the resolve paths on whichever object tokens the parse found.
+    if (di >= 0) {
+        var kind[8]; var num[8]; var bp[8]; var bl[8];
+        qual_parse(pa, di, &kind, &num, &bp, &bl);
+        var k = load64(&kind);
+        if (k == QUAL_ALL) {
+            var w = resolve_all(load64(&bp), load64(&bl), &names, scope_n, out, MAX_TOKENS);
+            # Invariant 5: never write past the cap.
+            if (w > MAX_TOKENS) { syscall(60, 40); }
+            if (w < 0)          { syscall(60, 41); }
+        }
+        if (k == QUAL_NTH) {
+            resolve_nth(load64(&bp), load64(&bl), &names, scope_n, load64(&num));
+        }
+        if (k == QUAL_NONE) {
+            resolve_tok(pa, di, &names, scope_n);
+        }
+    }
+    if (ii >= 0) {
+        resolve_tok(pa, ii, &names, scope_n);
+    }
+
+    iter = iter + 1;
+}
+
+parser_free(pa);
+syscall(1, 1, "parser_fuzz: ok\n", 16);
+syscall(60, 0);

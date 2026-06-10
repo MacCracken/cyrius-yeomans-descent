@@ -18,8 +18,8 @@
 |---|---|---|
 | **0.1.0** | M0 scaffold + ADRs 0001 / 0002 / 0003 + M1-A event loop + M1-B sessions | ✅ 2026-05-24 |
 | **0.2.0** | M1 close — Telnet parser (M1-C) + option negotiation (M1-D) + login scaffold (M1-E) + idle timeout (M1-F) + bench harness (M1-G) + observability (M1-H) | ✅ 2026-06-09 |
-| **0.3.0** | M2 — verb-noun parser + fuzz harness | next |
-| **0.4.0** | M3 — world / rooms / movement + starter zone | |
+| **0.3.0** | M2 — verb-noun parser + fuzz harness | ✅ 2026-06-09 |
+| **0.4.0** | M3 — world / rooms / movement + starter zone | next |
 | **0.5.0** | M4 — combat tick + hit/damage math + corpses | |
 | **0.6.0** | M5 — four classes playable solo through the starter zone | |
 | **0.7.0** | M6 — T.Ron-backed player persistence + crash-safe writes | |
@@ -32,7 +32,7 @@
 
 ## In progress
 
-**No active cycle.** M1 closed at 0.2.0. Next slot is **M2-A — tokenizer** ([§M2 sub-bites](#m2--verb-noun-parser-v030)). Pickup pointer + boot guide in [`state.md`](state.md).
+**No active cycle.** M2 closed at 0.3.0. Next slot is **M3-A — zone file format** ([§M3 sub-bites](#m3--world-rooms-movement-v040)), which opens with **ADR 0005** (zone-file serialization). Pickup pointer + boot guide in [`state.md`](state.md).
 
 ---
 
@@ -178,6 +178,7 @@ Brief one-liners; per-tag chronology in [`../../CHANGELOG.md`](../../CHANGELOG.m
   - **M1-F** — 5-minute idle sweep over an intrusive session list (`SS_NEXT`/`SS_PREV`), `YD_IDLE_MS` override; best-effort tx drain on teardown.
   - **M1-G** — `benches/bench_telnet.bcyr` IAC-parser baseline (≈ 6 ns/byte mixed, ≈ 5 ns/byte data).
   - **M1-H** — `@stats` admin verb (connections, logged-in, ticks, tick-drift p99). Gate met: 32 concurrent connect→login→disconnect, sessions reclaimed, tick p99 drift < 10 ms.
+- **M2 (0.3.0)** — the verb-noun parser (`src/parser.cyr`), pure and fuzz-clean. Tokenizer (M2-A) → verb table + aliases (M2-B) → keyword-prefix direct-object resolution (M2-C) → preposition / indirect-object split (M2-D) → `all.X` / `N.X` qualifiers (M2-E) → 100k-input fuzz harness (M2-F, `fuzz/parser_fuzz.fcyr`). `cmd_on_line` routes through the parser; `quit` disconnects via the new `SS_QUIT` flag. Object/world binding deferred to M3 — the resolution matchers run against synthetic scopes for now. Gate met: fuzz clean against 100k random inputs; verb table covered by the 154-assertion suite.
 
 ---
 

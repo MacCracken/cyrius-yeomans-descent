@@ -293,6 +293,9 @@ fn dispatch_session(epfd, s, events, now_ms): i64 {
     if (alive == 0) { return 0; }
     var ok = flush_session(epfd, s);
     if (ok == 0) { return 0; }
+    # The `quit` verb (M2) queued its goodbye above; flush_session just
+    # drained it, so now we can tear the session down.
+    if (load64(s + SS_QUIT) == 1) { return 0; }
     if ((events & 0x18) != 0) { return 0; }   # HUP | ERR
     return 1;
 }

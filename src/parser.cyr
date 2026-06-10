@@ -1,0 +1,705 @@
+# parser.cyr — M2 verb-noun command parser (pure, no socket I/O).
+#
+# Turns a command line ("put all.rations in pack") into a structured
+# action the session layer can act on. Like telnet.cyr it is pure: it
+# operates on a byte buffer + length, never touches the socket or the
+# session, so it fuzzes cleanly (M2-F) and unit-tests in isolation.
+#
+# One Parser per session, owned by the Session (a future SS slot — until
+# the world lands at M3 the session calls parser_tokenize on a borrowed
+# Parser). Allocated from the freelist alongside the session per ADR 0003.
+#
+# Milestone build-out (see roadmap.md §M2):
+#   M2-A — tokenizer            (this file's first slice)
+#   M2-B — verb table + aliases
+#   M2-C — direct-object resolution
+#   M2-D — preposition / indirect-object
+#   M2-E — qualifiers (all.X / X.N)
+#   M2-F — fuzz harness
+#
+# ─────────────────────────────────────────────────────────────────────
+# M2-A — Tokenizer
+#
+# Splits the line on ASCII whitespace (space / tab) into a token vector.
+# A double-quoted run groups multiple words into one token so a
+# multi-word direct object survives ("the rusted drone" → one token).
+# Tokens are lowercased as they are copied, so downstream verb / noun
+# matching is case-insensitive without re-scanning.
+#
+# Tokens are length-counted copies packed into a norm buffer — never
+# NUL-terminated — so an embedded NUL in hostile input is just another
+# content byte, not a string terminator (fuzz invariant for M2-F).
+
+# === Parser layout (every field i64, offsets in bytes) ===
+enum PA {
+    PA_NORM_BUF = 0;     # ptr to packed lowercased token bytes (NORM_CAP)
+    PA_NORM_LEN = 8;     # bytes used in norm buffer this parse
+    PA_OFF_BUF  = 16;    # ptr to MAX_TOKENS token offsets (into norm buf)
+    PA_LEN_BUF  = 24;    # ptr to MAX_TOKENS token lengths
+    PA_COUNT    = 32;    # number of tokens emitted this parse
+
+    # Parse-result fields, filled by parser_parse (M2-D). Token indices
+    # are -1 when the slot is absent. These index the token vector above.
+    PA_VERB     = 40;    # Verb id of token 0 (VERB_UNKNOWN if none)
+    PA_PREP     = 48;    # Prep id splitting dobj / iobj (PREP_NONE if none)
+    PA_PREP_IDX = 56;    # token index of the preposition (-1 if none)
+    PA_DOBJ_I   = 64;    # token index of the direct-object head noun (-1)
+    PA_IOBJ_I   = 72;    # token index of the indirect-object head noun (-1)
+    PA_SIZE     = 80;
+}
+
+# Caps. NORM_CAP matches the session LINE_CAP (one full line in, at most
+# one full line of token bytes out). MAX_TOKENS bounds a pathological
+# all-single-char line — 64 tokens is far past any real command shape;
+# tokens past the cap are dropped (the trailing words of an absurd line
+# carry no command meaning).
+enum PaCap {
+    NORM_CAP   = 4096;
+    MAX_TOKENS = 64;
+}
+
+# ASCII bytes the tokenizer treats as token delimiters.
+enum PaByte {
+    BYTE_TAB   = 9;
+    BYTE_SPACE = 32;
+    BYTE_QUOTE = 34;     # double-quote — groups a multi-word token
+}
+
+# === parser_new — alloc + zero-init a Parser. ===
+#
+# Allocated from the freelist (per ADR 0003 the loop pays per-conn memory
+# once per session). Freed by parser_free at disconnect.
+fn parser_new(): i64 {
+    var pa = fl_alloc(PA_SIZE);
+    var nb = fl_alloc(NORM_CAP);
+    var ob = fl_alloc(MAX_TOKENS * 8);
+    var lb = fl_alloc(MAX_TOKENS * 8);
+    memset(pa, 0, PA_SIZE);
+    store64(pa + PA_NORM_BUF, nb);
+    store64(pa + PA_OFF_BUF, ob);
+    store64(pa + PA_LEN_BUF, lb);
+    return pa;
+}
+
+# === parser_free — return buffers + struct to the freelist. ===
+fn parser_free(pa): i64 {
+    fl_free(load64(pa + PA_NORM_BUF));
+    fl_free(load64(pa + PA_OFF_BUF));
+    fl_free(load64(pa + PA_LEN_BUF));
+    fl_free(pa);
+    return 0;
+}
+
+# Lowercase one ASCII byte; pass everything else (incl. UTF-8 / NUL).
+fn pa_lower(c): i64 {
+    if (c >= 65) { if (c <= 90) { return c + 32; } }
+    return c;
+}
+
+# A space or tab — the unquoted token delimiters.
+fn pa_is_delim(c): i64 {
+    if (c == BYTE_SPACE) { return 1; }
+    if (c == BYTE_TAB)   { return 1; }
+    return 0;
+}
+
+# === Accessors (used by M2-B+ and the tests) ===
+fn parser_count(pa): i64 { return load64(pa + PA_COUNT); }
+
+# Byte offset (into the norm buffer) of token `i`.
+fn tok_off(pa, i): i64 {
+    return load64(load64(pa + PA_OFF_BUF) + i * 8);
+}
+# Byte length of token `i`.
+fn tok_len(pa, i): i64 {
+    return load64(load64(pa + PA_LEN_BUF) + i * 8);
+}
+# Pointer to the first byte of token `i` (lowercased copy).
+fn tok_ptr(pa, i): i64 {
+    return load64(pa + PA_NORM_BUF) + tok_off(pa, i);
+}
+
+# Case-insensitive (already-lowercased) compare of token `i` against a
+# NUL-terminated literal. Returns 1 on exact match. The literal must be
+# lowercase — tokens are stored lowercased, so the comparison is direct.
+fn tok_eq(pa, i, lit): i64 {
+    if (i < 0) { return 0; }
+    if (i >= load64(pa + PA_COUNT)) { return 0; }
+    var p = tok_ptr(pa, i);
+    var n = tok_len(pa, i);
+    var j = 0;
+    while (j < n) {
+        var lc = load8(lit + j) & 0xFF;
+        if (lc == 0) { return 0; }              # literal shorter than token
+        if ((load8(p + j) & 0xFF) != lc) { return 0; }
+        j = j + 1;
+    }
+    if ((load8(lit + j) & 0xFF) != 0) { return 0; }  # literal longer
+    return 1;
+}
+
+# Append one lowercased byte to the norm buffer for the in-progress
+# token. Returns 1 if appended, 0 if the norm buffer is full (the token
+# is truncated rather than overrunning the buffer — bounded for fuzz).
+fn pa_emit_byte(pa, c): i64 {
+    var used = load64(pa + PA_NORM_LEN);
+    if (used >= NORM_CAP) { return 0; }
+    store8(load64(pa + PA_NORM_BUF) + used, pa_lower(c) & 0xFF);
+    store64(pa + PA_NORM_LEN, used + 1);
+    return 1;
+}
+
+# === parser_tokenize — split buf[0..len) into the parser's token vector.
+#
+# Pure: reads `buf`, writes only the parser's own buffers. Returns the
+# token count. Whitespace-separated; a double-quoted run is one token
+# (quotes stripped); zero-length tokens (e.g. "") are not emitted.
+#
+# `buf` is the decoded command line with CR/LF already stripped by the
+# session line accumulator. Any byte value is tolerated — the tokenizer
+# never trusts content to be NUL-free or valid UTF-8.
+fn parser_tokenize(pa, buf, len): i64 {
+    store64(pa + PA_NORM_LEN, 0);
+    store64(pa + PA_COUNT, 0);
+    var off_buf = load64(pa + PA_OFF_BUF);
+    var len_buf = load64(pa + PA_LEN_BUF);
+    var count = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(buf + i) & 0xFF;
+        # Skip any run of delimiters between tokens.
+        if (pa_is_delim(c) == 1) { i = i + 1; continue; }
+        if (count >= MAX_TOKENS) { i = len; continue; }   # token cap reached
+
+        # Start a token. Record its offset = current norm-buffer cursor.
+        var tok_start = load64(pa + PA_NORM_LEN);
+        var emitted = 0;
+        var quoted = 0;
+        if (c == BYTE_QUOTE) { quoted = 1; i = i + 1; }
+
+        var done = 0;
+        while (done == 0) {
+            if (i >= len) { done = 1; continue; }
+            var b = load8(buf + i) & 0xFF;
+            if (quoted == 1) {
+                if (b == BYTE_QUOTE) { i = i + 1; done = 1; continue; }
+            } else {
+                if (pa_is_delim(b) == 1) { done = 1; continue; }
+            }
+            pa_emit_byte(pa, b);
+            emitted = emitted + 1;
+            i = i + 1;
+        }
+
+        # Emit the token only if it has content (drops "" and stray quotes).
+        if (emitted > 0) {
+            store64(off_buf + count * 8, tok_start);
+            store64(len_buf + count * 8, emitted);
+            count = count + 1;
+        }
+    }
+    store64(pa + PA_COUNT, count);
+    return count;
+}
+
+# ─────────────────────────────────────────────────────────────────────
+# M2-B — Verb table + aliases
+#
+# The canonical v1.0 verb set. The first token of a command line resolves
+# to exactly one of these ids (aliases fold into their canonical verb);
+# an unrecognized first token is VERB_UNKNOWN. Movement directions are
+# verbs in their own right — `n` and `north` both resolve to VERB_NORTH.
+#
+# Object resolution (M2-C+) only runs for verbs that take a noun; the
+# id is the dispatch key the session layer (and, at M3+, the world) keys
+# its handlers on.
+
+enum Verb {
+    VERB_UNKNOWN   = 0;
+
+    # movement (M3 consumes these)
+    VERB_NORTH     = 1;
+    VERB_SOUTH     = 2;
+    VERB_EAST      = 3;
+    VERB_WEST      = 4;
+    VERB_UP        = 5;
+    VERB_DOWN      = 6;
+
+    # inspection
+    VERB_LOOK      = 7;
+    VERB_EXAMINE   = 8;
+    VERB_EXITS     = 9;
+    VERB_INVENTORY = 10;
+    VERB_WHO       = 11;
+
+    # item manipulation
+    VERB_GET       = 12;
+    VERB_DROP      = 13;
+    VERB_PUT       = 14;
+    VERB_GIVE      = 15;
+    VERB_WEAR      = 16;
+    VERB_REMOVE    = 17;
+    VERB_WIELD     = 18;
+
+    # combat
+    VERB_KILL      = 19;
+    VERB_FLEE      = 20;
+
+    # social
+    VERB_SAY       = 21;
+    VERB_TELL      = 22;
+    VERB_EMOTE     = 23;
+
+    # session
+    VERB_QUIT      = 24;
+    VERB_SAVE      = 25;
+    VERB_HELP      = 26;
+}
+
+# === verb_lookup — resolve token `i` to a Verb id (aliases folded in).
+#
+# Out-of-range / unrecognized → VERB_UNKNOWN. Tokens are already
+# lowercased, so the literals here are lowercase canonical forms.
+fn verb_lookup(pa, i): i64 {
+    # movement — full word and single-letter alias both canonical.
+    if (tok_eq(pa, i, "north") == 1) { return VERB_NORTH; }
+    if (tok_eq(pa, i, "n")     == 1) { return VERB_NORTH; }
+    if (tok_eq(pa, i, "south") == 1) { return VERB_SOUTH; }
+    if (tok_eq(pa, i, "s")     == 1) { return VERB_SOUTH; }
+    if (tok_eq(pa, i, "east")  == 1) { return VERB_EAST; }
+    if (tok_eq(pa, i, "e")     == 1) { return VERB_EAST; }
+    if (tok_eq(pa, i, "west")  == 1) { return VERB_WEST; }
+    if (tok_eq(pa, i, "w")     == 1) { return VERB_WEST; }
+    if (tok_eq(pa, i, "up")    == 1) { return VERB_UP; }
+    if (tok_eq(pa, i, "u")     == 1) { return VERB_UP; }
+    if (tok_eq(pa, i, "down")  == 1) { return VERB_DOWN; }
+    if (tok_eq(pa, i, "d")     == 1) { return VERB_DOWN; }
+
+    # inspection
+    if (tok_eq(pa, i, "look")      == 1) { return VERB_LOOK; }
+    if (tok_eq(pa, i, "l")         == 1) { return VERB_LOOK; }
+    if (tok_eq(pa, i, "examine")   == 1) { return VERB_EXAMINE; }
+    if (tok_eq(pa, i, "exits")     == 1) { return VERB_EXITS; }
+    if (tok_eq(pa, i, "inventory") == 1) { return VERB_INVENTORY; }
+    if (tok_eq(pa, i, "inv")       == 1) { return VERB_INVENTORY; }
+    if (tok_eq(pa, i, "i")         == 1) { return VERB_INVENTORY; }
+    if (tok_eq(pa, i, "who")       == 1) { return VERB_WHO; }
+
+    # item manipulation
+    if (tok_eq(pa, i, "get")    == 1) { return VERB_GET; }
+    if (tok_eq(pa, i, "drop")   == 1) { return VERB_DROP; }
+    if (tok_eq(pa, i, "put")    == 1) { return VERB_PUT; }
+    if (tok_eq(pa, i, "give")   == 1) { return VERB_GIVE; }
+    if (tok_eq(pa, i, "wear")   == 1) { return VERB_WEAR; }
+    if (tok_eq(pa, i, "remove") == 1) { return VERB_REMOVE; }
+    if (tok_eq(pa, i, "wield")  == 1) { return VERB_WIELD; }
+
+    # combat
+    if (tok_eq(pa, i, "kill") == 1) { return VERB_KILL; }
+    if (tok_eq(pa, i, "flee") == 1) { return VERB_FLEE; }
+
+    # social
+    if (tok_eq(pa, i, "say")   == 1) { return VERB_SAY; }
+    if (tok_eq(pa, i, "tell")  == 1) { return VERB_TELL; }
+    if (tok_eq(pa, i, "emote") == 1) { return VERB_EMOTE; }
+
+    # session
+    if (tok_eq(pa, i, "quit") == 1) { return VERB_QUIT; }
+    if (tok_eq(pa, i, "save") == 1) { return VERB_SAVE; }
+    if (tok_eq(pa, i, "help") == 1) { return VERB_HELP; }
+
+    return VERB_UNKNOWN;
+}
+
+# === verb_name — canonical lowercase name of a Verb id (for prose). ===
+#
+# Returns a NUL-terminated literal. VERB_UNKNOWN (and any unmapped id)
+# yields "" so callers can detect the no-verb case.
+fn verb_name(v): i64 {
+    if (v == VERB_NORTH)     { return "north"; }
+    if (v == VERB_SOUTH)     { return "south"; }
+    if (v == VERB_EAST)      { return "east"; }
+    if (v == VERB_WEST)      { return "west"; }
+    if (v == VERB_UP)        { return "up"; }
+    if (v == VERB_DOWN)      { return "down"; }
+    if (v == VERB_LOOK)      { return "look"; }
+    if (v == VERB_EXAMINE)   { return "examine"; }
+    if (v == VERB_EXITS)     { return "exits"; }
+    if (v == VERB_INVENTORY) { return "inventory"; }
+    if (v == VERB_WHO)       { return "who"; }
+    if (v == VERB_GET)       { return "get"; }
+    if (v == VERB_DROP)      { return "drop"; }
+    if (v == VERB_PUT)       { return "put"; }
+    if (v == VERB_GIVE)      { return "give"; }
+    if (v == VERB_WEAR)      { return "wear"; }
+    if (v == VERB_REMOVE)    { return "remove"; }
+    if (v == VERB_WIELD)     { return "wield"; }
+    if (v == VERB_KILL)      { return "kill"; }
+    if (v == VERB_FLEE)      { return "flee"; }
+    if (v == VERB_SAY)       { return "say"; }
+    if (v == VERB_TELL)      { return "tell"; }
+    if (v == VERB_EMOTE)     { return "emote"; }
+    if (v == VERB_QUIT)      { return "quit"; }
+    if (v == VERB_SAVE)      { return "save"; }
+    if (v == VERB_HELP)      { return "help"; }
+    return "";
+}
+
+# === verb_is_movement — true for the six cardinal-direction verbs. ===
+# M3 movement keys on this; kept here so the verb taxonomy lives in one
+# place rather than being re-derived against id ranges at the call site.
+fn verb_is_movement(v): i64 {
+    if (v >= VERB_NORTH) { if (v <= VERB_DOWN) { return 1; } }
+    return 0;
+}
+
+# ─────────────────────────────────────────────────────────────────────
+# M2-C — Direct-object resolution
+#
+# Resolve a typed noun against a *scope* — the set of entities currently
+# reachable to the actor (inventory + room contents + worn/wielded slots).
+# The world that supplies those entities lands at M3; until then the
+# resolver operates on an abstract scope and is exercised with synthetic
+# scopes in the test suite. The matching algorithm here is the real
+# deliverable — M3 binds the same matcher to live room/inventory contents.
+#
+# Scope representation (deliberately minimal, world-agnostic):
+#   `names` — ptr to an array of `n` i64 pointers, each a NUL-terminated
+#             keyword string for one entity, in deterministic scan order
+#             (inventory before room before equipment, M3's call order).
+#   A keyword string may hold several space-separated keywords
+#   ("rusted security drone") — a typed noun matches the entity if it is
+#   a case-insensitive prefix of ANY of those keywords (DikuMUD rule:
+#   `get dro` and `get sec` both name the drone).
+#
+# Resolution return codes share the index space with valid scope indices
+# (>= 0). The two sentinels are negative so a caller branches on sign.
+
+# Negative so a caller branches on sign (enums take only non-negative
+# literals, so these live as module globals).
+var RES_NOTFOUND  = 0 - 1;   # no entity in scope matched the noun
+var RES_AMBIGUOUS = 0 - 2;   # more than one matched (needs an X.N qualifier)
+
+# Is `noun[0..nlen)` a case-insensitive prefix of the keyword that begins
+# at kw[koff]? Scans only up to the next space / NUL. Returns the length
+# matched (== nlen) on success, or 0 on mismatch. `noun` is already
+# lowercased (it is a token); the keyword is lowercased on the fly.
+fn kw_prefix_at(noun, nlen, kw, koff): i64 {
+    if (nlen <= 0) { return 0; }
+    var j = 0;
+    while (j < nlen) {
+        var kc = load8(kw + koff + j) & 0xFF;
+        if (kc == 0) { return 0; }                 # keyword shorter than noun
+        if (kc == BYTE_SPACE) { return 0; }        # keyword boundary hit early
+        if ((load8(noun + j) & 0xFF) != pa_lower(kc)) { return 0; }
+        j = j + 1;
+    }
+    return nlen;
+}
+
+# Does `noun[0..nlen)` prefix-match any space-separated keyword in the
+# NUL-terminated keyword string `kw`? Returns 1 on the first match.
+fn kw_matches(noun, nlen, kw): i64 {
+    if (nlen <= 0) { return 0; }
+    var i = 0;
+    var at_word_start = 1;
+    var done = 0;
+    while (done == 0) {
+        var c = load8(kw + i) & 0xFF;
+        if (c == 0) { done = 1; continue; }
+        if (c == BYTE_SPACE) { at_word_start = 1; i = i + 1; continue; }
+        if (at_word_start == 1) {
+            if (kw_prefix_at(noun, nlen, kw, i) == nlen) { return 1; }
+            at_word_start = 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# === resolve_count — how many scope entities the noun matches. ===
+fn resolve_count(noun, nlen, names, n): i64 {
+    var matches = 0;
+    var i = 0;
+    while (i < n) {
+        if (kw_matches(noun, nlen, load64(names + i * 8)) == 1) {
+            matches = matches + 1;
+        }
+        i = i + 1;
+    }
+    return matches;
+}
+
+# === resolve_noun — resolve a noun against a scope to a single entity. ===
+#
+# Returns the scope index (>= 0) of the unique match, or RES_NOTFOUND /
+# RES_AMBIGUOUS. This is the M2-C default (no qualifier); the X.N and
+# all.X qualifiers (M2-E) layer on top of resolve_nth / resolve_count.
+fn resolve_noun(noun, nlen, names, n): i64 {
+    var first = RES_NOTFOUND;
+    var matches = 0;
+    var i = 0;
+    while (i < n) {
+        if (kw_matches(noun, nlen, load64(names + i * 8)) == 1) {
+            if (matches == 0) { first = i; }
+            matches = matches + 1;
+        }
+        i = i + 1;
+    }
+    if (matches == 0) { return RES_NOTFOUND; }
+    if (matches > 1)  { return RES_AMBIGUOUS; }
+    return first;
+}
+
+# Convenience: resolve token `i` of the parser against a scope.
+fn resolve_tok(pa, i, names, n): i64 {
+    if (i < 0) { return RES_NOTFOUND; }
+    if (i >= load64(pa + PA_COUNT)) { return RES_NOTFOUND; }
+    return resolve_noun(tok_ptr(pa, i), tok_len(pa, i), names, n);
+}
+
+# ─────────────────────────────────────────────────────────────────────
+# M2-D — Preposition / indirect-object resolution
+#
+# A two-object command is `verb <dobj> <prep> <iobj>`:
+#   put rations in pack   ·   give monoblade to kiran   ·   get all from corpse
+# The first preposition after the verb splits the line: the tokens
+# before it are the direct-object phrase, the tokens after are the
+# indirect-object phrase. Each phrase resolves on its *head noun* — the
+# last token of the phrase, English adjectives-precede-noun order, so
+# "rusted drone" (unquoted, two tokens) resolves on "drone". A quoted
+# multi-word object is already one token from the tokenizer.
+
+enum Prep {
+    PREP_NONE = 0;
+    PREP_IN   = 1;
+    PREP_ON   = 2;
+    PREP_TO   = 3;
+    PREP_FROM = 4;
+    PREP_AT   = 5;
+    PREP_WITH = 6;
+}
+
+# Canonical word of a Prep id (for prose). PREP_NONE → "".
+fn prep_name(p): i64 {
+    if (p == PREP_IN)   { return "in"; }
+    if (p == PREP_ON)   { return "on"; }
+    if (p == PREP_TO)   { return "to"; }
+    if (p == PREP_FROM) { return "from"; }
+    if (p == PREP_AT)   { return "at"; }
+    if (p == PREP_WITH) { return "with"; }
+    return "";
+}
+
+# Resolve token `i` to a Prep id, or PREP_NONE if it is not a preposition.
+fn prep_lookup(pa, i): i64 {
+    if (tok_eq(pa, i, "in")   == 1) { return PREP_IN; }
+    if (tok_eq(pa, i, "on")   == 1) { return PREP_ON; }
+    if (tok_eq(pa, i, "to")   == 1) { return PREP_TO; }
+    if (tok_eq(pa, i, "from") == 1) { return PREP_FROM; }
+    if (tok_eq(pa, i, "at")   == 1) { return PREP_AT; }
+    if (tok_eq(pa, i, "with") == 1) { return PREP_WITH; }
+    return PREP_NONE;
+}
+
+# === parser_parse — tokenize + decompose into a structured command. ===
+#
+# Fills PA_VERB / PA_PREP / PA_PREP_IDX / PA_DOBJ_I / PA_IOBJ_I. Returns
+# the resolved verb id (VERB_UNKNOWN on an empty line). Pure — operates
+# only on the parser's buffers.
+fn parser_parse(pa, buf, len): i64 {
+    var count = parser_tokenize(pa, buf, len);
+
+    # Defaults: no verb, no objects, no preposition.
+    store64(pa + PA_VERB, VERB_UNKNOWN);
+    store64(pa + PA_PREP, PREP_NONE);
+    store64(pa + PA_PREP_IDX, 0 - 1);
+    store64(pa + PA_DOBJ_I, 0 - 1);
+    store64(pa + PA_IOBJ_I, 0 - 1);
+    if (count == 0) { return VERB_UNKNOWN; }
+
+    var verb = verb_lookup(pa, 0);
+    store64(pa + PA_VERB, verb);
+
+    # Find the first preposition after the verb — it splits dobj / iobj.
+    var prep = PREP_NONE;
+    var prep_idx = 0 - 1;
+    var i = 1;
+    while (i < count) {
+        var p = prep_lookup(pa, i);
+        if (p != PREP_NONE) { prep = p; prep_idx = i; i = count; continue; }
+        i = i + 1;
+    }
+    store64(pa + PA_PREP, prep);
+    store64(pa + PA_PREP_IDX, prep_idx);
+
+    # Direct-object phrase = tokens [1, dobj_end); head noun is its last.
+    var dobj_end = count;
+    if (prep_idx >= 0) { dobj_end = prep_idx; }
+    if (dobj_end > 1) { store64(pa + PA_DOBJ_I, dobj_end - 1); }
+
+    # Indirect-object phrase = tokens [prep_idx+1, count); head noun last.
+    if (prep_idx >= 0) {
+        if (count > prep_idx + 1) { store64(pa + PA_IOBJ_I, count - 1); }
+    }
+    return verb;
+}
+
+# === Parse-result accessors ===
+fn parsed_verb(pa): i64 { return load64(pa + PA_VERB); }
+fn parsed_prep(pa): i64 { return load64(pa + PA_PREP); }
+fn parsed_dobj(pa): i64 { return load64(pa + PA_DOBJ_I); }   # token idx or -1
+fn parsed_iobj(pa): i64 { return load64(pa + PA_IOBJ_I); }   # token idx or -1
+fn parsed_has_dobj(pa): i64 { if (load64(pa + PA_DOBJ_I) >= 0) { return 1; } return 0; }
+fn parsed_has_iobj(pa): i64 { if (load64(pa + PA_IOBJ_I) >= 0) { return 1; } return 0; }
+
+# ─────────────────────────────────────────────────────────────────────
+# M2-E — Qualifiers (all.X / X.N)
+#
+# A noun token can carry a leading count qualifier separated by a dot:
+#   all.rations   every rations in scope
+#   2.drone       the 2nd drone in deterministic scan order
+#   all           bare — every entity in scope (e.g. `get all from corpse`)
+#   drone         no qualifier — resolve to one (ambiguity prompts, M2-C)
+#
+# qual_parse splits the token into (kind, n, base noun). The base noun is
+# returned as a (ptr, len) into the norm buffer so it feeds straight into
+# the resolve_* matchers — a bare `all` yields a zero-length base, which
+# the matchers read as "everything".
+
+enum Qual {
+    QUAL_NONE = 0;   # plain noun — resolve to a single entity
+    QUAL_ALL  = 1;   # all.X (or bare all) — every match
+    QUAL_NTH  = 2;   # N.X — the Nth match in scan order
+}
+
+# Is buf[0..len) exactly the word "all" (already lowercased)?
+fn is_word_all(buf, len): i64 {
+    if (len != 3) { return 0; }
+    if ((load8(buf + 0) & 0xFF) != 97)  { return 0; }   # 'a'
+    if ((load8(buf + 1) & 0xFF) != 108) { return 0; }   # 'l'
+    if ((load8(buf + 2) & 0xFF) != 108) { return 0; }   # 'l'
+    return 1;
+}
+
+# Parse buf[0..len) as a positive integer if every byte is a digit.
+# Returns the value (>= 0), or -1 if empty or any byte is non-digit.
+fn parse_uint(buf, len): i64 {
+    if (len <= 0) { return 0 - 1; }
+    var v = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(buf + i) & 0xFF;
+        if (c < 48) { return 0 - 1; }
+        if (c > 57) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+# === qual_parse — split token `ti` into (kind, n, base ptr/len). ===
+#
+# Writes the qualifier kind to *out_kind, the count to *out_n (valid for
+# QUAL_NTH), and the base noun's (ptr, len) to *out_ptr / *out_len.
+# Returns the kind. A token with no recognizable qualifier is QUAL_NONE
+# with the whole token as the base noun.
+fn qual_parse(pa, ti, out_kind, out_n, out_ptr, out_len): i64 {
+    var p = tok_ptr(pa, ti);
+    var L = tok_len(pa, ti);
+
+    # Locate the first dot, if any.
+    var dot = 0 - 1;
+    var i = 0;
+    while (i < L) {
+        if ((load8(p + i) & 0xFF) == 46) { dot = i; i = L; continue; }  # '.'
+        i = i + 1;
+    }
+
+    # No dot: bare "all" means everything; otherwise a plain noun.
+    if (dot < 0) {
+        if (is_word_all(p, L) == 1) {
+            store64(out_kind, QUAL_ALL);
+            store64(out_n, 0);
+            store64(out_ptr, p);
+            store64(out_len, 0);
+            return QUAL_ALL;
+        }
+        store64(out_kind, QUAL_NONE);
+        store64(out_n, 0);
+        store64(out_ptr, p);
+        store64(out_len, L);
+        return QUAL_NONE;
+    }
+
+    # Split around the dot: prefix = [0,dot), base = (dot+1 .. L).
+    var base_ptr = p + dot + 1;
+    var base_len = L - dot - 1;
+
+    if (is_word_all(p, dot) == 1) {
+        store64(out_kind, QUAL_ALL);
+        store64(out_n, 0);
+        store64(out_ptr, base_ptr);
+        store64(out_len, base_len);
+        return QUAL_ALL;
+    }
+
+    var nv = parse_uint(p, dot);
+    if (nv >= 1) {
+        store64(out_kind, QUAL_NTH);
+        store64(out_n, nv);
+        store64(out_ptr, base_ptr);
+        store64(out_len, base_len);
+        return QUAL_NTH;
+    }
+
+    # Unrecognized prefix (e.g. a literal dot in a name) — whole token is
+    # the noun, no qualifier.
+    store64(out_kind, QUAL_NONE);
+    store64(out_n, 0);
+    store64(out_ptr, p);
+    store64(out_len, L);
+    return QUAL_NONE;
+}
+
+# === resolve_nth — the Nth (1-based) scope match in scan order. ===
+#
+# Returns the scope index, or RES_NOTFOUND if there are fewer than `nth`
+# matches (or nth < 1). A zero-length noun matches every entity.
+fn resolve_nth(noun, nlen, names, n, nth): i64 {
+    if (nth < 1) { return RES_NOTFOUND; }
+    var seen = 0;
+    var i = 0;
+    while (i < n) {
+        var hit = 1;
+        if (nlen > 0) { hit = kw_matches(noun, nlen, load64(names + i * 8)); }
+        if (hit == 1) {
+            seen = seen + 1;
+            if (seen == nth) { return i; }
+        }
+        i = i + 1;
+    }
+    return RES_NOTFOUND;
+}
+
+# === resolve_all — every scope match, in scan order. ===
+#
+# Writes matching scope indices into out[0..] (each an i64), up to `max`
+# entries, and returns the number written. A zero-length noun (bare
+# `all`) matches every entity. The cap is the caller's out-array size —
+# at most `max` entities are acted on in one command.
+fn resolve_all(noun, nlen, names, n, out, max): i64 {
+    var w = 0;
+    var i = 0;
+    while (i < n) {
+        if (w >= max) { i = n; continue; }
+        var hit = 1;
+        if (nlen > 0) { hit = kw_matches(noun, nlen, load64(names + i * 8)); }
+        if (hit == 1) {
+            store64(out + w * 8, i);
+            w = w + 1;
+        }
+        i = i + 1;
+    }
+    return w;
+}

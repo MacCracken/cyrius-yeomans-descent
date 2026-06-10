@@ -37,7 +37,8 @@ enum SS {
     SS_NAME_LEN   = 112;  # length of the captured name
     SS_NEXT       = 120;  # intrusive active-session list (server.cyr owns it)
     SS_PREV       = 128;  # — used by the tick idle sweep (M1-F)
-    SS_SIZE       = 136;
+    SS_QUIT       = 136;  # 1 once the `quit` verb asks for teardown (M2)
+    SS_SIZE       = 144;
 }
 
 enum SessConst {
@@ -289,25 +290,164 @@ fn login_on_name(s, buf, len): i64 {
     session_appendtx_cstr(s, "\r\nWelcome, ");
     session_appendtx(s, buf, len);
     session_appendtx_cstr(s, ". The Under-Grid stirs.\r\n");
-    session_appendtx_cstr(s, "(the verb parser arrives at M2; until then your input is echoed.)\r\n");
+    session_appendtx_cstr(s, "Type \"help\" for commands. (rooms, items, and combat arrive at M3-M4.)\r\n");
     session_send_cmd_prompt(s);
     return 0;
 }
 
-# Handle a line entered at the command prompt. M1-E keeps the echo stub
-# as a placeholder; M2 swaps in the verb-noun parser here. The `@stats`
-# admin verb (M1-H) surfaces loop observability — render_stats lives in
-# server.cyr, where the counters do (resolved as a forward reference).
+# === M2 command dispatch ===
+#
+# One shared parser for every session — parsing a line is synchronous and
+# never spans calls, so the single-thread loop needs only one instance
+# (lazily allocated on first command). The world the verbs act on lands
+# at M3; until then the handlers acknowledge the *parse* (verb / objects /
+# preposition recognized) rather than faking world state, which keeps the
+# wiring honest and demonstrable.
+var g_parser = 0;
+
+# Append token `i` of the parser (its lowercased form) to the tx queue.
+fn session_appendtx_tok(s, pa, i): i64 {
+    if (i < 0) { return 0; }
+    session_appendtx(s, tok_ptr(pa, i), tok_len(pa, i));
+    return 0;
+}
+
+# Index where the command line's remainder begins: past leading
+# whitespace, past the first word, past the whitespace after it. Returns
+# `len` when there is no remainder (a bare verb). Used by social verbs to
+# echo the original (case-preserving) message text.
+fn cmd_rest_start(buf, len): i64 {
+    var i = 0;
+    while (i < len) {
+        var c = load8(buf + i) & 0xFF;
+        if (c != 32) { if (c != 9) { break; } }
+        i = i + 1;
+    }
+    while (i < len) {
+        var c = load8(buf + i) & 0xFF;
+        if (c == 32) { break; }
+        if (c == 9)  { break; }
+        i = i + 1;
+    }
+    while (i < len) {
+        var c = load8(buf + i) & 0xFF;
+        if (c != 32) { if (c != 9) { break; } }
+        i = i + 1;
+    }
+    return i;
+}
+
+# A social verb (say / tell / emote): echo the message remainder, or
+# prompt for content when the verb stands alone.
+fn cmd_social(s, pa, buf, len, lead, empty): i64 {
+    var rs = cmd_rest_start(buf, len);
+    if (rs >= len) {
+        session_appendtx_cstr(s, empty);
+        session_appendtx_cstr(s, "\r\n");
+        return 0;
+    }
+    session_appendtx_cstr(s, lead);
+    session_appendtx(s, buf + rs, len - rs);
+    session_appendtx_cstr(s, "\r\n");
+    return 0;
+}
+
+# An object verb (get / drop / kill / ...): reflect the parsed structure.
+# With no world yet (M3), every noun resolves to nothing — but the parse
+# is shown so the verb-noun machinery is visible end to end.
+fn cmd_object(s, pa, verb): i64 {
+    if (parsed_has_dobj(pa) == 0) {
+        session_appendtx_cstr(s, verb_name(verb));
+        session_appendtx_cstr(s, " what?\r\n");
+        return 0;
+    }
+    session_appendtx_cstr(s, "You move to ");
+    session_appendtx_cstr(s, verb_name(verb));
+    session_appendtx_cstr(s, " the ");
+    session_appendtx_tok(s, pa, parsed_dobj(pa));
+    if (parsed_has_iobj(pa) == 1) {
+        session_appendtx_cstr(s, " ");
+        session_appendtx_cstr(s, prep_name(parsed_prep(pa)));
+        session_appendtx_cstr(s, " the ");
+        session_appendtx_tok(s, pa, parsed_iobj(pa));
+    }
+    session_appendtx_cstr(s, ", but the Under-Grid is empty — items arrive at M3.\r\n");
+    return 0;
+}
+
+# Brief in-game help: the verb classes the parser understands.
+fn cmd_help_text(s): i64 {
+    session_appendtx_cstr(s, "-- commands --\r\n");
+    session_appendtx_cstr(s, "move    : n s e w u d (north ...)\r\n");
+    session_appendtx_cstr(s, "look    : look(l) examine exits inventory(i) who\r\n");
+    session_appendtx_cstr(s, "items   : get drop put give wear remove wield\r\n");
+    session_appendtx_cstr(s, "fight   : kill flee\r\n");
+    session_appendtx_cstr(s, "social  : say tell emote\r\n");
+    session_appendtx_cstr(s, "session : quit save help   admin: @stats\r\n");
+    return 0;
+}
+
+# Dispatch one parsed command. `buf`/`len` is the original line (for
+# case-preserving social echo). Sets SS_QUIT on `quit`.
+fn cmd_dispatch(s, pa, buf, len): i64 {
+    var verb = parsed_verb(pa);
+
+    if (verb == VERB_UNKNOWN) {
+        if (parser_count(pa) == 0) { return 0; }   # blank line — just re-prompt
+        session_appendtx_cstr(s, "I don't understand \"");
+        session_appendtx_tok(s, pa, 0);
+        session_appendtx_cstr(s, "\".  Try \"help\".\r\n");
+        return 0;
+    }
+
+    if (verb_is_movement(verb) == 1) {
+        session_appendtx_cstr(s, "The way ");
+        session_appendtx_cstr(s, verb_name(verb));
+        session_appendtx_cstr(s, " is sealed for now — the Under-Grid opens at M3.\r\n");
+        return 0;
+    }
+
+    if (verb == VERB_QUIT) {
+        session_appendtx_cstr(s, "The Under-Grid releases you. Farewell.\r\n");
+        store64(s + SS_QUIT, 1);
+        return 0;
+    }
+    if (verb == VERB_HELP) { return cmd_help_text(s); }
+    if (verb == VERB_SAVE) {
+        session_appendtx_cstr(s, "Nothing to save yet — persistence lands at M6.\r\n");
+        return 0;
+    }
+
+    if (verb == VERB_LOOK)      { session_appendtx_cstr(s, "Darkness. The world is unlit until M3.\r\n"); return 0; }
+    if (verb == VERB_EXITS)     { session_appendtx_cstr(s, "No exits yet — rooms arrive at M3.\r\n"); return 0; }
+    if (verb == VERB_EXAMINE)   { return cmd_object(s, pa, verb); }
+    if (verb == VERB_INVENTORY) { session_appendtx_cstr(s, "You carry nothing. (inventory lands at M3.)\r\n"); return 0; }
+    if (verb == VERB_WHO)       { session_appendtx_cstr(s, "You sense others, but the roster waits on M3.\r\n"); return 0; }
+
+    if (verb == VERB_SAY)   { return cmd_social(s, pa, buf, len, "You say, \"",     "Say what?"); }
+    if (verb == VERB_TELL)  { return cmd_social(s, pa, buf, len, "You transmit: \"", "Tell whom what?"); }
+    if (verb == VERB_EMOTE) { return cmd_social(s, pa, buf, len, "* ",              "Emote what?"); }
+
+    if (verb == VERB_FLEE)  { session_appendtx_cstr(s, "There is nothing to flee — combat arrives at M4.\r\n"); return 0; }
+
+    # Remaining item / combat verbs all take a direct object.
+    return cmd_object(s, pa, verb);
+}
+
+# Handle a line entered at the command prompt (PHASE_CMD). `@stats` stays
+# an admin verb outside the world table (M1-H); everything else routes
+# through the M2 verb-noun parser. render_stats lives in server.cyr,
+# where the observability counters do (resolved as a forward reference).
 fn cmd_on_line(s, buf, len): i64 {
     if (name_eq_ci(buf, len, "@stats") == 1) {
         render_stats(s);
         session_send_cmd_prompt(s);
         return 0;
     }
-    session_appendtx_cstr(s, "echo: ");
-    session_appendtx(s, buf, len);
-    session_appendtx_cstr(s, "\r\n");
-    session_send_cmd_prompt(s);
+    if (g_parser == 0) { g_parser = parser_new(); }
+    parser_parse(g_parser, buf, len);
+    cmd_dispatch(s, g_parser, buf, len);
+    if (load64(s + SS_QUIT) == 0) { session_send_cmd_prompt(s); }
     return 0;
 }
 
