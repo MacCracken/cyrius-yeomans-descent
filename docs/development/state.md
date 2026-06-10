@@ -162,10 +162,20 @@ Benchmark: `cyrius bench` →
 
 Direct (declared in `cyrius.cyml`):
 
-- **stdlib** — string, fmt, alloc, io, vec, str, syscalls, assert, bench, args, net, chrono, result, tagged, fnptr, freelist, **cyml, toml** (zone-file parsing, added M3)
+- **stdlib** — string, fmt, alloc, io, vec, str, slice, syscalls, assert, bench, args, net, chrono, result, tagged, fnptr, freelist, cyml, toml, **fs, process, hashmap, json, bigint, ct, keccak, thread, thread_local, random** (M6 chain — see below)
+- **libro** `2.7.1` (git, `path = "../libro"`) — append-only SHA-256 hash-chain store (the crash-safe primitive behind "T.Ron" persistence). Pulls **sigil 3.6.0** (Ed25519, ADR 0004 identity) + **sakshi 2.2.4** + **patra 1.10.3** + **agnosys 1.3.2** transitively. Resolved by `cyrius deps` into `lib/` (+ `cyrius.lock`).
 
-No external (non-stdlib) deps yet. T.Ron lands at M6, Joshua at M8 — see
-[roadmap M6](roadmap.md#m6--persistence-via-tron-v070) and [M8](roadmap.md#m8--joshua-management-interface-v090).
+**M6-A landed (2026-06-09).** The first external dep chain is in and proven
+(`programs/crypto_smoke.cyr` → exit 0: sha256 + ed25519 + libro chain
+append/verify all run). The earlier "blocked on a sigil bug" note was a
+**misdiagnosis**: cyrius stdlib is **opt-in, never auto-resolved**, so
+including `dist/sigil.cyr` without listing the modules its crypto calls
+(`ct`/`keccak`/`thread`/`thread_local`/`random`) left those symbols
+undefined — cyrius 6.1.x only *warns* and emits a `ud2`, so it built then
+SIGILL'd (exit 132) the instant `sha256`/`ed25519` ran. Sigil 3.7.8's
+CHANGELOG diagnosed it against this repo; the fix is the opt-in list now in
+`cyrius.cyml [deps] stdlib`. Joshua still lands at M8 — see
+[roadmap M8](roadmap.md#m8--joshua-management-interface-v090).
 
 ## Consumers
 

@@ -17,11 +17,37 @@ output = "cyrius-yeomans-descent"
 # uses absolute-time computation per ADR 0003), result + tagged (used
 # by net.cyr's Result return shape), fnptr (vec internals), freelist
 # (per-session arena freed at disconnect per ADR 0003).
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "net", "chrono", "result", "tagged", "fnptr", "freelist", "cyml", "toml"]
+#
+# M6 chain (persistence). Cyrius stdlib is OPT-IN, never auto-resolved:
+# the libro/sigil bundles carry NO stdlib includes, so the consumer must
+# list every module their crypto/store paths touch. Omitting one is a
+# *runtime SIGILL*, not a build error — cyrius 6.1.x only warns on an
+# undefined fn and emits a `ud2` trap, so it builds then dies the moment
+# the path runs (sigil 3.7.8 CHANGELOG diagnosed this against THIS repo).
+#   ct/keccak/random — sigil 3.6.0 constant-time compare + ML-DSA shake256
+#                      + AES-GCM/RFC6979 RNG; MUST precede the sigil
+#                      include (cyrius is single-pass forward-resolution).
+#   thread/thread_local — sigil 3.6 replaced its batch mutex with per-thread
+#                      crypto-scratch banks; cbank() lazily calls
+#                      thread_local_init() on EVERY sha256/ed25519 call, so
+#                      even a single serial verify needs both (libro 2.7.1
+#                      lists the same pair). Omitting thread_local was the
+#                      original SIGILL.
+#   fs/process       — libro FileStore (flock) + atomic replace.
+#   hashmap/json/slice/bigint — libro entry/query/merkle/proof internals.
+# sigil/sakshi/patra/agnosys are NOT listed here — they resolve
+# TRANSITIVELY via [deps.libro] (listing them too = double-write error).
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "slice", "syscalls", "assert", "bench", "args", "net", "chrono", "result", "tagged", "fnptr", "freelist", "cyml", "toml", "fs", "process", "hashmap", "json", "bigint", "ct", "keccak", "thread", "thread_local", "random"]
 
-# M6 (persistence) is BLOCKED on a sigil bug: sigil's NI-accelerated
-# crypto SIGILLs under cyrius 6.1.20 (filed P1 on sigil's roadmap,
-# 2026-06-09). The chosen ADR 0004 identity model is Ed25519 via sigil;
-# it can't link/run here until sigil ships a 6.1.x-compatible build.
-# No external deps land until then.
----
+# M6 persistence (ADR 0004 Ed25519 identity + crash-safe hash-chain store).
+# libro = append-only SHA-256 hash-linked store (FileStore: flock +
+# .tmp/rename atomic replace) — the real crash-safe primitive behind the
+# "T.Ron" persistence subsystem. Pulls sigil 3.6.0 (Ed25519) + sakshi +
+# patra 1.10.3 + agnosys 1.3.2 TRANSITIVELY. `path` resolves from the local
+# sibling checkout (currently libro 2.7.1) — the `tag` documents the pinned
+# release and must track that checkout's VERSION.
+[deps.libro]
+git = "https://github.com/MacCracken/libro"
+path = "../libro"
+tag = "2.7.1"
+modules = ["dist/libro.cyr"]

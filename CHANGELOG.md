@@ -4,6 +4,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **M6-A — persistence dep chain landed.** First external (non-stdlib)
+  dependency: **libro 2.7.1** (append-only SHA-256 hash-chain store — the
+  crash-safe primitive behind "T.Ron" player persistence), pulling **sigil
+  3.6.0** (Ed25519 identity, ADR 0004), sakshi, patra, and agnosys
+  transitively via `[deps.libro]`. Validated end-to-end by
+  `programs/crypto_smoke.cyr` (sha256 + ed25519 round-trip + libro chain
+  append/verify, exit 0).
+
+### Fixed
+
+- **Corrected the M6 "blocked on a sigil bug" misdiagnosis.** The crypto
+  SIGILL (exit 132) was never a sigil defect — cyrius stdlib is **opt-in,
+  never auto-resolved**, so `dist/sigil.cyr` was consumed without listing
+  the stdlib modules its crypto calls (`ct`/`keccak`/`thread`/
+  `thread_local`/`random`). cyrius 6.1.x only *warns* on the undefined
+  symbols and compiles each to a `ud2` trap, so the build passed then
+  crashed the moment a crypto path ran. Fix: those modules are now opted
+  in via `cyrius.cyml [deps] stdlib`, ahead of the sigil include
+  (single-pass forward-resolution). Diagnosed in sigil 3.7.8's CHANGELOG.
+
 ## [0.6.1] — 2026-06-09
 
 A polish patch that completes the lived-in feel of combat — no new

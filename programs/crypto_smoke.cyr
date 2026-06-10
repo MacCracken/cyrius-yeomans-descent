@@ -1,0 +1,54 @@
+# crypto_smoke.cyr — M6-A dep-landing validation.
+#
+# Proves the libro+sigil chain resolves AND runs: the exact paths that
+# SIGILL'd (sha256 / ed25519) when the sigil opt-in stdlib modules were
+# missing now execute to completion. Build via the manifest so the
+# [deps] stdlib (ct/keccak/thread/thread_local/random) auto-prepends:
+#
+#   cyrius build programs/crypto_smoke.cyr build/crypto_smoke
+#   ./build/crypto_smoke        # exit 0 + "SMOKE PASS"
+#
+# Scratch validation — not wired into [build]. Delete once M6-A is signed off.
+
+include "lib/sakshi.cyr"   # tracing — sigil/libro both call sakshi_*
+include "lib/sigil.cyr"    # Ed25519 + SHA-256 (banking path, cbank/thread_local)
+include "lib/libro.cyr"    # hash-chain store (entry hashing uses sigil sha256)
+
+fn main(): i64 {
+    alloc_init();
+
+    # 1. SHA-256 over "abc" — first digest byte is 0xba (FIPS 180-4 vector).
+    #    This is the symbol that compiled to a `ud2` and SIGILL'd when
+    #    ct/keccak/thread_local were not opted in.
+    var digest = alloc(32);
+    sha256("abc", 3, digest);
+    if (load8(digest) != 0xba) { println("FAIL sha256"); return 1; }
+    println("ok  sha256 (FIPS abc vector) — banking path live");
+
+    # 2. Ed25519 round-trip — cbank()/thread_local_init() run on every call.
+    var sk = alloc(64);
+    var pk = alloc(32);
+    var sig = alloc(64);
+    ed25519_generate_keypair(sk, pk);
+    ed25519_sign(sk, "yeoman", 6, sig);
+    if (ed25519_verify(pk, "yeoman", 6, sig) != 1) { println("FAIL ed25519"); return 2; }
+    println("ok  ed25519 sign/verify round-trip");
+
+    # 3. libro hash-chain append + verify — entry hashing routes through
+    #    sigil's sha256, so this re-exercises the banking path under libro.
+    #    libro entry fields are `str` objects — str_from(), not raw literals
+    #    (entry_compute_hash derefs them as str structs).
+    var c = chain_new();
+    chain_append(c, SEV_INFO, str_from("smoke"), str_from("login"), str_from("player=cyrius"));
+    chain_append(c, SEV_INFO, str_from("smoke"), str_from("save"),  str_from("room=hub:3"));
+    if (chain_len(c) != 2) { println("FAIL chain_len"); return 3; }
+    chain_verify(c);
+    println("ok  libro chain append+verify (2 entries)");
+
+    println("");
+    println("SMOKE PASS — sigil crypto + libro chain run, no SIGILL.");
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);
