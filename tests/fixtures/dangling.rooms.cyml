@@ -1,0 +1,9 @@
+zone = "tfix"
+name = "Dangling Fixture"
+[[entries]]
+kind = "room"
+id = "tfix.start"
+title = "Start"
+exit_n = "tfix.nowhere"
+---
+This room's north exit names a room that does not exist.

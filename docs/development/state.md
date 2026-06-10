@@ -7,16 +7,16 @@
 
 ## Version
 
-**0.3.0** — M2 close, 2026-06-09. The command prompt now drives a real
-verb-noun parser (`src/parser.cyr`): tokenizer (M2-A), canonical verb
-table + aliases (M2-B), keyword-prefix direct-object resolution (M2-C),
-preposition / indirect-object split (M2-D), and `all.X` / `N.X`
-qualifiers (M2-E), fuzz-hardened against 100k random inputs (M2-F).
-`cmd_on_line` routes through the parser instead of echoing; `quit`
-disconnects. The verbs' *world* — rooms, items, mobs — lands at M3, so
-the handlers acknowledge the parse rather than fake state, and the
-resolution matchers run against synthetic scopes until M3 supplies live
-contents. The wire (0.2.0) and heartbeat (0.1.0) underneath are intact.
+**0.4.0** — M3 close, 2026-06-09. The world is physical. A CYML zone
+loader ([ADR 0005](../adr/0005-zone-file-format.md), `src/world.cyr`)
+builds an in-memory room tree at boot and rejects dangling exits; players
+spawn into it at login and have a location. Movement (`n`/`s`/…) traverses
+exits with auto-look and onlooker broadcasts; rooms render in ANSI;
+`look`/`examine`/`exits`/`inventory` inspect; `say`/`emote` carry to the
+room, `tell` across rooms, `who` lists everyone online. The authored
+21-room Hub (`data/zones/hub.rooms.cyml`) is walkable end-to-end by two
+players who see each other in real time. Items, mobs, and combat are M4-M5;
+the parser (0.3.0), wire (0.2.0), and tick (0.1.0) underneath are intact.
 
 ## Toolchain
 
@@ -27,27 +27,37 @@ contents. The wire (0.2.0) and heartbeat (0.1.0) underneath are intact.
 ```
 src/
   main.cyr       argv dispatch (`serve [port]` / `version` / `help`);
-                 include order telnet → parser → session → server
+                 include order telnet → parser → world → session → server
   telnet.cyr     RFC 854 IAC parser + RFC 1143 Q-method negotiation
                  (M1-C/M1-D); pure, no I/O; one TelnetState per session
   parser.cyr     M2 verb-noun parser: tokenizer, verb table + aliases,
                  keyword-prefix object resolution, preposition split,
                  all.X / N.X qualifiers; pure, no session I/O
-  session.cyr    Session struct (144 B), rx scratch, decoded-line
-                 accumulator, tx queue, login flow + name validation
-                 (M1-E), idle predicate (M1-F), M2 command dispatch
-                 (cmd_on_line → parser → cmd_dispatch), SS_QUIT teardown
+  world.cyr      M3 world tree: CYML zone loader, Room struct (208 B),
+                 exit resolution + dangling-ref rejection, verb→dir,
+                 room/exit accessors; pure, no session I/O
+  session.cyr    Session struct (152 B), rx scratch, decoded-line
+                 accumulator, tx queue, login (M1-E) + world entry,
+                 M2/M3 dispatch (movement, room render, examine, social),
+                 ANSI SGR helpers, SS_QUIT teardown, SS_ROOM location
   server.cyr     event loop, listener, signalfd shutdown, tick scheduler,
                  epoll dispatch, active-session list + idle sweep (M1-F),
-                 observability counters + render_stats (M1-H), SS_QUIT drop
+                 observability + render_stats (M1-H), zone load at boot,
+                 g_epfd + room broadcast / presence / who (M3-C/F)
   test.cyr       top-level test entrypoint (per cyrius.cyml [build].test)
 
+data/zones/
+  hub.rooms.cyml                the authored 21-room Hub starter zone (M3-G)
+  example.rooms.cyml            3-room schema example (ADR 0005)
+
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (154 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (174 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
                                 fuzz/ (the toolchain runs fuzz/*.fcyr)
+  fixtures/                     zone-loader test fixtures (loop / dangling /
+                                wrongkind)
 
 fuzz/
   parser_fuzz.fcyr             M2-F parser fuzz harness (100k inputs);
@@ -58,7 +68,8 @@ benches/
                                 `cyrius bench` auto-discovers benches/
 ```
 
-Binary at `build/cyrius-yeomans-descent` (~131 KB with `CYRIUS_DCE=1`).
+Binary at `build/cyrius-yeomans-descent` (~182 KB with `CYRIUS_DCE=1`;
+the cyml / toml parsers add the weight over 0.3.0's 131 KB).
 
 ## Design
 
@@ -69,7 +80,7 @@ Binary at `build/cyrius-yeomans-descent` (~131 KB with `CYRIUS_DCE=1`).
 
 ## Tests
 
-`cyrius test tests/cyrius-yeomans-descent.tcyr` — 154 unit assertions:
+`cyrius test tests/cyrius-yeomans-descent.tcyr` — 174 unit assertions:
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -88,25 +99,31 @@ Binary at `build/cyrius-yeomans-descent` (~131 KB with `CYRIUS_DCE=1`).
   head-noun rule, multi-preposition, empty line
 - **qual** (M2-E) — `all.X` / bare `all` / `N.X` / plain parse,
   `parse_uint` / `is_word_all`, `resolve_nth` / `resolve_all` + cap
+- **world** (M3-B) — zone load, id interning + lookup, `start` field,
+  bidirectional exit resolution, title/prose capture, `verb_to_dir`,
+  dangling / wrong-kind / missing-file rejection (fixtures in `tests/fixtures/`)
 - **idle** — the `session_is_idle` threshold predicate
 
 Fuzz: `cyrius fuzz` → `fuzz/parser_fuzz.fcyr`, 100k random inputs +
 directed adversarial cases, all invariants hold (token/buffer bounds,
 index ranges, no `resolve_all` overrun), no crash / hang / leak.
 
-End-to-end smokes validated locally on Linux x86_64 at the 0.3.0 cut:
+End-to-end smokes validated locally on Linux x86_64 at the 0.4.0 cut:
 
-- full login → command loop: `look`, `get all.rations from corpse`,
-  `give monoblade to kiran`, `n`, `xyzzy`, `say …`, `emote …`, `help`,
-  `@stats`, `quit` — each routes to the right handler; the dobj/prep/iobj
-  decomposition is visible in the object-verb echo; `quit` disconnects
-- social verbs echo the case-preserved message text (parser tokens are
-  lowercased, but the social path reads the original line)
-- 0.2.0 wire/idle/concurrency smokes still hold (parser is additive)
+- the Hub loads (21 rooms); graph check: 0 asymmetric exits, 21/21
+  reachable from the `hub.gate` start — walkable end-to-end
+- two-player walk: A and B spawn at the gate; A moves and B sees
+  `alice heads north`, A sees `bob arrives`; presence (`Also here:`),
+  ANSI title/exits, and `look`/`exits` render the live room
+- social: `say` / `emote` reach the room (not other rooms), `tell`
+  crosses rooms, `who` lists both with room titles, `examine` resolves
+  self and a present player
+- 0.2.0/0.3.0 wire / parser / idle smokes still hold (M3 is additive)
 
 Benchmark: `cyrius bench` → telnet_feed ≈ 6 ns/byte (mixed), ≈ 5 ns/byte
-(pure data), 16 M iterations, stable (unchanged — parser not yet benched;
-M9-C locks a parser-p99 baseline).
+(pure data), 16 M iterations, stable (unchanged — parser / world not yet
+benched; M9-C locks the wider baseline). Zone load is one-shot at boot,
+off the tick path, so it has no steady-state cost.
 
 `cyrius test src/test.cyr` exits 0 (CI uses this explicit form — see
 `.github/workflows/ci.yml`; the pin reads from `cyrius.cyml`).
@@ -115,7 +132,7 @@ M9-C locks a parser-p99 baseline).
 
 Direct (declared in `cyrius.cyml`):
 
-- **stdlib** — string, fmt, alloc, io, vec, str, syscalls, assert, bench, args, net, chrono, result, tagged, fnptr, freelist
+- **stdlib** — string, fmt, alloc, io, vec, str, syscalls, assert, bench, args, net, chrono, result, tagged, fnptr, freelist, **cyml, toml** (zone-file parsing, added M3)
 
 No external (non-stdlib) deps yet. T.Ron lands at M6, Joshua at M8 — see
 [roadmap M6](roadmap.md#m6--persistence-via-tron-v070) and [M8](roadmap.md#m8--joshua-management-interface-v090).
@@ -126,75 +143,78 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** M2 closed at 0.3.0. Pick up the next slot per the
+**No active cycle.** M3 closed at 0.4.0. Pick up the next slot per the
 boot guide below.
 
 ---
 
 ## Next-agent boot guide
 
-You are picking up at **M3-A — zone file format** ([roadmap.md M3 sub-bites](roadmap.md#m3--world-rooms-movement-v040)). M3 makes the world physical: a zone-file format, a loader, movement, ANSI room rendering, the inspection + social verbs, and an authored starter zone, shipping at v0.4.0. **M3-A opens with ADR 0005** (zone-file serialization: `lib/cyml.cyr` vs `lib/toml.cyr` vs a bespoke DikuMUD `.wld`/`.mob`/`.obj`/`.zon` dialect) — decide it before any M3 code.
+You are picking up at **M4-A — combat state registry** ([roadmap.md M4 sub-bites](roadmap.md#m4--combat-tick-v050)). M4 gives the placeholder 2.5 s tick a job: engaged combatants resolve a round every tick in lockstep ([ADR 0001](../adr/0001-tick-based-combat-over-cooldowns.md)) — hit/damage math (THAC0-style hidden rolls), aggression, death + corpses, drift instrumentation, and a load test. Ships at v0.5.0. M4 needs mobs and items, which **do not exist yet** — see "What M4 needs first" below.
 
-### What's already built (0.3.0)
+### What's already built (0.4.0)
 
-- **Telnet wire (0.2.0)** — `telnet_feed` is a pure RFC 854 parser;
-  `session_consume_rx` routes decoded bytes into the line accumulator,
-  which dispatches complete lines to `session_on_line` (branches on phase).
-- **Verb-noun parser (M2)** — `src/parser.cyr`, pure, one shared
-  `g_parser` (lazily alloc'd). `parser_parse(pa, buf, len)` tokenizes +
-  decomposes into `PA_VERB` / `PA_PREP` / `PA_DOBJ_I` / `PA_IOBJ_I`
-  (accessors: `parsed_verb`, `parsed_prep`, `parsed_dobj`, `parsed_iobj`).
-  Verb ids in the `Verb` enum; `verb_lookup` folds aliases.
-- **Object resolution matchers (M2-C/E)** — `resolve_noun` (single,
-  ambiguity-checked), `resolve_nth`, `resolve_all`, and the
-  `kw_matches` keyword-prefix primitive. **These take a *scope* —
-  `names` = array of `n` NUL-terminated keyword-string pointers in
-  deterministic scan order.** Today only the test/fuzz harnesses build
-  that array; **M3 is where the world supplies it** (inventory →
-  room contents → worn/wielded, in that scan order, per M2-C's contract).
-- **Command dispatch (M2)** — `cmd_on_line` → `parser_parse` →
-  `cmd_dispatch`. Object/movement/look verbs currently emit M3-pending
-  placeholders; `cmd_object` already renders the parsed dobj/prep/iobj.
-  This is the seam M3 fills with real handlers.
-- **`quit` teardown** — `SS_QUIT` flag set by the verb, checked in
-  `dispatch_session` after the goodbye flush → `drop_session`.
-- **Idle sweep + observability** — unchanged from 0.2.0 (`sweep_idle`,
-  `@stats` / `render_stats`, the drift ring).
+- **Tick loop (M1-A)** — `cmd_serve`'s epoll loop fires `advance_tick()`
+  every 2.5 s on an absolute schedule with drift-resistant catch-up;
+  `record_tick_drift` feeds the p99 ring. `advance_tick` is still a no-op
+  counter bump — **M4-A/B hang the combat round off it.**
+- **World tree (M3)** — `src/world.cyr`. `world_load_rooms(path)` builds
+  rooms; `room_at(i)`, `room_exit(r, dir)`, `room_id/title/prose_*`
+  accessors. Rooms currently hold only static fields — **no contents
+  list yet** (mob/object instances in a room are M4's to add).
+- **Players in the world** — each session has `SS_ROOM` (current room).
+  `room_broadcast(room, except, mover, a, b, c)` and `room_say_broadcast`
+  (server.cyr) push lines to everyone in a room + flush them; combat prose
+  reuses these. `room_find_player` resolves a name in a room.
+- **Verb-noun parser (M2)** — `cmd_dispatch` (session.cyr) routes verbs.
+  `kill` / `flee` currently fall through to `cmd_object` placeholders —
+  **M4-D wires them.** The resolver (`resolve_noun` / `resolve_nth` /
+  `resolve_all`, `kw_matches`) takes a *scope* = array of NUL-terminated
+  keyword strings; **M4 builds that scope from a room's mob/object
+  contents** (the `keywords` field in mob/obj CYML entries, ADR 0005).
+- **Zone format (ADR 0005)** — mob / object templates are CYML entries
+  with `kind = "mob"` / `"obj"` in their own files
+  (`<zone>.mobs.cyml` / `<zone>.objs.cyml`), ≤ 32 entries each. `world.cyr`
+  loads rooms only so far; **M4/M5 add `world_load_mobs` / `_objs`** and a
+  per-room contents list.
 
-### What M3-A should do
+### What M4 needs first
 
-1. **File ADR 0005** (zone-file format) — see [roadmap.md § Open ADRs](roadmap.md#open-adrs).
-2. Define the format: zone metadata, rooms (id / title / prose / exits /
-   mob spawns / object spawns), mob templates, object templates.
-3. Then M3-B (loader: parse at boot, validate the exit graph, build the
-   in-memory world tree) and M3-C (movement) follow.
+M4 is combat, but there is nothing to fight yet. Expect to build, in order:
 
-When the world tree exists, the M2 resolution matchers bind to it:
-build the `names` scope array from a room's contents + the actor's
-inventory and call `resolve_noun` / `resolve_nth` / `resolve_all`. The
-`SS_PLAYER` slot (offset 80, reserved since M1-B) gets the actor handle
-at M6; until then the actor is the session.
+1. **Mob templates + instances.** Extend `world.cyr` with a `world_load_mobs`
+   (kind="mob") and a per-room contents/occupants list so a room can hold
+   live mobs. Author a few mobs into `data/zones/hub.mobs.cyml` + room
+   `mobs = [...]` spawn lists (the room field is already in the schema).
+2. **Combat state registry (M4-A).** Per-actor engagement record (target,
+   aggro) on the player (session) and the mob instance.
+3. Then hit/damage (M4-B/C) off `advance_tick`, aggression (M4-D, wiring
+   `kill` / `flee`), death + corpses (M4-E/F), drift + load test (M4-G/H).
+
+The `SS_PLAYER` slot (session offset 80, reserved since M1-B) gets a real
+actor/combatant handle when persistence lands (M6); until then the
+session *is* the player-actor — combat state can live in new SS_ slots.
 
 ### Reference
 
+- Combat math (1d20 + DEX vs AC, THAC0; weapon dice + STR/TEC): [`../architecture/overview.md` §2.3](../architecture/overview.md) and [ADR 0001](../adr/0001-tick-based-combat-over-cooldowns.md).
 - Resolution scope contract: `src/parser.cyr` M2-C header comment.
-- Room rendering uses `lib/darshana` for SGR escapes (M3-D).
-- World / room / zone semantics: [roadmap.md M3](roadmap.md#m3--world-rooms-movement-v040)
-  and [`../architecture/overview.md`](../architecture/overview.md).
+- Mob/obj entry schema: [ADR 0005](../adr/0005-zone-file-format.md).
 
 ### Quick boot sanity
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test tests/cyrius-yeomans-descent.tcyr   # 154 assertions
+cyrius test tests/cyrius-yeomans-descent.tcyr   # 174 assertions
 cyrius fuzz                                      # parser fuzz, 100k inputs
 cyrius bench                                     # IAC parser baseline
 ./build/cyrius-yeomans-descent serve 4000
-# telnet 127.0.0.1 4000 — log in, type `help`, try `get all.x from y`, `quit`
+# telnet 127.0.0.1 4000 — log in, `look`, walk n/s/e/w, `who`, `say hi`, `quit`
 ```
 
 ### Open ADRs
 
-Three decisions are queued ahead of their consumer milestones — see
-[roadmap.md § Open ADRs](roadmap.md#open-adrs). **ADR 0005 (zone-file
-format) is now due — it gates M3-A.**
+ADR 0005 (zone-file format) was resolved at M3-A. Two remain ahead of
+their consumers — see [roadmap.md § Open ADRs](roadmap.md#open-adrs):
+**0004** (identity/auth, gates M6) and **0006** (T.Ron persistence shape,
+M6). Neither blocks M4.

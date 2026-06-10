@@ -19,8 +19,8 @@
 | **0.1.0** | M0 scaffold + ADRs 0001 / 0002 / 0003 + M1-A event loop + M1-B sessions | ✅ 2026-05-24 |
 | **0.2.0** | M1 close — Telnet parser (M1-C) + option negotiation (M1-D) + login scaffold (M1-E) + idle timeout (M1-F) + bench harness (M1-G) + observability (M1-H) | ✅ 2026-06-09 |
 | **0.3.0** | M2 — verb-noun parser + fuzz harness | ✅ 2026-06-09 |
-| **0.4.0** | M3 — world / rooms / movement + starter zone | next |
-| **0.5.0** | M4 — combat tick + hit/damage math + corpses | |
+| **0.4.0** | M3 — world / rooms / movement + starter zone | ✅ 2026-06-09 |
+| **0.5.0** | M4 — combat tick + hit/damage math + corpses | next |
 | **0.6.0** | M5 — four classes playable solo through the starter zone | |
 | **0.7.0** | M6 — T.Ron-backed player persistence + crash-safe writes | |
 | **0.8.0** | M7 — zone resets with player-presence gating | |
@@ -32,7 +32,7 @@
 
 ## In progress
 
-**No active cycle.** M2 closed at 0.3.0. Next slot is **M3-A — zone file format** ([§M3 sub-bites](#m3--world-rooms-movement-v040)), which opens with **ADR 0005** (zone-file serialization). Pickup pointer + boot guide in [`state.md`](state.md).
+**No active cycle.** M3 closed at 0.4.0. Next slot is **M4-A — combat state registry** ([§M4 sub-bites](#m4--combat-tick-v050)) — the placeholder tick from M1 gets a job. Pickup pointer + boot guide in [`state.md`](state.md).
 
 ---
 
@@ -179,6 +179,7 @@ Brief one-liners; per-tag chronology in [`../../CHANGELOG.md`](../../CHANGELOG.m
   - **M1-G** — `benches/bench_telnet.bcyr` IAC-parser baseline (≈ 6 ns/byte mixed, ≈ 5 ns/byte data).
   - **M1-H** — `@stats` admin verb (connections, logged-in, ticks, tick-drift p99). Gate met: 32 concurrent connect→login→disconnect, sessions reclaimed, tick p99 drift < 10 ms.
 - **M2 (0.3.0)** — the verb-noun parser (`src/parser.cyr`), pure and fuzz-clean. Tokenizer (M2-A) → verb table + aliases (M2-B) → keyword-prefix direct-object resolution (M2-C) → preposition / indirect-object split (M2-D) → `all.X` / `N.X` qualifiers (M2-E) → 100k-input fuzz harness (M2-F, `fuzz/parser_fuzz.fcyr`). `cmd_on_line` routes through the parser; `quit` disconnects via the new `SS_QUIT` flag. Object/world binding deferred to M3 — the resolution matchers run against synthetic scopes for now. Gate met: fuzz clean against 100k random inputs; verb table covered by the 154-assertion suite.
+- **M3 (0.4.0)** — the world becomes physical. [ADR 0005](../adr/0005-zone-file-format.md) picks CYML for zone files; the loader (`src/world.cyr`, M3-B) builds an in-memory room tree at boot and rejects dangling exits. Movement (M3-C) with onlooker broadcasts, ANSI room rendering (M3-D), inspection verbs (M3-E, `examine` resolving the M2 parser against live room presence), room-scoped `say`/`emote` + cross-room `tell` + `who` (M3-F), and the authored 21-room Hub starter zone (M3-G, `data/zones/hub.rooms.cyml`). Gate met: two players walk the Hub end-to-end seeing each other's arrivals / departures / says; 174-assertion suite.
 
 ---
 
@@ -205,7 +206,7 @@ A release qualifies for 1.0 when:
 The decisions queued ahead of their consumer milestones:
 
 - **ADR 0004 — Identity & authentication model.** Name+password (DikuMUD/CircleMUD tradition, era-correct, no key-management UX cost) vs sigil Ed25519 (AGNOS-ecosystem aligned, agora-precedented, no password-on-wire — but Telnet has no TLS so plaintext passwords are the same problem). Resolved before **M6-B**.
-- **ADR 0005 — Zone file format.** `lib/cyml.cyr` vs `lib/toml.cyr` vs a bespoke MUD-zone-file dialect (the DikuMUD `.wld` / `.mob` / `.obj` / `.zon` family). Resolved before **M3-A**.
+- ~~**ADR 0005 — Zone file format.**~~ **Resolved 2026-06-09** → [ADR 0005](../adr/0005-zone-file-format.md): **CYML** (`lib/cyml.cyr`), one file per zone per entity kind (`<zone>.rooms/.mobs/.objs.cyml`), ≤ 32 entries/file. Header fields + markdown prose body per entry.
 - **ADR 0006 — Persistence shape with T.Ron.** Per-player file vs single-store transactional log vs hybrid. Depends on T.Ron's transactional API surface as of M6 landing. Resolved at **M6-A**.
 
 Filed when their first consumer lands; numbered in flight, not pre-allocated.

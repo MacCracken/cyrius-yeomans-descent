@@ -1,0 +1,272 @@
+# world.cyr — M3 world tree: zone loader + rooms + exits.
+#
+# Loads CYML zone files (ADR 0005) at boot into an in-memory room tree.
+# Each rooms file is a multi-entry CYML document: a file-level header
+# with zone metadata, then one `[[entries]]` per room (header fields +
+# markdown prose body). The loader interns room ids, copies the small
+# fields inline, keeps the prose zero-copy (it points into the persistent
+# CYML file buffer), and resolves every `exit_<dir>` id to a room index —
+# rejecting dangling references so a bad exit graph fails at boot, not
+# mid-walk.
+#
+# Loading happens once at startup (and on a Joshua reload at M8), never in
+# the tick — disk I/O can't block the single-thread loop (ADR 0003).
+#
+# M3-B scope: rooms only. Mob / object templates (kind = "mob" / "obj",
+# their own files) land with the entities that consume them (M4/M5).
+
+# === Directions ===
+# Index order is fixed: it is the exit-slot order in every room and the
+# target of verb_to_dir. n s e w u d.
+enum Dir {
+    DIR_N = 0;
+    DIR_S = 1;
+    DIR_E = 2;
+    DIR_W = 3;
+    DIR_U = 4;
+    DIR_D = 5;
+    NDIR  = 6;
+}
+
+# === Room layout (offsets in bytes) ===
+#
+# id / title are copied inline (bounded, untrusted-input-safe); prose is a
+# zero-copy (ptr, len) into the CYML file buffer (which never frees).
+enum RM {
+    RM_ID        = 0;     # inline id bytes (RM_ID_CAP)
+    RM_ID_LEN    = 48;
+    RM_TITLE     = 56;    # inline title bytes (RM_TITLE_CAP)
+    RM_TITLE_LEN = 136;
+    RM_PROSE_PTR = 144;   # ptr into the file buffer (persists)
+    RM_PROSE_LEN = 152;
+    RM_EXIT      = 160;   # NDIR i64 exit room indices; -1 = no exit
+    RM_SIZE      = 208;   # 160 + 6*8
+}
+enum RmCap {
+    RM_ID_CAP    = 48;
+    RM_TITLE_CAP = 80;
+}
+
+# Hard per-file entry cap, from lib/cyml.cyr's 32-slot marker buffer
+# (ADR 0005). A file over this is rejected rather than silently truncated.
+enum WorldCap { MAX_ENTRIES = 32; }
+
+# world_load return codes (0 = ok, negatives are distinct failures).
+var WL_OK          = 0;
+var WL_ERR_IO      = 0 - 1;   # file missing / unreadable / empty
+var WL_ERR_EMPTY   = 0 - 2;   # zero rooms
+var WL_ERR_OVERCAP = 0 - 3;   # more than MAX_ENTRIES rooms
+var WL_ERR_KIND    = 0 - 4;   # an entry's kind != "room"
+var WL_ERR_NOID    = 0 - 5;   # an entry has no id
+var WL_ERR_DANGLE  = 0 - 6;   # an exit names a room that does not exist
+
+# === World globals ===
+var g_rooms      = 0;   # contiguous block of g_room_count RM_SIZE structs
+var g_room_count = 0;
+var g_start_room = 0;   # room index new players spawn into (default 0)
+var g_zone_name  = 0;   # str: human zone name (for prompts / Joshua)
+
+# Room at index i (no bounds check — callers hold valid indices).
+fn room_at(i): i64 { return g_rooms + i * RM_SIZE; }
+fn world_room_count(): i64 { return g_room_count; }
+fn world_start_room(): i64 { return g_start_room; }
+
+fn room_id_ptr(r): i64    { return r + RM_ID; }
+fn room_id_len(r): i64    { return load64(r + RM_ID_LEN); }
+fn room_title_ptr(r): i64 { return r + RM_TITLE; }
+fn room_title_len(r): i64 { return load64(r + RM_TITLE_LEN); }
+fn room_prose_ptr(r): i64 { return load64(r + RM_PROSE_PTR); }
+fn room_prose_len(r): i64 { return load64(r + RM_PROSE_LEN); }
+
+# Exit room index in direction `dir` (0..NDIR), or -1 if no exit / OOB.
+fn room_exit(r, dir): i64 {
+    if (dir < 0)     { return 0 - 1; }
+    if (dir >= NDIR) { return 0 - 1; }
+    return load64(r + RM_EXIT + dir * 8);
+}
+
+# Map a movement Verb (parser.cyr) to a Dir index, or -1 if not a
+# movement verb.
+fn verb_to_dir(v): i64 {
+    if (v == VERB_NORTH) { return DIR_N; }
+    if (v == VERB_SOUTH) { return DIR_S; }
+    if (v == VERB_EAST)  { return DIR_E; }
+    if (v == VERB_WEST)  { return DIR_W; }
+    if (v == VERB_UP)    { return DIR_U; }
+    if (v == VERB_DOWN)  { return DIR_D; }
+    return 0 - 1;
+}
+
+# Lowercase direction word for a Dir index (arrival/departure prose).
+fn dir_name(dir): i64 {
+    if (dir == DIR_N) { return "north"; }
+    if (dir == DIR_S) { return "south"; }
+    if (dir == DIR_E) { return "east"; }
+    if (dir == DIR_W) { return "west"; }
+    if (dir == DIR_U) { return "up"; }
+    if (dir == DIR_D) { return "down"; }
+    return "";
+}
+
+# The `exit_<dir>` header key for a Dir index.
+fn exit_key(dir): i64 {
+    if (dir == DIR_N) { return "exit_n"; }
+    if (dir == DIR_S) { return "exit_s"; }
+    if (dir == DIR_E) { return "exit_e"; }
+    if (dir == DIR_W) { return "exit_w"; }
+    if (dir == DIR_U) { return "exit_u"; }
+    if (dir == DIR_D) { return "exit_d"; }
+    return "";
+}
+
+# Copy up to `cap` bytes from a str into `dst`; return the bytes copied.
+fn copy_str_capped(dst, cap, s): i64 {
+    var p = str_data(s);
+    var n = str_len(s);
+    if (n > cap) { n = cap; }
+    var i = 0;
+    while (i < n) {
+        store8(dst + i, load8(p + i) & 0xFF);
+        i = i + 1;
+    }
+    return n;
+}
+
+# Byte-compare a str against a room's inline id. Returns 1 on equal.
+fn id_eq_str(r, s): i64 {
+    var n = load64(r + RM_ID_LEN);
+    if (str_len(s) != n) { return 0; }
+    var a = r + RM_ID;
+    var b = str_data(s);
+    var i = 0;
+    while (i < n) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Find the room index whose id equals str `s`, or -1.
+fn room_index_by_str(s): i64 {
+    var i = 0;
+    while (i < g_room_count) {
+        if (id_eq_str(room_at(i), s) == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Find the room index whose id equals the bytes buf[0..len), or -1.
+# Used to place a player at a start room named by id.
+fn room_index_by_id(buf, len): i64 {
+    var i = 0;
+    while (i < g_room_count) {
+        var r = room_at(i);
+        if (load64(r + RM_ID_LEN) == len) {
+            var a = r + RM_ID;
+            var j = 0;
+            var same = 1;
+            while (j < len) {
+                if ((load8(a + j) & 0xFF) != (load8(buf + j) & 0xFF)) { same = 0; j = len; }
+                j = j + 1;
+            }
+            if (same == 1) { return i; }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# === world_load_rooms — parse + build the room tree from a CYML file. ===
+#
+# Returns WL_OK on success, or a negative WL_ERR_* code. On success the
+# world globals are populated and exits are resolved + validated.
+fn world_load_rooms(path): i64 {
+    var r = cyml_parse_file_r(path);
+    if (is_ok(r) == 0) { return WL_ERR_IO; }
+    var doc = result_unwrap(r);
+
+    var n = cyml_doc_entry_count(doc);
+    if (n <= 0)            { return WL_ERR_EMPTY; }
+    if (n > MAX_ENTRIES)   { return WL_ERR_OVERCAP; }
+
+    # Zone metadata from the file-level header.
+    var start_id = 0;   # optional `start` room id (str); else room 0
+    var fhdr = str_new(cyml_doc_header(doc), cyml_doc_header_len(doc));
+    var fsecs = toml_parse(fhdr);
+    if (vec_len(fsecs) > 0) {
+        var fpairs = toml_section_pairs(vec_get(fsecs, 0));
+        g_zone_name = toml_get(fpairs, "name");
+        start_id = toml_get(fpairs, "start");
+    }
+
+    g_rooms = alloc(n * RM_SIZE);
+    g_room_count = n;
+    g_start_room = 0;
+
+    # Temp: each room's NDIR exit-target strings (or 0), resolved in pass 2.
+    var exit_tmp = alloc(n * NDIR * 8);
+
+    # --- Pass 1: load fields, stash exit-id strings ---
+    var i = 0;
+    while (i < n) {
+        var e = cyml_doc_entry(doc, i);
+        var hs = str_new(cyml_entry_header(e), cyml_entry_header_len(e));
+        var secs = toml_parse(hs);
+        if (vec_len(secs) == 0) { return WL_ERR_NOID; }
+        var pairs = toml_section_pairs(vec_get(secs, 0));
+
+        var kind = toml_get(pairs, "kind");
+        if (kind == 0) { return WL_ERR_KIND; }
+        if (str_eq_cstr(kind, "room") == 0) { return WL_ERR_KIND; }
+
+        var rm = room_at(i);
+        var id = toml_get(pairs, "id");
+        if (id == 0) { return WL_ERR_NOID; }
+        store64(rm + RM_ID_LEN, copy_str_capped(rm + RM_ID, RM_ID_CAP, id));
+
+        var title = toml_get(pairs, "title");
+        if (title == 0) {
+            store64(rm + RM_TITLE_LEN, 0);
+        } else {
+            store64(rm + RM_TITLE_LEN, copy_str_capped(rm + RM_TITLE, RM_TITLE_CAP, title));
+        }
+
+        store64(rm + RM_PROSE_PTR, cyml_entry_body(e));
+        store64(rm + RM_PROSE_LEN, cyml_entry_body_len(e));
+
+        var dir = 0;
+        while (dir < NDIR) {
+            var v = toml_get(pairs, exit_key(dir));
+            store64(exit_tmp + (i * NDIR + dir) * 8, v);
+            store64(rm + RM_EXIT + dir * 8, 0 - 1);
+            dir = dir + 1;
+        }
+        i = i + 1;
+    }
+
+    # --- Pass 2: resolve exit ids to room indices, reject dangling ---
+    i = 0;
+    while (i < n) {
+        var rm = room_at(i);
+        var dir = 0;
+        while (dir < NDIR) {
+            var v = load64(exit_tmp + (i * NDIR + dir) * 8);
+            if (v != 0) {
+                var idx = room_index_by_str(v);
+                if (idx < 0) { return WL_ERR_DANGLE; }
+                store64(rm + RM_EXIT + dir * 8, idx);
+            }
+            dir = dir + 1;
+        }
+        i = i + 1;
+    }
+
+    # Resolve the spawn room: the zone header's `start` id, else room 0.
+    if (start_id != 0) {
+        var si = room_index_by_str(start_id);
+        if (si >= 0) { g_start_room = si; }
+    }
+
+    return WL_OK;
+}

@@ -1,0 +1,222 @@
+zone = "hub"
+name = "The Hub"
+start = "hub.gate"
+reset_secs = 900
+[[entries]]
+kind = "room"
+id = "hub.gate"
+title = "The Arcology Gate"
+exit_n = "hub.concourse"
+---
+A blast door the size of a tenement stands welded half-open, its hydraulics
+long since stripped for parts. Cold air sighs in from the wastes behind you;
+the warm reek of the Under-Grid breathes out to meet it. The way on is north.
+[[entries]]
+kind = "room"
+id = "hub.concourse"
+title = "Lower Concourse"
+exit_s = "hub.gate"
+exit_n = "hub.flagon"
+exit_e = "foundry.mouth"
+exit_w = "under.landing"
+---
+Four tiers of catwalk climb into haze overhead, every railing hung with
+laundry, prayer-ribbon, and salvage. This is where the Under-Grid takes your
+measure. The Flagon's light spills from the north; iron heat rolls in from the
+east; something colder rises from the west.
+[[entries]]
+kind = "room"
+id = "hub.flagon"
+title = "The Rusted Flagon"
+exit_s = "hub.concourse"
+exit_u = "hub.galleries"
+exit_e = "hub.bunks"
+---
+The tavern that gives the Hub its heart: a brew-vat the size of a mech-hull
+hisses behind the bar, and the air is thick with yeast and ozone. Faces turn,
+weigh you, turn back. A stair winds up to the galleries; a low door east leads
+to the bunks; the concourse roars to the south.
+[[entries]]
+kind = "room"
+id = "hub.bunks"
+title = "The Flop Bunks"
+exit_w = "hub.flagon"
+---
+Coffin-racks of canvas and wire stacked six high, rented by the watch. A few
+sleepers twitch behind drawn curtains. It is, against all odds, almost quiet
+here. The Flagon's noise leaks back in from the west.
+[[entries]]
+kind = "room"
+id = "hub.galleries"
+title = "The Flagon Galleries"
+exit_d = "hub.flagon"
+exit_n = "market.arch"
+---
+A mezzanine of dark wood and darker deals, overlooking the taproom below.
+Booths line the walls, each curtained, each watched. The stair drops back to
+the Flagon; an archway north opens onto the market.
+[[entries]]
+kind = "room"
+id = "market.arch"
+title = "Market Arch"
+exit_s = "hub.galleries"
+exit_n = "market.plaza"
+---
+A triumphal arch built from the casing of a fallen orbital, its plating still
+scorched. Hawkers have colonised every niche. Beyond it, north, the plaza
+opens; the galleries lie back to the south.
+[[entries]]
+kind = "room"
+id = "market.plaza"
+title = "Cinder Plaza"
+exit_s = "market.arch"
+exit_e = "market.stalls"
+exit_n = "market.scrip"
+---
+A wide black square of fused ash, ringed by trade. They say a reactor died
+here once; nothing grows in the cracks, and the cold never quite lifts. Stalls
+crowd the east, the scrip-house the north, and the arch home to the south.
+[[entries]]
+kind = "room"
+id = "market.stalls"
+title = "The Scrap Stalls"
+exit_w = "market.plaza"
+exit_n = "market.fence"
+---
+Trestle after trestle of sorted ruin: capacitor banks, bone-dry cells, optics
+clouded with age. A stallholder eyes your pockets with professional interest.
+The plaza lies west; a narrower row runs north.
+[[entries]]
+kind = "room"
+id = "market.fence"
+title = "Fences' Row"
+exit_s = "market.stalls"
+exit_w = "market.scrip"
+---
+The row where the stalls stop asking where things came from. Shutters slam at
+the sound of boots. This is as deep into the market's teeth as most care to
+go. The stalls are south; the scrip-house west.
+[[entries]]
+kind = "room"
+id = "market.scrip"
+title = "The Scrip Exchange"
+exit_s = "market.plaza"
+exit_e = "market.fence"
+---
+A fortified booth where Hub-scrip is weighed against a dozen dead currencies.
+The teller sits behind armoured glass, abacus in one hand, stun-baton in the
+other. The plaza is south; Fences' Row east.
+[[entries]]
+kind = "room"
+id = "foundry.mouth"
+title = "Foundry Mouth"
+exit_w = "hub.concourse"
+exit_e = "foundry.floor"
+---
+A throat of corrugated iron exhaling forge-heat and the clangour of work. A
+hand-painted sign warns that the Guild is not liable for your limbs. The
+concourse cools behind you to the west; the floor blazes east.
+[[entries]]
+kind = "room"
+id = "foundry.floor"
+title = "The Casting Floor"
+exit_w = "foundry.mouth"
+exit_n = "foundry.crucible"
+exit_e = "foundry.cooling"
+exit_s = "foundry.slag"
+---
+The beating centre of the foundry, where molten salvage is poured into hull-
+moulds older than the city. Sparks fall like slow rain. Ways lead off in every
+direction: the mouth west, the crucible north, the cooling racks east, the
+slag pits south.
+[[entries]]
+kind = "room"
+id = "foundry.crucible"
+title = "The Crucible Gallery"
+exit_s = "foundry.floor"
+exit_e = "foundry.overseer"
+---
+A gantry slung above the great crucible itself, the metal below it white and
+seething. Heat-shimmer warps the air to nothing. The floor is south; a catwalk
+runs east to the overseer's post.
+[[entries]]
+kind = "room"
+id = "foundry.overseer"
+title = "Overseer's Catwalk"
+exit_w = "foundry.crucible"
+exit_s = "foundry.cooling"
+---
+The highest walk in the foundry, where the Guild-overseer watches the pour
+through a slit visor and says nothing to anyone. From here the whole floor is a
+map of fire. The crucible gallery lies west; the cooling racks drop away south.
+[[entries]]
+kind = "room"
+id = "foundry.cooling"
+title = "The Cooling Racks"
+exit_w = "foundry.floor"
+exit_n = "foundry.overseer"
+---
+Row upon row of fresh-cast plate, ticking and groaning as it sheds its heat.
+The air here is almost bearable, almost. The casting floor is west; the
+overseer's catwalk climbs north.
+[[entries]]
+kind = "room"
+id = "foundry.slag"
+title = "The Slag Pits"
+exit_n = "foundry.floor"
+---
+Where the foundry buries its failures: a sunken trench of cooled slag and
+twisted rejects, picked over by figures who do not look up. It has the feel of
+a place that does not expect visitors. The only way back is north.
+[[entries]]
+kind = "room"
+id = "under.landing"
+title = "Cistern Landing"
+exit_e = "hub.concourse"
+exit_d = "under.cistern"
+---
+A railed platform at the head of a flooded stairwell, where the Under-Grid
+earns its name. The air comes up damp and mineral and wrong. The concourse is
+east, back toward the light; the stair descends into dark.
+[[entries]]
+kind = "room"
+id = "under.cistern"
+title = "The Black Cistern"
+exit_u = "under.landing"
+exit_w = "under.pipes"
+exit_s = "under.shrine"
+---
+A vast drowned hall, its ceiling lost above black still water that mirrors your
+lamp back at you with perfect, patient indifference. Catwalks thread the dark.
+The landing is up; the pipe warrens west; a faint glow seeps from the south.
+[[entries]]
+kind = "room"
+id = "under.pipes"
+title = "The Pipe Warrens"
+exit_e = "under.cistern"
+exit_s = "under.dark"
+---
+A clotted tangle of trunk-main and conduit, some still warm, some weeping
+coolant that should not be touched. The going is tight and the dark is total
+between lamp-pools. The cistern lies east; the warren bends south.
+[[entries]]
+kind = "room"
+id = "under.dark"
+title = "The Dark Run"
+exit_n = "under.pipes"
+exit_e = "under.shrine"
+---
+The deepest of the public ways, where the lamps fail one by one and the
+silence has weight. Something has scratched a long count into the wall, and
+stopped. The pipes are north; a dim light waits east.
+[[entries]]
+kind = "room"
+id = "under.shrine"
+title = "The Drowned Shrine"
+exit_n = "under.cistern"
+exit_w = "under.dark"
+---
+A shrine to no god anyone will name, half-sunk in the cistern's overflow:
+guttering bio-lume, offerings of clean water and working cells, a smell of
+incense and rot. Pilgrims keep their backs to the wall. The cistern is north;
+the dark run west.

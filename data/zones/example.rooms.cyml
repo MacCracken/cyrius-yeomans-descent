@@ -1,0 +1,28 @@
+zone = "example"
+name = "Example Loop"
+reset_secs = 900
+[[entries]]
+kind = "room"
+id = "example.entry"
+title = "A Maintenance Airlock"
+exit_n = "example.corridor"
+---
+A cramped airlock, its inner hatch welded open long ago. Frost rimes the
+viewport. A scuffed corridor leads north into the arcology proper.
+[[entries]]
+kind = "room"
+id = "example.corridor"
+title = "Service Corridor"
+exit_s = "example.entry"
+exit_e = "example.junction"
+---
+Bundled conduit runs the length of this corridor, ticking as it cools.
+The airlock is south; the corridor opens east onto a junction.
+[[entries]]
+kind = "room"
+id = "example.junction"
+title = "Cable Junction"
+exit_w = "example.corridor"
+---
+A four-way junction stripped to its struts, though only the western way
+remains passable. Severed cables hang like vines from the dark above.

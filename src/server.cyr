@@ -95,6 +95,11 @@ var g_session_count = 0;
 # live connection without a separate container.
 var g_session_head = 0;
 
+# The epoll fd, published as a global so room broadcasts (M3-C) can flush
+# onlooker sessions immediately. Single-thread loop, so a global is safe;
+# set once at serve start.
+var g_epfd = 0;
+
 # Idle-disconnect threshold (ms). Default 5 minutes; overridable at
 # startup via the YD_IDLE_MS env var (testing / ops tuning).
 var g_idle_timeout_ms = 300000;
@@ -249,6 +254,166 @@ fn flush_session(epfd, s): i64 {
     return 1;
 }
 
+# === Room presence + broadcast (M3-C). ===
+#
+# These walk the active-session list (this file owns it) on behalf of the
+# session layer's room display + movement, which forward-reference them.
+
+# Append "Also here: a, b" to `viewer`'s tx for every other logged-in
+# session sharing `room_idx`. Nothing appended when the room is otherwise
+# empty.
+fn room_append_present(viewer, room_idx): i64 {
+    var first = 1;
+    var t = g_session_head;
+    while (t != 0) {
+        if (t != viewer) {
+            if (load64(t + SS_PHASE) == PHASE_CMD) {
+                if (load64(t + SS_ROOM) == room_idx) {
+                    if (first == 1) {
+                        session_appendtx_cstr(viewer, "Also here: ");
+                        first = 0;
+                    } else {
+                        session_appendtx_cstr(viewer, ", ");
+                    }
+                    session_appendtx_cstr(viewer, ansi_actor());
+                    session_appendtx(viewer, load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN));
+                    session_appendtx_cstr(viewer, ansi_reset());
+                }
+            }
+        }
+        t = load64(t + SS_NEXT);
+    }
+    if (first == 0) { session_appendtx_cstr(viewer, "\r\n"); }
+    return 0;
+}
+
+# Find a logged-in player in `room_idx` whose name the typed noun
+# np[0..nl) prefixes (case-insensitive), excluding `viewer`. Returns the
+# session ptr or 0. First match wins.
+fn room_find_player(viewer, room_idx, np, nl): i64 {
+    if (room_idx < 0) { return 0; }
+    var t = g_session_head;
+    while (t != 0) {
+        if (t != viewer) {
+            if (load64(t + SS_PHASE) == PHASE_CMD) {
+                if (load64(t + SS_ROOM) == room_idx) {
+                    if (name_prefix_match(load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN), np, nl) == 1) {
+                        return t;
+                    }
+                }
+            }
+        }
+        t = load64(t + SS_NEXT);
+    }
+    return 0;
+}
+
+# Broadcast a movement line to everyone in `room_idx` except `except_s`:
+# a leading CRLF, the mover's name, then the cstr parts a/b/c (any may be
+# ""). Each recipient is flushed immediately (the loop won't otherwise
+# poll them this cycle); a recipient that errors on flush is dropped.
+fn room_broadcast(room_idx, except_s, mover_s, a, b, c): i64 {
+    var name_buf = load64(mover_s + SS_NAME_BUF);
+    var name_len = load64(mover_s + SS_NAME_LEN);
+    var t = g_session_head;
+    while (t != 0) {
+        var nxt = load64(t + SS_NEXT);
+        if (t != except_s) {
+            if (load64(t + SS_PHASE) == PHASE_CMD) {
+                if (load64(t + SS_ROOM) == room_idx) {
+                    session_appendtx_cstr(t, "\r\n");
+                    session_appendtx(t, name_buf, name_len);
+                    session_appendtx_cstr(t, a);
+                    session_appendtx_cstr(t, b);
+                    session_appendtx_cstr(t, c);
+                    if (flush_session(g_epfd, t) == 0) { drop_session(g_epfd, t); }
+                }
+            }
+        }
+        t = nxt;
+    }
+    return 0;
+}
+
+# Flush one session immediately (e.g. a directed `tell` recipient who has
+# no pending event this cycle). Drops the session on a flush error.
+fn deliver_to(t): i64 {
+    if (flush_session(g_epfd, t) == 0) { drop_session(g_epfd, t); }
+    return 0;
+}
+
+# Broadcast a speech/emote line to everyone in `room_idx` except
+# `except_s`: a leading CRLF, the speaker's name, a `lead` cstr, the
+# message body bytes, then a `tail` cstr. Each recipient is flushed; a
+# flush error drops that recipient.
+fn room_say_broadcast(room_idx, except_s, speaker_s, lead, body, body_len, tail): i64 {
+    var name_buf = load64(speaker_s + SS_NAME_BUF);
+    var name_len = load64(speaker_s + SS_NAME_LEN);
+    var t = g_session_head;
+    while (t != 0) {
+        var nxt = load64(t + SS_NEXT);
+        if (t != except_s) {
+            if (load64(t + SS_PHASE) == PHASE_CMD) {
+                if (load64(t + SS_ROOM) == room_idx) {
+                    session_appendtx_cstr(t, "\r\n");
+                    session_appendtx(t, name_buf, name_len);
+                    session_appendtx_cstr(t, lead);
+                    session_appendtx(t, body, body_len);
+                    session_appendtx_cstr(t, tail);
+                    if (flush_session(g_epfd, t) == 0) { drop_session(g_epfd, t); }
+                }
+            }
+        }
+        t = nxt;
+    }
+    return 0;
+}
+
+# Find any logged-in player (anywhere) whose name the typed noun np[0..nl)
+# prefixes, for directed `tell`. Returns the session ptr or 0.
+fn find_player_global(np, nl): i64 {
+    var t = g_session_head;
+    while (t != 0) {
+        if (load64(t + SS_PHASE) == PHASE_CMD) {
+            if (name_prefix_match(load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN), np, nl) == 1) {
+                return t;
+            }
+        }
+        t = load64(t + SS_NEXT);
+    }
+    return 0;
+}
+
+# `who` — list every logged-in player and the room they are in.
+fn cmd_who(s): i64 {
+    session_appendtx_cstr(s, "-- wanderers of the Under-Grid --\r\n");
+    var n = 0;
+    var t = g_session_head;
+    while (t != 0) {
+        if (load64(t + SS_PHASE) == PHASE_CMD) {
+            session_appendtx_cstr(s, "  ");
+            session_appendtx_cstr(s, ansi_actor());
+            session_appendtx(s, load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN));
+            session_appendtx_cstr(s, ansi_reset());
+            var rm = load64(t + SS_ROOM);
+            if (rm >= 0) {
+                if (rm < world_room_count()) {
+                    session_appendtx_cstr(s, " — ");
+                    var r = room_at(rm);
+                    session_appendtx(s, room_title_ptr(r), room_title_len(r));
+                }
+            }
+            session_appendtx_cstr(s, "\r\n");
+            n = n + 1;
+        }
+        t = load64(t + SS_NEXT);
+    }
+    session_appendtx_cstr(s, "(");
+    session_appendtx_num(s, n);
+    session_appendtx_cstr(s, " online)\r\n");
+    return 0;
+}
+
 # === Accept handler — drain every pending accept; alloc + register. ===
 fn handle_accept(epfd, listener_fd, now_ms): i64 {
     var done = 0;
@@ -314,6 +479,18 @@ fn apply_idle_env(): i64 {
 fn cmd_serve(port): i64 {
     apply_idle_env();
     obs_init();
+    # Load the starter zone. A failure is non-fatal — the server still
+    # runs, with the verbs answering their no-zone placeholders.
+    var wl = world_load_rooms("data/zones/hub.rooms.cyml");
+    if (wl == WL_OK) {
+        println("world: loaded zone");
+        print_num(world_room_count());
+        println(" rooms");
+    } else {
+        println("world: no zone loaded (code below) — running roomless");
+        print_num(wl);
+        println("");
+    }
     println("yeoman's descent — starting event-loop listener");
     println("server: listening on port");
     print_num(port);
@@ -342,6 +519,7 @@ fn cmd_serve(port): i64 {
         sys_close(sigfd);
         return 1;
     }
+    g_epfd = epfd;   # publish for room broadcasts (M3-C)
     epoll_add_in(epfd, lfd, TAG_LISTENER);
     epoll_add_in(epfd, sigfd, TAG_SIGNAL);
     var events_buf = alloc(MAX_EPOLL_EVENTS * EPOLL_EVENT_SIZE);

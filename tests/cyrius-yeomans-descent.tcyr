@@ -3,6 +3,7 @@
 
 include "src/telnet.cyr"
 include "src/parser.cyr"
+include "src/world.cyr"
 include "src/session.cyr"
 
 # Feed a byte and assert the returned TelEvent.
@@ -445,6 +446,49 @@ fn test_qual(): i64 {
     return 0;
 }
 
+# === M3-B — zone loader + world tree ===
+fn test_world(): i64 {
+    test_group("world");
+
+    # Happy path: a 3-room test loop.
+    assert_eq(world_load_rooms("tests/fixtures/loop.rooms.cyml"), WL_OK, "loop fixture loads");
+    assert_eq(world_room_count(), 3, "3 rooms loaded");
+
+    # Ids interned + looked up by id.
+    assert_eq(room_index_by_id("tfix.a", 6), 0, "tfix.a at index 0");
+    assert_eq(room_index_by_id("tfix.c", 6), 2, "tfix.c at index 2");
+    assert_eq(room_index_by_id("tfix.zzz", 8), 0 - 1, "unknown id → -1");
+
+    # `start` header field resolved (tfix.b is the start, index 1).
+    assert_eq(world_start_room(), 1, "start = tfix.b (idx 1)");
+
+    # Exits resolved to indices, both directions.
+    var a = room_at(0);
+    assert_eq(room_exit(a, DIR_N), 1, "A north → B(1)");
+    assert_eq(room_exit(a, DIR_S), 0 - 1, "A has no south");
+    var b = room_at(1);
+    assert_eq(room_exit(b, DIR_S), 0, "B south → A(0)");
+    assert_eq(room_exit(b, DIR_E), 2, "B east → C(2)");
+    assert_eq(room_exit(room_at(2), DIR_W), 1, "C west → B(1)");
+
+    # Title + prose captured.
+    assert_eq(room_title_len(a), 6, "title 'Room A' is 6 bytes");
+    assert(room_prose_len(a) > 0, "prose non-empty");
+
+    # verb_to_dir + dir_name.
+    assert_eq(verb_to_dir(VERB_NORTH), DIR_N, "VERB_NORTH → DIR_N");
+    assert_eq(verb_to_dir(VERB_DOWN),  DIR_D, "VERB_DOWN → DIR_D");
+    assert_eq(verb_to_dir(VERB_LOOK),  0 - 1, "non-movement verb → -1");
+    assert_eq(streq(dir_name(DIR_E), "east"), 1, "dir_name(E) = east");
+
+    # Validation failures.
+    assert_eq(world_load_rooms("tests/fixtures/dangling.rooms.cyml"),  WL_ERR_DANGLE, "dangling exit rejected");
+    assert_eq(world_load_rooms("tests/fixtures/wrongkind.rooms.cyml"), WL_ERR_KIND,   "non-room kind rejected");
+    assert_eq(world_load_rooms("tests/fixtures/nonesuch.cyml"),        WL_ERR_IO,     "missing file → IO err");
+
+    return 0;
+}
+
 # === M1-F — idle predicate ===
 fn test_idle(): i64 {
     test_group("idle");
@@ -474,6 +518,7 @@ fn main() {
     test_resolve();
     test_prep();
     test_qual();
+    test_world();
     test_idle();
 
     return assert_summary();

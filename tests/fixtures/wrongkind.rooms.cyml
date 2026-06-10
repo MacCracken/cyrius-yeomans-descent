@@ -1,0 +1,8 @@
+zone = "tfix"
+name = "Wrong Kind Fixture"
+[[entries]]
+kind = "mob"
+id = "tfix.drone"
+title = "A Drone"
+---
+A mob entry in a rooms file — the loader must reject this.

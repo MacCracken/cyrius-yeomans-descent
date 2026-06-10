@@ -38,7 +38,8 @@ enum SS {
     SS_NEXT       = 120;  # intrusive active-session list (server.cyr owns it)
     SS_PREV       = 128;  # — used by the tick idle sweep (M1-F)
     SS_QUIT       = 136;  # 1 once the `quit` verb asks for teardown (M2)
-    SS_SIZE       = 144;
+    SS_ROOM       = 144;  # current room index (M3); -1 until placed
+    SS_SIZE       = 152;
 }
 
 enum SessConst {
@@ -71,6 +72,7 @@ fn session_new(fd, now_ms): i64 {
     store64(s + SS_LINE_BUF, lnb);
     store64(s + SS_NAME_BUF, nmb);
     store64(s + SS_TS, telnet_state_new());
+    store64(s + SS_ROOM, 0 - 1);   # unplaced until login (M3)
     return s;
 }
 
@@ -290,7 +292,8 @@ fn login_on_name(s, buf, len): i64 {
     session_appendtx_cstr(s, "\r\nWelcome, ");
     session_appendtx(s, buf, len);
     session_appendtx_cstr(s, ". The Under-Grid stirs.\r\n");
-    session_appendtx_cstr(s, "Type \"help\" for commands. (rooms, items, and combat arrive at M3-M4.)\r\n");
+    session_appendtx_cstr(s, "Type \"help\" for commands. (items and combat arrive at M4-M5.)\r\n");
+    session_enter_world(s);
     session_send_cmd_prompt(s);
     return 0;
 }
@@ -337,18 +340,65 @@ fn cmd_rest_start(buf, len): i64 {
     return i;
 }
 
-# A social verb (say / tell / emote): echo the message remainder, or
-# prompt for content when the verb stands alone.
-fn cmd_social(s, pa, buf, len, lead, empty): i64 {
+# say <message> — the speaker sees `You say, "X"`; everyone else in the
+# room sees `<name> says, "X"`.
+fn cmd_say(s, buf, len): i64 {
     var rs = cmd_rest_start(buf, len);
-    if (rs >= len) {
-        session_appendtx_cstr(s, empty);
-        session_appendtx_cstr(s, "\r\n");
-        return 0;
-    }
-    session_appendtx_cstr(s, lead);
+    if (rs >= len) { session_appendtx_cstr(s, "Say what?\r\n"); return 0; }
+    session_appendtx_cstr(s, "You say, \"");
+    session_appendtx(s, buf + rs, len - rs);
+    session_appendtx_cstr(s, "\"\r\n");
+    room_say_broadcast(load64(s + SS_ROOM), s, s, " says, \"", buf + rs, len - rs, "\"\r\n");
+    return 0;
+}
+
+# emote <action> — everyone in the room (the actor included) sees
+# `<name> <action>`.
+fn cmd_emote(s, buf, len): i64 {
+    var rs = cmd_rest_start(buf, len);
+    if (rs >= len) { session_appendtx_cstr(s, "Emote what?\r\n"); return 0; }
+    session_appendtx(s, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    session_appendtx_cstr(s, " ");
     session_appendtx(s, buf + rs, len - rs);
     session_appendtx_cstr(s, "\r\n");
+    room_say_broadcast(load64(s + SS_ROOM), s, s, " ", buf + rs, len - rs, "\r\n");
+    return 0;
+}
+
+# tell <player> <message> — a directed message to any connected player,
+# regardless of room.
+fn cmd_tell(s, pa, buf, len): i64 {
+    if (load64(g_parser + PA_COUNT) < 2) {
+        session_appendtx_cstr(s, "Tell whom what?\r\n");
+        return 0;
+    }
+    # Message begins after the second word (verb, then target name).
+    var rs1 = cmd_rest_start(buf, len);
+    var rs2 = rs1 + cmd_rest_start(buf + rs1, len - rs1);
+    if (rs2 >= len) { session_appendtx_cstr(s, "Tell them what?\r\n"); return 0; }
+
+    var target = find_player_global(tok_ptr(pa, 1), tok_len(pa, 1));
+    if (target == 0) {
+        session_appendtx_cstr(s, "No one by that name is connected.\r\n");
+        return 0;
+    }
+    if (target == s) {
+        session_appendtx_cstr(s, "Talking to yourself already?\r\n");
+        return 0;
+    }
+    # Recipient sees the incoming tell (flushed now — they may be idle).
+    session_appendtx_cstr(target, "\r\n");
+    session_appendtx(target, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    session_appendtx_cstr(target, " tells you, \"");
+    session_appendtx(target, buf + rs2, len - rs2);
+    session_appendtx_cstr(target, "\"\r\n");
+    deliver_to(target);
+    # Sender's echo.
+    session_appendtx_cstr(s, "You tell ");
+    session_appendtx(s, load64(target + SS_NAME_BUF), load64(target + SS_NAME_LEN));
+    session_appendtx_cstr(s, ", \"");
+    session_appendtx(s, buf + rs2, len - rs2);
+    session_appendtx_cstr(s, "\"\r\n");
     return 0;
 }
 
@@ -387,6 +437,151 @@ fn cmd_help_text(s): i64 {
     return 0;
 }
 
+# === ANSI SGR (M3-D) ===
+#
+# We emit raw SGR escapes inline into the wire stream rather than pull the
+# external `darshana` styling lib: that lib is a client-side terminal
+# renderer, the wrong layer for a server queuing ~4 escape codes into a tx
+# buffer. Keeping these here preserves the zero-external-deps stance and
+# the "Own the Stack" principle. `\x1b` is a one-byte ESC in Cyrius
+# strings, so the codes embed directly in cstr literals.
+fn ansi_reset(): i64 { return "\x1b[0m"; }      # clear all attributes
+fn ansi_title(): i64 { return "\x1b[1;33m"; }   # bold yellow — room title
+fn ansi_exits(): i64 { return "\x1b[36m"; }     # cyan — exits line
+fn ansi_actor(): i64 { return "\x1b[1;32m"; }   # bold green — players
+
+# Append the exits line for room `r` (cyan label, dir words). Shared by
+# session_show_room and the `exits` verb.
+fn session_append_exits(s, r): i64 {
+    session_appendtx_cstr(s, ansi_exits());
+    session_appendtx_cstr(s, "Exits:");
+    var any = 0;
+    var d = 0;
+    while (d < NDIR) {
+        if (room_exit(r, d) >= 0) {
+            session_appendtx_cstr(s, " ");
+            session_appendtx_cstr(s, dir_name(d));
+            any = 1;
+        }
+        d = d + 1;
+    }
+    if (any == 0) { session_appendtx_cstr(s, " none"); }
+    session_appendtx_cstr(s, ansi_reset());
+    session_appendtx_cstr(s, "\r\n");
+    return 0;
+}
+
+# === M3 room display + movement ===
+#
+# session_show_room renders the room at SS_ROOM into the session tx queue:
+# bold-yellow title, default-weight prose, cyan exits, green present
+# players. room_append_present (in server.cyr, which owns the session
+# list) adds the other players here.
+fn session_show_room(s): i64 {
+    var room = load64(s + SS_ROOM);
+    if (room < 0) { return 0; }
+    if (world_room_count() == 0) { return 0; }
+    var r = room_at(room);
+
+    session_appendtx_cstr(s, "\r\n");
+    session_appendtx_cstr(s, ansi_title());
+    session_appendtx(s, room_title_ptr(r), room_title_len(r));
+    session_appendtx_cstr(s, ansi_reset());
+    session_appendtx_cstr(s, "\r\n");
+    session_appendtx(s, room_prose_ptr(r), room_prose_len(r));
+    session_appendtx_cstr(s, "\r\n");
+    session_append_exits(s, r);
+    room_append_present(s, room);   # forward ref → server.cyr
+    return 0;
+}
+
+# Place a freshly-logged-in session into the world (start room) and show
+# it. No-op when no zone is loaded (the M2-era placeholder verbs still
+# answer). Announces the arrival to anyone already in the start room.
+fn session_enter_world(s): i64 {
+    if (world_room_count() == 0) { return 0; }
+    var start = world_start_room();
+    store64(s + SS_ROOM, start);
+    room_broadcast(start, s, s, " flickers into being here.", "", "\r\n");
+    session_show_room(s);
+    return 0;
+}
+
+# Move a session one step in `dir`. Validates the exit, broadcasts the
+# departure / arrival to onlookers, and auto-looks the mover.
+fn cmd_move(s, dir): i64 {
+    if (world_room_count() == 0) {
+        session_appendtx_cstr(s, "The way ");
+        session_appendtx_cstr(s, dir_name(dir));
+        session_appendtx_cstr(s, " is sealed — no zone is loaded.\r\n");
+        return 0;
+    }
+    var cur = load64(s + SS_ROOM);
+    if (cur < 0) { cur = world_start_room(); store64(s + SS_ROOM, cur); }
+
+    var dest = room_exit(room_at(cur), dir);
+    if (dest < 0) {
+        session_appendtx_cstr(s, "You can't go that way.\r\n");
+        return 0;
+    }
+
+    # Departure notice to the room being left, arrival to the room entered.
+    room_broadcast(cur, s, s, " heads ", dir_name(dir), ".\r\n");
+    store64(s + SS_ROOM, dest);
+    room_broadcast(dest, s, s, " arrives.", "", "\r\n");
+    session_show_room(s);
+    return 0;
+}
+
+# Case-insensitive prefix match: is np[0..nl) (already lowercased) a
+# prefix of name_buf[0..name_len)? Used to match a typed noun against a
+# present player's name.
+fn name_prefix_match(name_buf, name_len, np, nl): i64 {
+    if (nl <= 0)        { return 0; }
+    if (nl > name_len)  { return 0; }
+    var i = 0;
+    while (i < nl) {
+        if (ascii_lower(load8(name_buf + i) & 0xFF) != (load8(np + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# examine <noun> — inspect self, or a player present in the room. Objects
+# and mobs (which carry the `keywords` scope the M2 resolver matches) land
+# at M4/M5; until then the live scope is the room's players.
+fn cmd_examine(s, pa): i64 {
+    if (parsed_has_dobj(pa) == 0) {
+        session_appendtx_cstr(s, "Examine what?\r\n");
+        return 0;
+    }
+    var di = parsed_dobj(pa);
+    if (tok_eq(pa, di, "me") == 1) { return examine_self(s); }
+    if (tok_eq(pa, di, "self") == 1) { return examine_self(s); }
+
+    var other = room_find_player(s, load64(s + SS_ROOM), tok_ptr(pa, di), tok_len(pa, di));
+    if (other != 0) {
+        session_appendtx_cstr(s, ansi_actor());
+        session_appendtx(s, load64(other + SS_NAME_BUF), load64(other + SS_NAME_LEN));
+        session_appendtx_cstr(s, ansi_reset());
+        session_appendtx_cstr(s, " stands here, taking in the Under-Grid.\r\n");
+        return 0;
+    }
+    session_appendtx_cstr(s, "You see no ");
+    session_appendtx_tok(s, pa, di);
+    session_appendtx_cstr(s, " here.\r\n");
+    return 0;
+}
+
+fn examine_self(s): i64 {
+    session_appendtx_cstr(s, "You are ");
+    session_appendtx_cstr(s, ansi_actor());
+    session_appendtx(s, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    session_appendtx_cstr(s, ansi_reset());
+    session_appendtx_cstr(s, ", a wanderer of the Under-Grid. Unburdened, for now.\r\n");
+    return 0;
+}
+
 # Dispatch one parsed command. `buf`/`len` is the original line (for
 # case-preserving social echo). Sets SS_QUIT on `quit`.
 fn cmd_dispatch(s, pa, buf, len): i64 {
@@ -401,10 +596,7 @@ fn cmd_dispatch(s, pa, buf, len): i64 {
     }
 
     if (verb_is_movement(verb) == 1) {
-        session_appendtx_cstr(s, "The way ");
-        session_appendtx_cstr(s, verb_name(verb));
-        session_appendtx_cstr(s, " is sealed for now — the Under-Grid opens at M3.\r\n");
-        return 0;
+        return cmd_move(s, verb_to_dir(verb));
     }
 
     if (verb == VERB_QUIT) {
@@ -418,15 +610,23 @@ fn cmd_dispatch(s, pa, buf, len): i64 {
         return 0;
     }
 
-    if (verb == VERB_LOOK)      { session_appendtx_cstr(s, "Darkness. The world is unlit until M3.\r\n"); return 0; }
-    if (verb == VERB_EXITS)     { session_appendtx_cstr(s, "No exits yet — rooms arrive at M3.\r\n"); return 0; }
-    if (verb == VERB_EXAMINE)   { return cmd_object(s, pa, verb); }
-    if (verb == VERB_INVENTORY) { session_appendtx_cstr(s, "You carry nothing. (inventory lands at M3.)\r\n"); return 0; }
-    if (verb == VERB_WHO)       { session_appendtx_cstr(s, "You sense others, but the roster waits on M3.\r\n"); return 0; }
+    if (verb == VERB_LOOK) {
+        if (world_room_count() == 0) { session_appendtx_cstr(s, "Darkness. No zone is loaded.\r\n"); return 0; }
+        session_show_room(s);
+        return 0;
+    }
+    if (verb == VERB_EXITS) {
+        if (world_room_count() == 0) { session_appendtx_cstr(s, "No exits — no zone is loaded.\r\n"); return 0; }
+        session_append_exits(s, room_at(load64(s + SS_ROOM)));
+        return 0;
+    }
+    if (verb == VERB_EXAMINE)   { return cmd_examine(s, pa); }
+    if (verb == VERB_INVENTORY) { session_appendtx_cstr(s, "You carry nothing. (items arrive at M4-M5.)\r\n"); return 0; }
+    if (verb == VERB_WHO)       { return cmd_who(s); }
 
-    if (verb == VERB_SAY)   { return cmd_social(s, pa, buf, len, "You say, \"",     "Say what?"); }
-    if (verb == VERB_TELL)  { return cmd_social(s, pa, buf, len, "You transmit: \"", "Tell whom what?"); }
-    if (verb == VERB_EMOTE) { return cmd_social(s, pa, buf, len, "* ",              "Emote what?"); }
+    if (verb == VERB_SAY)   { return cmd_say(s, buf, len); }
+    if (verb == VERB_TELL)  { return cmd_tell(s, pa, buf, len); }
+    if (verb == VERB_EMOTE) { return cmd_emote(s, buf, len); }
 
     if (verb == VERB_FLEE)  { session_appendtx_cstr(s, "There is nothing to flee — combat arrives at M4.\r\n"); return 0; }
 

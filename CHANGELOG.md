@@ -4,6 +4,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-09
+
+M3 — the world becomes physical. The server loads CYML zone files at boot
+into an in-memory room tree, places players in it at login, and gives them
+movement, ANSI-rendered rooms, inspection, and room-scoped social verbs.
+Two players can walk the authored 21-room starter zone (the Hub) and see
+each other's arrivals, departures, and speech in real time. Items, mobs,
+and combat are still ahead (M4-M5); the world they move through is here.
+
+### Added
+
+- **ADR 0005 — Zone file format.** Decided **CYML** (`lib/cyml.cyr`): a
+  TOML header + markdown prose body per entry maps onto a DikuMUD room
+  (structured fields + description blob) using an already-fuzzed
+  first-party parser. One file per zone per entity kind
+  (`<zone>.rooms/.mobs/.objs.cyml`), mirroring `.wld`/`.mob`/`.obj`, each
+  ≤ 32 entries (the parser's per-file ceiling).
+- **M3-B — Zone loader + world tree** (`src/world.cyr`). Parses a rooms
+  file at boot, interns ids, keeps prose zero-copy into the persistent
+  CYML buffer, resolves every `exit_<dir>` to a room index, and **rejects
+  dangling exits at boot** (a bad graph fails to start, not mid-walk). An
+  optional `start` header field names the spawn room. Loading is once at
+  startup, never in the tick (ADR 0003).
+- **M3-C — Movement.** `n`/`s`/`e`/`w`/`u`/`d` traverse exits; auto-look on
+  arrival; "you can't go that way" for closed directions. Departure and
+  arrival lines broadcast to onlookers in the source / destination rooms
+  (a published `g_epfd` lets the session layer flush them immediately).
+- **M3-D — ANSI room rendering.** Bold-yellow title, default-weight prose,
+  cyan exits, bold-green player names — raw SGR emitted inline rather than
+  pulling the client-side `darshana` lib (kept the zero-external-deps
+  stance; `\x1b` is a one-byte ESC in Cyrius strings).
+- **M3-E — Inspection.** `look` / `exits` render the current room;
+  `examine` inspects self or a player present in the room (the M2
+  resolver's first live scope); `inventory` is empty until items land.
+- **M3-F — Social presence.** `say` / `emote` broadcast to the room (the
+  actor sees their own line); `tell` is a directed cross-room message;
+  `who` lists every connected player and their room.
+- **M3-G — The Hub.** A 21-room starter zone
+  (`data/zones/hub.rooms.cyml`): the Rusted Flagon tavern hub plus three
+  loops — the Cinder Market, the Foundry, and the drowned Undercroft.
+  Fully connected, every exit bidirectional, walkable end to end. Doubles
+  as the v1.0 demo content.
+- Unit suite grown 154 → 174 assertions (zone loader: interning, exit
+  resolution both directions, `start`, dangling / wrong-kind / missing-file
+  rejection, `verb_to_dir`). Self-contained fixtures under `tests/fixtures/`.
+
+### Changed
+
+- `cmd_dispatch` (`src/session.cyr`) replaces every M3-pending placeholder
+  with real handlers: movement, room display, examine, and the social
+  verbs now act on the world. The M2-era placeholders remain only as the
+  graceful no-zone-loaded fallback.
+- New `[deps]` stdlib: `cyml`, `toml` (zone-file parsing). Still no
+  external (non-stdlib) deps — T.Ron (M6) and Joshua (M8) are the first.
+- The session struct gains `SS_ROOM` (current room index, -1 until login);
+  `cmd_serve` loads the Hub at startup (a load failure is non-fatal — the
+  server runs roomless with the placeholder verbs).
+
 ## [0.3.0] — 2026-06-09
 
 M2 — the verb-noun parser. Lines typed at the command prompt are now

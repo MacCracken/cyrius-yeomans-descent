@@ -1,6 +1,6 @@
 [package]
 name = "cyrius-yeomans-descent"
-version = "0.3.0"
+version = "0.4.0"
 description = "Yeoman's Descent — a Cyrius-native text MUD server set in a techno-feudal arcology"
 license = "GPL-3.0-only"
 language = "cyrius"
@@ -17,5 +17,5 @@ output = "cyrius-yeomans-descent"
 # uses absolute-time computation per ADR 0003), result + tagged (used
 # by net.cyr's Result return shape), fnptr (vec internals), freelist
 # (per-session arena freed at disconnect per ADR 0003).
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "net", "chrono", "result", "tagged", "fnptr", "freelist"]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "net", "chrono", "result", "tagged", "fnptr", "freelist", "cyml", "toml"]
 ---

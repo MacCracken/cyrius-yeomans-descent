@@ -1,0 +1,26 @@
+zone = "tfix"
+name = "Test Loop"
+start = "tfix.b"
+reset_secs = 600
+[[entries]]
+kind = "room"
+id = "tfix.a"
+title = "Room A"
+exit_n = "tfix.b"
+---
+The first test room. North leads to B.
+[[entries]]
+kind = "room"
+id = "tfix.b"
+title = "Room B"
+exit_s = "tfix.a"
+exit_e = "tfix.c"
+---
+The middle test room. South to A, east to C.
+[[entries]]
+kind = "room"
+id = "tfix.c"
+title = "Room C"
+exit_w = "tfix.b"
+---
+The far test room. West back to B.
