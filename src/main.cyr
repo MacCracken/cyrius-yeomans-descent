@@ -5,6 +5,14 @@
 # wire. Stdlib auto-included via cyrius.cyml; sibling src/* files
 # need explicit `include` per first-party convention.
 
+# M6 persistence chain (opt-in, never auto-resolved — see cyrius.cyml).
+# Order: sakshi → sigil → libro (libro calls sigil + sakshi); the stdlib
+# crypto modules (ct/keccak/thread/thread_local/random) auto-prepend ahead
+# of these via [deps] stdlib.
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/libro.cyr"
+
 include "src/telnet.cyr"
 include "src/parser.cyr"
 include "src/world.cyr"
@@ -13,9 +21,10 @@ include "src/session.cyr"
 include "src/item.cyr"
 include "src/combat.cyr"
 include "src/classes.cyr"
+include "src/persist.cyr"   # uses sigil/libro + session/item/world/classes enums
 include "src/server.cyr"
 
-var VERSION_STRING = "0.6.1";
+var VERSION_STRING = "0.7.0";
 
 fn print_banner(): i64 {
     println("yeoman's descent — a cyrius-native text MUD");

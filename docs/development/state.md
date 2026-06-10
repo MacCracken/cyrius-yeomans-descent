@@ -7,6 +7,18 @@
 
 ## Version
 
+**0.7.0** — M6 close, 2026-06-09. Players persist across restart. Identity is
+a sigil Ed25519 keypair derived from the player's passphrase ([ADR 0004](../adr/0004-identity-and-authentication.md)):
+a new name forges + confirms a passphrase, a known name presents it; only
+salt+pubkey are stored, the secret key is re-derived and never written. State
+saves to a signed per-player `data/players/<name>.cyml` via atomic `.tmp`+rename
+([ADR 0006](../adr/0006-persistence-shape.md)), triggered on `save` / disconnect
+/ creation / a debounced 5-min tick sweep; load verifies the signature, restores
+attrs + room (by id) + inventory, and drops the player back where they logged
+off. A libro hash chain (`data/audit.libro`) logs every login/save/security
+event. **Gate met**: `kill -9` mid-session → restart → no data loss. New module
+`src/persist.cyr`; 256 tests pass. Combat (0.5.0) and earlier intact.
+
 **0.6.1** — polish patch, 2026-06-09. Combat reads as lived-in: onlookers
 see fights in third person (`room_combat_line`), mobs show qualitative
 health (`mob_condition`, in `look` / `examine`), and every class recovers
@@ -56,10 +68,16 @@ src/
   classes.cyr    M5 classes: load data/classes.cyml, selection login phase,
                  apply_class, ability framework (energy/cooldown/status),
                  the 12 class abilities (cmd_ability), classes_upkeep
+  persist.cyr    M6 persistence: Ed25519 identity derived from passphrase
+                 (ADR 0004), per-player signed cyml save shape, crash-safe
+                 .tmp+rename writes, load+auth, login phase handlers, libro
+                 audit chain. Included after the enum-defining src files +
+                 lib/sakshi/sigil/libro.
   server.cyr     event loop, listener, signalfd shutdown, tick scheduler
                  (YD_TICK_MS override), epoll dispatch, idle sweep (M1-F),
                  observability (M1-H), zone+mob+obj+class load at boot,
-                 room broadcast / presence / who (M3-C/F), combat_tick_all
+                 room broadcast / presence / who (M3-C/F), combat_tick_all,
+                 persist_init + debounced save sweep + save-on-disconnect (M6)
   test.cyr       top-level test entrypoint (per cyrius.cyml [build].test)
 
 data/
@@ -165,10 +183,11 @@ Direct (declared in `cyrius.cyml`):
 - **stdlib** — string, fmt, alloc, io, vec, str, slice, syscalls, assert, bench, args, net, chrono, result, tagged, fnptr, freelist, cyml, toml, **fs, process, hashmap, json, bigint, ct, keccak, thread, thread_local, random** (M6 chain — see below)
 - **libro** `2.7.1` (git, `path = "../libro"`) — append-only SHA-256 hash-chain store (the crash-safe primitive behind "T.Ron" persistence). Pulls **sigil 3.6.0** (Ed25519, ADR 0004 identity) + **sakshi 2.2.4** + **patra 1.10.3** + **agnosys 1.3.2** transitively. Resolved by `cyrius deps` into `lib/` (+ `cyrius.lock`).
 
-**M6-A landed (2026-06-09).** The first external dep chain is in and proven
-(`programs/crypto_smoke.cyr` → exit 0: sha256 + ed25519 + libro chain
-append/verify all run). The earlier "blocked on a sigil bug" note was a
-**misdiagnosis**: cyrius stdlib is **opt-in, never auto-resolved**, so
+**M6 complete (0.7.0, 2026-06-09).** Full persistence shipped — see the Version
+section above and `src/persist.cyr`. The dep-landing (M6-A) lesson is preserved
+below because it shaped the whole milestone: the earlier "blocked on a sigil
+bug" note was a **misdiagnosis**: cyrius stdlib is **opt-in, never
+auto-resolved**, so
 including `dist/sigil.cyr` without listing the modules its crypto calls
 (`ct`/`keccak`/`thread`/`thread_local`/`random`) left those symbols
 undefined — cyrius 6.1.x only *warns* and emits a `ud2`, so it built then
@@ -183,70 +202,55 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** M5 closed at 0.6.0. Pick up the next slot per the
-boot guide below.
+**No active cycle.** M6 closed at 0.7.0. Next slot is **M7 — zone resets with
+player-presence gating** (v0.8.0). Pick up per the boot guide below.
 
 ---
 
 ## Next-agent boot guide
 
-You are picking up at **M6 — persistence via T.Ron** ([roadmap.md M6 sub-bites](roadmap.md#m6--persistence-via-tron-v070)). Players survive a server restart; writes are crash-safe and **queued, never inline** in the loop ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md) negative consequence — disk I/O can't block the single-thread tick). Ships at v0.7.0. **M6 opens with two decisions before any code:** ADR 0004 (identity / auth — name+password vs sigil Ed25519) and ADR 0006 (persistence shape with T.Ron). M6-A also lands the **first external (non-stdlib) dependency**, T.Ron.
+You are picking up at **M7 — zone resets** ([roadmap.md M7](roadmap.md#m7--zone-resets-v080)): a zone periodically respawns its mobs and objects back to the authored layout, but **gated on player presence** — a room with a player in it doesn't yank the world out from under them. Builds on the zone loader (M3) + spawn system (M4) + the tick (M1/M4).
 
-### What's already built (0.6.0)
+### What M6 left in place (persistence is done)
 
-- **The full character is in `SS_` slots** (session.cyr) and is exactly
-  what M6 must persist: name (`SS_NAME_BUF`/`LEN`), class (`SS_CLASS`),
-  attributes (`SS_STR`/`DEX`/`CON`/`TEC`), vitals (`SS_HP`/`SS_MAXHP`/
-  `SS_ENERGY`/`SS_MAXENERGY`), combat profile (`SS_AC`/`SS_HIT`/`SS_NDICE`/
-  `SS_DSIZE`/`SS_DMOD`), location (`SS_ROOM`), and inventory (`SS_INV` → an
-  `item.cyr` object-instance list). **The save shape (M6-C) is this set.**
-- **`SS_PLAYER` slot** (offset 80, reserved since M1-B) is still 0 — it is
-  the natural home for a persistent player/account handle (M6-E load).
-- **Classes load from CYML** (`world_load_classes`, `classes.cyr`) — the
-  same load-at-boot pattern T.Ron data will follow; `apply_class` is how a
-  fresh character is built, and a loaded save will set the same `SS_` slots.
-- **Login flow** — `login_on_name` → `PHASE_CLASS` → `login_on_class` →
-  world. **M6-E inserts a load step**: look up the name; if a save exists,
-  restore it (skipping class selection); else fall through to class pick.
-- **Item instances** (`item.cyr`) are heap objects with name/keywords/desc
-  copied inline + a template-less corpse variant — serializable by
-  template id + a small amount of state.
-- **Tick** — `advance_tick` (server.cyr) is where the M6-D debounced
-  save-timer would enqueue (never write inline). `YD_TICK_MS` overrides
-  the interval for testing.
+- **`src/persist.cyr`** owns identity (Ed25519 from passphrase, ADR 0004),
+  the save shape, crash-safe `.tmp`+rename writes, load+auth, the login phase
+  handlers, and the libro audit chain. Saves trigger on `save` / disconnect /
+  creation / a debounced tick sweep (`save_sweep` in server.cyr).
+- **Login flow now** — `login_on_name` → (`PHASE_PASS` if a record exists, else
+  `PHASE_NEWPASS`→`PHASE_CONFIRMPASS`) → `PHASE_CLASS` (new chars only) →
+  world. Returning players skip class select and `session_resume_world`s into
+  their saved room.
+- **`SS_IDENT`/`SS_AUTHED`/`SS_SAVE_DIRTY`/`SS_LAST_SAVE_MS`** are the new
+  session slots; `OI_TPL_ID` on item instances makes inventory serializable.
+- **Transient combat state is intentionally not persisted** — a restored player
+  respawns at their room, not mid-fight. M7's reset logic can lean on that.
 
-### What M6 needs (in order)
+### What M7 needs
 
-1. **ADR 0004** (identity/auth) + **ADR 0006** (persistence shape) — decide
-   before code. Note [ADR 0002](../adr/0002-raw-tcp-telnet-protocol.md): Telnet has no TLS, so a
-   plaintext password on the wire is the same exposure as a sigil — weigh
-   that in 0004.
-2. **M6-A** — land T.Ron in `cyrius.cyml [deps]` (first external dep; if
-   T.Ron isn't ready, the milestone moves — track the gap here).
-3. **M6-C/D/E/F** — save shape, queued save triggers (quit / save / level /
-   debounced timer), load-on-login, crash-safe atomic writes (`.tmp` +
-   rename). Gate: `kill -9` mid-combat → restart → no data loss.
-
-### Reference
-
-- Save shape + triggers + crash-safety: [roadmap.md M6](roadmap.md#m6--persistence-via-tron-v070).
-- Identity options: [roadmap.md § Open ADRs](roadmap.md#open-adrs) (ADR 0004).
-- Character state to persist: the `SS_` enum in `src/session.cyr`.
+1. **Reset cadence** — per-zone timer (authored in the zone header? add a field)
+   or a global interval; enqueue from `advance_tick`, never reset inline.
+2. **Presence gate** — skip respawning a room (or the whole zone) while a player
+   occupies it; reset on the next cycle once empty. Room occupant lists already
+   exist (`RM_MOB_HEAD` / players via the session list + `SS_ROOM`).
+3. **Respawn semantics** — restore authored mob/object spawns (`world_spawn_all`
+   is the M4 entry point) without duplicating live instances.
 
 ### Quick boot sanity
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test tests/cyrius-yeomans-descent.tcyr   # 232 assertions
-cyrius fuzz                                      # parser fuzz, 100k inputs
-cyrius bench                                     # telnet baseline + combat load test
+cyrius test                                      # 256 assertions, all pass
+./build/persist_smoke 2>/dev/null || cyrius build programs/persist_smoke.cyr build/persist_smoke && ./build/persist_smoke
 ./build/cyrius-yeomans-descent serve 4000
-# telnet 127.0.0.1 4000 — log in, pick a class, `n`, `kill scavver`, `bash`, loot
-# fast combat: YD_TICK_MS=200 ./build/cyrius-yeomans-descent serve 4000
+# telnet 127.0.0.1 4000 — new name → set a passphrase → pick a class → play;
+# `save`, `quit`, reconnect with the same name+passphrase → restored in place.
+# kill -9 the server after a save → restart → reconnect → no data loss.
+# fast tick: YD_TICK_MS=200 ./build/cyrius-yeomans-descent serve 4000
 ```
 
 ### Open ADRs
 
-ADR 0005 (zone-file format) was resolved at M3-A. Two remain — both now
-**due, gating M6** — see [roadmap.md § Open ADRs](roadmap.md#open-adrs):
-**0004** (identity / auth) and **0006** (T.Ron persistence shape).
+None outstanding. 0001–0003 (combat / wire / concurrency), 0004 (identity),
+0005 (zone format), 0006 (persistence shape) are all Accepted. M7 may earn a
+new ADR if reset cadence/gating has a non-obvious trade-off.

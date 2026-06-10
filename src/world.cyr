@@ -77,6 +77,27 @@ fn world_start_room(): i64 { return g_start_room; }
 
 fn room_id_ptr(r): i64    { return r + RM_ID; }
 fn room_id_len(r): i64    { return load64(r + RM_ID_LEN); }
+
+# Resolve a room id string (exact match) to its room index, or -1 if no
+# room carries that id. M6-E uses it to place a loaded player back into
+# their recorded room; a -1 (room since removed) falls back to the start.
+fn world_room_by_id(id, len): i64 {
+    var i = 0;
+    while (i < g_room_count) {
+        var r = room_at(i);
+        if (load64(r + RM_ID_LEN) == len) {
+            var j = 0;
+            var same = 1;
+            while (j < len) {
+                if ((load8(r + RM_ID + j) & 0xFF) != (load8(id + j) & 0xFF)) { same = 0; j = len; }
+                else { j = j + 1; }
+            }
+            if (same == 1) { return i; }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
 fn room_title_ptr(r): i64 { return r + RM_TITLE; }
 fn room_title_len(r): i64 { return load64(r + RM_TITLE_LEN); }
 fn room_prose_ptr(r): i64 { return load64(r + RM_PROSE_PTR); }

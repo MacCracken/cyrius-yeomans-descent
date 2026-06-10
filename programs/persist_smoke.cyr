@@ -1,0 +1,118 @@
+# persist_smoke.cyr — M6 acceptance: a real save → reload round-trip on disk,
+# proving the 0.7.0 gate (attrs + room + inventory survive) plus auth + tamper
+# rejection. Built via the manifest so [deps] stdlib auto-prepends.
+#
+#   cyrius build programs/persist_smoke.cyr build/persist_smoke
+#   ./build/persist_smoke        # exit 0 + "SMOKE PASS"
+#
+# Scratch validation — not wired into [build].
+
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/libro.cyr"
+
+include "src/telnet.cyr"
+include "src/parser.cyr"
+include "src/world.cyr"
+include "src/mob.cyr"
+include "src/session.cyr"
+include "src/item.cyr"
+include "src/combat.cyr"
+include "src/classes.cyr"
+include "src/persist.cyr"
+
+fn mk_session(nm, nl): i64 {
+    var s = fl_alloc(SS_SIZE);
+    memset(s, 0, SS_SIZE);
+    var nmb = fl_alloc(NAME_CAP);
+    memcpy(nmb, nm, nl);
+    store64(s + SS_NAME_BUF, nmb);
+    store64(s + SS_NAME_LEN, nl);
+    return s;
+}
+
+fn main(): i64 {
+    alloc_init();
+    persist_init();
+    world_load_rooms("data/zones/hub.rooms.cyml");
+    var objc = world_load_objs("data/zones/hub.objs.cyml");
+
+    # --- build a character with stats, a room, and an inventory item ---
+    var s = mk_session("SmokePlayer", 11);
+    var blk = sess_ident(s);
+    random_bytes(blk, SALT_LEN);
+    ident_derive(blk, "correct horse", 13, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 42);
+    store64(s + SS_AUTHED, 1);
+    store64(s + SS_CLASS, 1);
+    store64(s + SS_HP, 21); store64(s + SS_MAXHP, 28); store64(s + SS_AC, 6);
+    store64(s + SS_HIT, 2); store64(s + SS_NDICE, 1); store64(s + SS_DSIZE, 8); store64(s + SS_DMOD, 3);
+    store64(s + SS_STR, 15); store64(s + SS_DEX, 11); store64(s + SS_CON, 14); store64(s + SS_TEC, 9);
+    store64(s + SS_ENERGY, 12); store64(s + SS_MAXENERGY, 16);
+
+    # place in a real room (start room) and capture its id for comparison
+    var start = world_start_room();
+    store64(s + SS_ROOM, start);
+    var want_room_id = room_id_ptr(room_at(start));
+    var want_room_len = room_id_len(room_at(start));
+
+    # one inventory item from the first object template (if any loaded)
+    var have_item = 0;
+    if (objc > 0) {
+        var item = item_new(ot_at(0));
+        ilist_push(s + SS_INV, item);
+        have_item = 1;
+    }
+
+    if (player_save(s) != 1) { println("FAIL save"); return 1; }
+    println("ok  saved SmokePlayer");
+
+    # --- simulate a restart: fresh session, authenticate, restore ---
+    var s2 = mk_session("SmokePlayer", 11);
+    var rc = player_auth_load(s2, "correct horse", 13);
+    if (rc != 1) { println("FAIL auth_load right pass"); return 2; }
+
+    if (load64(s2 + SS_HP) != 21)  { println("FAIL hp"); return 3; }
+    if (load64(s2 + SS_MAXHP) != 28) { println("FAIL maxhp"); return 3; }
+    if (load64(s2 + SS_AC) != 6)   { println("FAIL ac"); return 3; }
+    if (load64(s2 + SS_CLASS) != 1) { println("FAIL class"); return 3; }
+    if (load64(s2 + SS_STR) != 15) { println("FAIL str"); return 3; }
+    if (load64(s2 + SS_DMOD) != 3) { println("FAIL dmod"); return 3; }
+    if (load64(s2 + SS_ENERGY) != 12) { println("FAIL energy"); return 3; }
+    println("ok  attrs restored");
+
+    # room round-tripped to a valid index whose id matches the original
+    var got = load64(s2 + SS_ROOM);
+    if (got < 0) { println("FAIL room unplaced"); return 4; }
+    var gid = room_id_ptr(room_at(got));
+    var glen = room_id_len(room_at(got));
+    if (glen != want_room_len) { println("FAIL room id len"); return 4; }
+    if (_bytes_eq(gid, want_room_id, glen) == 0) { println("FAIL room id"); return 4; }
+    println("ok  room restored by id");
+
+    # inventory re-instantiated
+    if (have_item == 1) {
+        if (load64(s2 + SS_INV) == 0) { println("FAIL inventory empty"); return 5; }
+        println("ok  inventory restored");
+    }
+
+    # --- negative cases ---
+    var s3 = mk_session("SmokePlayer", 11);
+    if (player_auth_load(s3, "wrong pass!!", 12) != 0) { println("FAIL wrong-pass not rejected"); return 6; }
+    println("ok  wrong passphrase rejected");
+
+    _path_for("SmokePlayer", 11, g_persist_path);
+    var tn = file_read_all(g_persist_path, g_persist_slurp, SLURP_CAP - 1);
+    store8(g_persist_slurp + 18, load8(g_persist_slurp + 18) ^ 0x01);
+    file_write_all(g_persist_path, g_persist_slurp, tn);
+    var s4 = mk_session("SmokePlayer", 11);
+    if (player_auth_load(s4, "correct horse", 13) != (0 - 2)) { println("FAIL tamper not caught"); return 7; }
+    println("ok  tampered record rejected");
+
+    println("");
+    println("SMOKE PASS — save/reload round-trip + auth + tamper all hold.");
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

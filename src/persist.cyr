@@ -1,0 +1,438 @@
+# persist.cyr — M6 player persistence (v0.7.0).
+#
+# Identity (ADR 0004): each player is an Ed25519 keypair whose 32-byte seed
+# is derived deterministically from SHA-256(salt || passphrase) via sigil.
+# Only the salt + public key are stored; the secret key is NEVER written to
+# disk — it is re-derived from the typed passphrase at login. Login verifies
+# by re-deriving and matching the stored public key.
+#
+# Persistence shape (ADR 0006): one TOML record per player at
+# data/players/<name>.cyml, written crash-safely (.tmp + atomic rename).
+# The record is Ed25519-signed over its own prefix; load verifies the
+# signature before trusting any field, so silent corruption / tampering is
+# rejected. Every login / save / creation is also appended to a libro
+# hash-chain audit log (data/audit.libro) — the "T.Ron" tamper-evident trail.
+#
+# Included AFTER session/item/world/classes (it reads their enums) and after
+# lib/sakshi+sigil+libro (it calls their crypto/chain surface). The login
+# verbs it exposes are forward-referenced by session.cyr's phase router.
+
+enum PersistConst {
+    SALT_LEN    = 16;     # random per-account salt
+    PK_LEN      = 32;     # Ed25519 public key
+    SK_LEN      = 64;     # Ed25519 secret key (seed+pk, sigil layout)
+    SIG_LEN     = 64;     # Ed25519 signature
+    SEED_LEN    = 32;     # keypair seed = SHA-256(salt||pass)
+    IDENT_LEN   = 120;    # SS_IDENT block: salt(16)|pk(32)|sk(64)|created(8)
+    IDENT_PK    = 16;     #   pubkey offset within the block
+    IDENT_SK    = 48;     #   seckey offset
+    IDENT_CREATED = 112;  #   creation epoch-secs offset
+    PASS_MIN    = 4;
+    PASS_MAX    = 64;
+    SAVE_CAP    = 4096;   # serialized record scratch
+    SLURP_CAP   = 8192;   # file-read scratch
+    PATH_CAP    = 320;
+}
+
+# rename(2) is not wrapped in the x86_64 stdlib (only sys_mkdir is); the
+# syscall number is 82 — rename(const char *old, const char *new).
+var SYS_RENAME_NR = 82;
+
+var g_persist_save  = 0;
+var g_persist_slurp = 0;
+var g_persist_path  = 0;
+var g_persist_tmp   = 0;
+var g_persist_stat  = 0;
+var g_persist_dec   = 0;   # decode scratch (salt/pk/sig + confirm keypair)
+var g_ident_scratch = 0;   # ident_derive private (never aliased by callers)
+var g_fmt_scratch   = 0;   # fmt_int_buf temp
+var g_audit_chain   = 0;
+var g_audit_store   = 0;
+var g_persist_ready = 0;
+
+# === Boot: buffers + data dirs + audit chain. Idempotent. ===
+fn persist_init(): i64 {
+    if (g_persist_ready == 1) { return 0; }
+    g_persist_save  = alloc(SAVE_CAP);
+    g_persist_slurp = alloc(SLURP_CAP);
+    g_persist_path  = alloc(PATH_CAP);
+    g_persist_tmp   = alloc(PATH_CAP);
+    g_persist_stat  = alloc(160);
+    g_persist_dec   = alloc(256);
+    g_ident_scratch = alloc(256);
+    g_fmt_scratch   = alloc(32);
+    sys_mkdir("data", 0x1ED);            # 0755 — ignore EEXIST
+    sys_mkdir("data/players", 0x1ED);
+    g_audit_chain = chain_new();
+    g_audit_store = filestore_open(str_from("data/audit.libro"));
+    g_persist_ready = 1;
+    return 0;
+}
+
+# Append a security event to the libro audit chain (+ flush to the
+# filestore). `action` is a literal; `who` / `wholen` the player name.
+fn audit_event(sev, action, who, wholen): i64 {
+    if (g_audit_chain == 0) { return 0; }
+    var e = chain_append(g_audit_chain, sev, str_from("persist"), str_from(action), str_new(who, wholen));
+    if (g_audit_store != 0) { filestore_append(g_audit_store, e); }
+    return 0;
+}
+
+# === small utilities =======================================================
+
+fn _slen(p): i64 {
+    var i = 0;
+    while ((load8(p + i) & 0xFF) != 0) { i = i + 1; }
+    return i;
+}
+
+fn _bytes_eq(a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Build data/players/<lower(name)>.cyml (NUL-terminated) into `out`.
+# Returns the path length (excluding the NUL).
+fn _path_for(name, len, out): i64 {
+    var pre = "data/players/";
+    var off = 0;
+    var i = 0;
+    while ((load8(pre + i) & 0xFF) != 0) { store8(out + off, load8(pre + i)); off = off + 1; i = i + 1; }
+    i = 0;
+    while (i < len) { store8(out + off, ascii_lower(load8(name + i) & 0xFF)); off = off + 1; i = i + 1; }
+    var suf = ".cyml";
+    i = 0;
+    while ((load8(suf + i) & 0xFF) != 0) { store8(out + off, load8(suf + i)); off = off + 1; i = i + 1; }
+    store8(out + off, 0);
+    return off;
+}
+
+# === identity ==============================================================
+
+# Derive the Ed25519 keypair for (salt, passphrase): seed = SHA-256(salt||pass).
+# Writes 64-byte secret to sk_out and 32-byte public key to pk_out.
+fn ident_derive(salt, pass, passlen, sk_out, pk_out): i64 {
+    var msg = g_ident_scratch;
+    memcpy(msg, salt, SALT_LEN);
+    memcpy(msg + SALT_LEN, pass, passlen);
+    var seed = g_ident_scratch + 200;
+    sha256(msg, SALT_LEN + passlen, seed);
+    ed25519_keypair(seed, sk_out, pk_out);
+    return 0;
+}
+
+# Lazily allocate the per-session identity block (zeroed). Returns its ptr.
+fn sess_ident(s): i64 {
+    var blk = load64(s + SS_IDENT);
+    if (blk == 0) {
+        blk = fl_alloc(IDENT_LEN);
+        memset(blk, 0, IDENT_LEN);
+        store64(s + SS_IDENT, blk);
+    }
+    return blk;
+}
+
+# Does a saved record exist for this name?
+fn player_exists(name, len): i64 {
+    persist_init();
+    _path_for(name, len, g_persist_path);
+    if (sys_stat(g_persist_path, g_persist_stat) == 0) { return 1; }
+    return 0;
+}
+
+# === serialization =========================================================
+# Appenders over g_persist_save at a running offset.
+
+fn _ap(off, ptr, n): i64 { memcpy(g_persist_save + off, ptr, n); return off + n; }
+fn _ac(off, cstr): i64 { var n = _slen(cstr); memcpy(g_persist_save + off, cstr, n); return off + n; }
+fn _ai(off, n): i64 {
+    var l = fmt_int_buf(n, g_fmt_scratch);
+    memcpy(g_persist_save + off, g_fmt_scratch, l);
+    return off + l;
+}
+fn _fstr(off, key, valptr, vallen): i64 {
+    off = _ac(off, key);
+    off = _ac(off, " = \"");
+    off = _ap(off, valptr, vallen);
+    off = _ac(off, "\"\n");
+    return off;
+}
+fn _fint(off, key, n): i64 {
+    off = _ac(off, key);
+    off = _ac(off, " = ");
+    off = _ai(off, n);
+    off = _ac(off, "\n");
+    return off;
+}
+
+# Serialize the session into g_persist_save and append the Ed25519 record
+# signature (signed over the prefix). Returns total length, or -1 on overflow.
+fn _build_record(s): i64 {
+    var blk = sess_ident(s);
+    var off = 0;
+    off = _ac(off, "[player]\n");
+    off = _fstr(off, "name", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    off = _fstr(off, "salt",   hex_encode(blk, SALT_LEN), SALT_LEN * 2);
+    off = _fstr(off, "pubkey", hex_encode(blk + IDENT_PK, PK_LEN), PK_LEN * 2);
+    off = _fint(off, "class", load64(s + SS_CLASS));
+    var room = load64(s + SS_ROOM);
+    if (room >= 0) {
+        var r = room_at(room);
+        off = _fstr(off, "room", room_id_ptr(r), room_id_len(r));
+    } else {
+        off = _fstr(off, "room", "", 0);
+    }
+    off = _fint(off, "hp",    load64(s + SS_HP));
+    off = _fint(off, "maxhp", load64(s + SS_MAXHP));
+    off = _fint(off, "ac",    load64(s + SS_AC));
+    off = _fint(off, "hit",   load64(s + SS_HIT));
+    off = _fint(off, "ndice", load64(s + SS_NDICE));
+    off = _fint(off, "dsize", load64(s + SS_DSIZE));
+    off = _fint(off, "dmod",  load64(s + SS_DMOD));
+    off = _fint(off, "str", load64(s + SS_STR));
+    off = _fint(off, "dex", load64(s + SS_DEX));
+    off = _fint(off, "con", load64(s + SS_CON));
+    off = _fint(off, "tec", load64(s + SS_TEC));
+    off = _fint(off, "energy",    load64(s + SS_ENERGY));
+    off = _fint(off, "maxenergy", load64(s + SS_MAXENERGY));
+    off = _fint(off, "created",    load64(blk + IDENT_CREATED));
+    off = _fint(off, "last_login", get_epoch_secs());
+    # inventory — comma-joined template ids
+    off = _ac(off, "inv = \"");
+    var it = load64(s + SS_INV);
+    var first = 1;
+    while (it != 0) {
+        if (oi_tpl_id_len(it) > 0) {
+            if (off > SAVE_CAP - 256) { return 0 - 1; }   # leave room for sig
+            if (first == 0) { off = _ac(off, ","); }
+            off = _ap(off, oi_tpl_id_ptr(it), oi_tpl_id_len(it));
+            first = 0;
+        }
+        it = oi_next(it);
+    }
+    off = _ac(off, "\"\n");
+    # sign the prefix [0, off) with the session's (re-derived) secret key
+    var sig = g_persist_dec;
+    ed25519_sign(blk + IDENT_SK, g_persist_save, off, sig);
+    off = _fstr(off, "sig", hex_encode(sig, SIG_LEN), SIG_LEN * 2);
+    return off;
+}
+
+# === save (crash-safe) =====================================================
+# Returns 1 saved, 0 not-authed (nothing to persist), -1 on I/O failure.
+fn player_save(s): i64 {
+    if (load64(s + SS_AUTHED) == 0) { return 0; }
+    persist_init();
+    var total = _build_record(s);
+    if (total < 0) { return 0 - 1; }
+    var plen = _path_for(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), g_persist_path);
+    # tmp = path + ".tmp"
+    memcpy(g_persist_tmp, g_persist_path, plen);
+    memcpy(g_persist_tmp + plen, ".tmp", 4);
+    store8(g_persist_tmp + plen + 4, 0);
+    var w = file_write_all(g_persist_tmp, g_persist_save, total);
+    if (w < 0) { return 0 - 1; }
+    # atomic publish: rename clobbers the previous record in one step, so a
+    # crash mid-write leaves either the old record or the new one — never a
+    # torn file. A stale <name>.cyml.tmp from a crashed write is simply
+    # overwritten on the next save.
+    if (syscall(SYS_RENAME_NR, g_persist_tmp, g_persist_path) != 0) { return 0 - 1; }
+    store64(s + SS_LAST_SAVE_MS, clock_now_ms());
+    store64(s + SS_SAVE_DIRTY, 0);
+    audit_event(SEV_INFO, "save", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    return 1;
+}
+
+# === load + authenticate ===================================================
+# Find the byte offset where the trailing `sig = "..."` line begins — this
+# is exactly the length of the signed prefix. -1 if not found.
+fn _find_sig_offset(buf, n): i64 {
+    var i = 0;
+    var lim = n - 5;
+    while (i < lim) {
+        if (load8(buf + i) == 10) {     # '\n'
+            var p = buf + i + 1;
+            if ((load8(p) & 0xFF) == 115) {       # s
+                if ((load8(p + 1) & 0xFF) == 105) {   # i
+                    if ((load8(p + 2) & 0xFF) == 103) {   # g
+                        if ((load8(p + 3) & 0xFF) == 32) { return i + 1; }  # ' '
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Re-instantiate inventory from a comma-separated template-id list.
+fn _restore_inv(s, ids, len): i64 {
+    var i = 0;
+    while (i < len) {
+        var start = i;
+        while (i < len) {
+            if ((load8(ids + i) & 0xFF) == 44) { break; }   # ','
+            i = i + 1;
+        }
+        var idlen = i - start;
+        if (idlen > 0) {
+            var tpl = obj_tpl_by_id(ids + start, idlen);
+            if (tpl != 0) { ilist_push(s + SS_INV, item_new(tpl)); }
+        }
+        if (i < len) { i = i + 1; }
+    }
+    return 0;
+}
+
+# Verify the passphrase against the stored record and, on success, restore
+# the full session. Returns:
+#    1  authenticated + loaded
+#    0  wrong passphrase
+#   -1  no/unreadable record
+#   -2  signature invalid (corrupt or tampered)
+fn player_auth_load(s, pass, passlen): i64 {
+    persist_init();
+    var nm = load64(s + SS_NAME_BUF);
+    var nl = load64(s + SS_NAME_LEN);
+    _path_for(nm, nl, g_persist_path);
+    var n = file_read_all(g_persist_path, g_persist_slurp, SLURP_CAP - 1);
+    if (n <= 0) { return 0 - 1; }
+    store8(g_persist_slurp + n, 0);
+
+    # The record is a single [player] section; toml_parse returns a vec of
+    # sections (mirror world.cyr's zone-header read).
+    var secs = toml_parse(str_new(g_persist_slurp, n));
+    if (vec_len(secs) == 0) { return 0 - 2; }
+    var pairs = toml_section_pairs(vec_get(secs, 0));
+    var saltv = toml_get(pairs, "salt");
+    var pkv   = toml_get(pairs, "pubkey");
+    var sigv  = toml_get(pairs, "sig");
+    if (saltv == 0) { return 0 - 2; }
+    if (pkv == 0)   { return 0 - 2; }
+    if (sigv == 0)  { return 0 - 2; }
+
+    var salt   = g_persist_dec;          # [0,16)
+    var filepk = g_persist_dec + 16;     # [16,48)
+    var filesig = g_persist_dec + 48;    # [48,112)
+    if (hex_decode_into(str_data(saltv), str_len(saltv), salt) == 0) { return 0 - 2; }
+    if (hex_decode_into(str_data(pkv), str_len(pkv), filepk) == 0) { return 0 - 2; }
+    if (hex_decode_into(str_data(sigv), str_len(sigv), filesig) == 0) { return 0 - 2; }
+
+    # Integrity: the record must be self-consistent under its own pubkey.
+    var prefix = _find_sig_offset(g_persist_slurp, n);
+    if (prefix < 0) { return 0 - 2; }
+    if (ed25519_verify(filepk, g_persist_slurp, prefix, filesig) != 1) {
+        audit_event(SEV_SECURITY, "load.tamper", nm, nl);
+        return 0 - 2;
+    }
+
+    # Authentication: derive the keypair from the typed passphrase + stored
+    # salt and require the public key to match the record's.
+    var blk = sess_ident(s);
+    ident_derive(salt, pass, passlen, blk + IDENT_SK, blk + IDENT_PK);
+    if (_bytes_eq(blk + IDENT_PK, filepk, PK_LEN) == 0) { return 0; }
+    memcpy(blk, salt, SALT_LEN);
+    store64(blk + IDENT_CREATED, toml_int(pairs, "created", get_epoch_secs()));
+
+    # Restore state.
+    store64(s + SS_CLASS, toml_int(pairs, "class", 0 - 1));
+    store64(s + SS_HP,    toml_int(pairs, "hp", PC_HP));
+    store64(s + SS_MAXHP, toml_int(pairs, "maxhp", PC_HP));
+    store64(s + SS_AC,    toml_int(pairs, "ac", PC_AC));
+    store64(s + SS_HIT,   toml_int(pairs, "hit", PC_HIT));
+    store64(s + SS_NDICE, toml_int(pairs, "ndice", PC_NDICE));
+    store64(s + SS_DSIZE, toml_int(pairs, "dsize", PC_DSIZE));
+    store64(s + SS_DMOD,  toml_int(pairs, "dmod", PC_DMOD));
+    store64(s + SS_STR, toml_int(pairs, "str", 10));
+    store64(s + SS_DEX, toml_int(pairs, "dex", 10));
+    store64(s + SS_CON, toml_int(pairs, "con", 10));
+    store64(s + SS_TEC, toml_int(pairs, "tec", 10));
+    store64(s + SS_ENERGY,    toml_int(pairs, "energy", 0));
+    store64(s + SS_MAXENERGY, toml_int(pairs, "maxenergy", 0));
+    store64(s + SS_TARGET, 0);
+
+    var roomv = toml_get(pairs, "room");
+    var ridx = 0 - 1;
+    if (roomv != 0) {
+        if (str_len(roomv) > 0) { ridx = world_room_by_id(str_data(roomv), str_len(roomv)); }
+    }
+    if (ridx < 0) { ridx = world_start_room(); }
+    store64(s + SS_ROOM, ridx);
+
+    var invv = toml_get(pairs, "inv");
+    if (invv != 0) { _restore_inv(s, str_data(invv), str_len(invv)); }
+
+    store64(s + SS_AUTHED, 1);
+    store64(s + SS_SAVE_DIRTY, 0);
+    audit_event(SEV_INFO, "login.ok", nm, nl);
+    return 1;
+}
+
+# === login phase handlers (M6-B/E) =========================================
+# Forward-referenced from session.cyr's phase router.
+
+fn login_begin_pass(s): i64 {
+    store64(s + SS_PHASE, PHASE_PASS);
+    session_appendtx_cstr(s, "Passphrase: ");
+    return 0;
+}
+fn login_begin_newpass(s): i64 {
+    store64(s + SS_PHASE, PHASE_NEWPASS);
+    session_appendtx_cstr(s, "New operative — choose a passphrase (4-64 chars): ");
+    return 0;
+}
+
+# Returning player: verify + restore + drop into the recorded room.
+fn login_on_pass(s, buf, len): i64 {
+    var rc = player_auth_load(s, buf, len);
+    if (rc == 1) {
+        store64(s + SS_PHASE, PHASE_CMD);
+        session_appendtx_cstr(s, "\r\nThe lock yields. Welcome back to the Under-Grid.\r\n");
+        session_resume_world(s);
+        session_send_cmd_prompt(s);
+        return 0;
+    }
+    if (rc == 0) {
+        audit_event(SEV_WARNING, "login.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+        session_appendtx_cstr(s, "\r\nThat passphrase is wrong.\r\n");
+        login_begin_pass(s);
+        return 0;
+    }
+    session_appendtx_cstr(s, "\r\nYour record is unreadable or has been tampered with. An operator must intervene.\r\n");
+    store64(s + SS_QUIT, 1);
+    return 0;
+}
+
+# New player: capture passphrase → derive keypair → ask to confirm.
+fn login_on_newpass(s, buf, len): i64 {
+    if (len < PASS_MIN) { session_appendtx_cstr(s, "Too short. "); return login_begin_newpass(s); }
+    if (len > PASS_MAX) { session_appendtx_cstr(s, "Too long. "); return login_begin_newpass(s); }
+    var blk = sess_ident(s);
+    random_bytes(blk, SALT_LEN);
+    ident_derive(blk, buf, len, blk + IDENT_SK, blk + IDENT_PK);
+    store64(s + SS_PHASE, PHASE_CONFIRMPASS);
+    session_appendtx_cstr(s, "Confirm passphrase: ");
+    return 0;
+}
+
+fn login_on_confirm(s, buf, len): i64 {
+    var blk = sess_ident(s);
+    var pk2 = g_persist_dec + 128;
+    var sk2 = g_persist_dec + 160;
+    ident_derive(blk, buf, len, sk2, pk2);
+    if (_bytes_eq(pk2, blk + IDENT_PK, PK_LEN) == 0) {
+        session_appendtx_cstr(s, "\r\nThose don't match. Let's begin again.\r\n");
+        return login_begin_newpass(s);
+    }
+    store64(blk + IDENT_CREATED, get_epoch_secs());
+    store64(s + SS_AUTHED, 1);
+    audit_event(SEV_INFO, "char.create", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    session_appendtx_cstr(s, "\r\nIdentity sealed into the grid.\r\n");
+    store64(s + SS_PHASE, PHASE_CLASS);
+    class_send_prompt(s);
+    return 0;
+}

@@ -228,6 +228,7 @@ fn login_on_class(s, buf, len): i64 {
     session_appendtx_cstr(s, ".\r\n");
     session_appendtx_cstr(s, "Type \"help\" for commands.\r\n");
     session_enter_world(s);
+    player_save(s);   # M6: persist the new character's first record (persist.cyr)
     session_send_cmd_prompt(s);
     return 0;
 }

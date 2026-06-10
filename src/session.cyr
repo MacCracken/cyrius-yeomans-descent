@@ -63,7 +63,13 @@ enum SS {
     SS_GUARD      = 304;  # AC-buff ticks remaining (brace / bypass)
     SS_STIM       = 312;  # damage/hit-buff ticks remaining (stim)
     SS_STEALTH    = 320;  # 1 while sneaking (backstab primed)
-    SS_SIZE       = 328;
+    # M6 identity / persistence (transient — the seckey is NEVER serialized;
+    # it is re-derived from the typed passphrase at login per ADR 0004).
+    SS_IDENT        = 328; # ptr to 112B ident block: salt(16)|pubkey(32)|seckey(64)
+    SS_AUTHED       = 336; # 1 once the passphrase verified / char created
+    SS_SAVE_DIRTY   = 344; # 1 if state changed since the last save (debounce)
+    SS_LAST_SAVE_MS = 352; # monotonic ms of the last successful save
+    SS_SIZE         = 360;
 }
 
 # The published epoll fd, used by room broadcasts (M3-C) and combat
@@ -94,9 +100,12 @@ enum SessConst {
 }
 
 enum Phase {
-    PHASE_NAME  = 0;      # awaiting name entry (first prompt after MOTD)
-    PHASE_CLASS = 2;      # awaiting class selection (M5-A)
-    PHASE_CMD   = 1;      # in the world, accepting commands
+    PHASE_NAME        = 0;  # awaiting name entry (first prompt after MOTD)
+    PHASE_CLASS       = 2;  # awaiting class selection (M5-A)
+    PHASE_CMD         = 1;  # in the world, accepting commands
+    PHASE_PASS        = 3;  # returning char: awaiting passphrase (M6 auth)
+    PHASE_NEWPASS     = 4;  # new char: choose a passphrase
+    PHASE_CONFIRMPASS = 5;  # new char: confirm the passphrase
 }
 
 # === session_new — alloc + zero-init a Session for an accepted fd. ===
@@ -137,6 +146,7 @@ fn session_free(s): i64 {
     fl_free(load64(s + SS_TX_BUF));
     fl_free(load64(s + SS_LINE_BUF));
     fl_free(load64(s + SS_NAME_BUF));
+    if (load64(s + SS_IDENT) != 0) { fl_free(load64(s + SS_IDENT)); }
     fl_free(s);
     return 0;
 }
@@ -338,15 +348,19 @@ fn login_on_name(s, buf, len): i64 {
         session_send_name_prompt(s);
         return 0;
     }
-    # Capture the name (unauthenticated) and advance to class selection.
+    # Capture the name, then branch on whether a record exists (M6 auth):
+    # a known name asks for its passphrase; a new name forges an identity.
+    # player_exists / login_begin_* are forward refs → persist.cyr.
     memcpy(load64(s + SS_NAME_BUF), buf, len);
     store64(s + SS_NAME_LEN, len);
-    store64(s + SS_PHASE, PHASE_CLASS);
     session_appendtx_cstr(s, "\r\nWelcome, ");
     session_appendtx(s, buf, len);
     session_appendtx_cstr(s, ". The Under-Grid stirs.\r\n");
-    class_send_prompt(s);   # forward ref → classes.cyr (M5-A)
-    return 0;
+    if (player_exists(buf, len) == 1) {
+        return login_begin_pass(s);
+    }
+    session_appendtx_cstr(s, "No record answers to that name — let us forge one.\r\n");
+    return login_begin_newpass(s);
 }
 
 # === M2 command dispatch ===
@@ -584,6 +598,18 @@ fn session_enter_world(s): i64 {
     return 0;
 }
 
+# Place a *loaded* player back into their recorded room (M6-E). Unlike
+# session_enter_world this honours SS_ROOM (already resolved by
+# player_auth_load, with a start-room fallback baked in).
+fn session_resume_world(s): i64 {
+    if (world_room_count() == 0) { return 0; }
+    var room = load64(s + SS_ROOM);
+    if (room < 0) { room = world_start_room(); store64(s + SS_ROOM, room); }
+    room_broadcast(room, s, s, " re-materializes from the grid.", "", "\r\n");
+    session_show_room(s);
+    return 0;
+}
+
 # Move a session one step in `dir`. Validates the exit, broadcasts the
 # departure / arrival to onlookers, and auto-looks the mover.
 fn cmd_move(s, dir): i64 {
@@ -726,7 +752,12 @@ fn cmd_dispatch(s, pa, buf, len): i64 {
     }
     if (verb == VERB_HELP) { return cmd_help_text(s); }
     if (verb == VERB_SAVE) {
-        session_appendtx_cstr(s, "Nothing to save yet — persistence lands at M6.\r\n");
+        if (load64(s + SS_AUTHED) == 0) {
+            session_appendtx_cstr(s, "You have no persistent record to save.\r\n");
+            return 0;
+        }
+        if (player_save(s) == 1) { session_appendtx_cstr(s, "Your progress is etched into the grid.\r\n"); }
+        else { session_appendtx_cstr(s, "Save failed — the grid rejected the write.\r\n"); }
         return 0;
     }
 
@@ -772,6 +803,9 @@ fn cmd_on_line(s, buf, len): i64 {
     if (g_parser == 0) { g_parser = parser_new(); }
     parser_parse(g_parser, buf, len);
     cmd_dispatch(s, g_parser, buf, len);
+    # Any in-world command may mutate persistent state; flag for the
+    # debounced save sweep (M6-D). Cheap; the sweep only writes if set.
+    if (load64(s + SS_AUTHED) == 1) { store64(s + SS_SAVE_DIRTY, 1); }
     if (load64(s + SS_QUIT) == 0) { session_send_cmd_prompt(s); }
     return 0;
 }
@@ -780,12 +814,12 @@ fn cmd_on_line(s, buf, len): i64 {
 #
 # `buf` / `len` is the line with its CR / LF terminator already stripped.
 fn session_on_line(s, buf, len): i64 {
-    if (load64(s + SS_PHASE) == PHASE_NAME) {
-        return login_on_name(s, buf, len);
-    }
-    if (load64(s + SS_PHASE) == PHASE_CLASS) {
-        return login_on_class(s, buf, len);   # forward ref → classes.cyr
-    }
+    var ph = load64(s + SS_PHASE);
+    if (ph == PHASE_NAME)        { return login_on_name(s, buf, len); }
+    if (ph == PHASE_PASS)        { return login_on_pass(s, buf, len); }       # M6 auth (persist.cyr)
+    if (ph == PHASE_NEWPASS)     { return login_on_newpass(s, buf, len); }
+    if (ph == PHASE_CONFIRMPASS) { return login_on_confirm(s, buf, len); }
+    if (ph == PHASE_CLASS)       { return login_on_class(s, buf, len); }      # classes.cyr
     return cmd_on_line(s, buf, len);
 }
 

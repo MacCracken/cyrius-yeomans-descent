@@ -22,7 +22,7 @@
 | **0.4.0** | M3 — world / rooms / movement + starter zone | ✅ 2026-06-09 |
 | **0.5.0** | M4 — combat tick + hit/damage math + corpses | ✅ 2026-06-09 |
 | **0.6.0** | M5 — four classes playable solo through the starter zone | ✅ 2026-06-09 |
-| **0.7.0** | M6 — T.Ron-backed player persistence + crash-safe writes | next |
+| **0.7.0** | M6 — libro+sigil player persistence (Ed25519 identity) + crash-safe writes | ✅ 2026-06-09 |
 | **0.8.0** | M7 — zone resets with player-presence gating | |
 | **0.9.0** | M8 — Joshua operator interface | |
 | **0.9.x** | Security sweep + closeout pass | |
@@ -32,7 +32,7 @@
 
 ## In progress
 
-**No active cycle.** M5 closed at 0.6.0. Next slot is **M6-A — T.Ron dep landing** ([§M6 sub-bites](#m6--persistence-via-tron-v070)) — players survive restart via crash-safe, queued (never-inline) saves. **Opens with ADR 0004** (identity model) and ADR 0006 (persistence shape). Pickup pointer + boot guide in [`state.md`](state.md).
+**No active cycle.** M6 closed at 0.7.0 — players persist across restart (Ed25519 identity via sigil, per-player signed `data/players/<name>.cyml` with atomic `.tmp`+rename, libro audit chain). Gate met: `kill -9` mid-session → restart → player restores at their last room with full attrs/inventory. ADR 0004 + 0006 resolved. Next slot is **M7 — zone resets with player-presence gating** (v0.8.0). Pickup pointer in [`state.md`](state.md).
 
 ---
 

@@ -35,9 +35,11 @@ enum OI {
     OI_KW_LEN    = 160;
     OI_DESC_PTR  = 168;
     OI_DESC_LEN  = 176;
-    OI_SIZE      = 184;
+    OI_TPL_ID    = 184;  # inline originating template id (M6 inventory persist)
+    OI_TPL_ID_LEN = 216;
+    OI_SIZE      = 224;
 }
-enum OiCap { OI_NAME_CAP = 64; OI_KW_CAP = 64; }
+enum OiCap { OI_NAME_CAP = 64; OI_KW_CAP = 64; OI_TPL_ID_CAP = 32; }
 
 var g_obj_tpls      = 0;
 var g_obj_tpl_count = 0;
@@ -152,8 +154,12 @@ fn item_new(tpl): i64 {
     store64(o + OI_KW_LEN,   copy_bytes_capped(o + OI_KW,   OI_KW_CAP - 1,   tpl + OT_KW,   load64(tpl + OT_KW_LEN)));
     store64(o + OI_DESC_PTR, load64(tpl + OT_DESC_PTR));
     store64(o + OI_DESC_LEN, load64(tpl + OT_DESC_LEN));
+    store64(o + OI_TPL_ID_LEN, copy_bytes_capped(o + OI_TPL_ID, OI_TPL_ID_CAP - 1, tpl + OT_ID, load64(tpl + OT_ID_LEN)));
     return o;
 }
+
+fn oi_tpl_id_ptr(o): i64 { return o + OI_TPL_ID; }
+fn oi_tpl_id_len(o): i64 { return load64(o + OI_TPL_ID_LEN); }
 
 # Copy up to `cap` raw bytes; return bytes copied. (str-free variant of
 # copy_str_capped, for inline-to-inline template copies.)

@@ -4,15 +4,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-09
+
+**M6 — player persistence.** Players now survive a server restart. The gate
+holds: `kill -9` the server mid-session → restart → the player reconnects at
+their last room with full attributes and inventory. Identity is real
+cryptography ([ADR 0004](docs/adr/0004-identity-and-authentication.md)); saves
+are crash-safe and tamper-evident ([ADR 0006](docs/adr/0006-persistence-shape.md)).
+
 ### Added
 
-- **M6-A — persistence dep chain landed.** First external (non-stdlib)
-  dependency: **libro 2.7.1** (append-only SHA-256 hash-chain store — the
-  crash-safe primitive behind "T.Ron" player persistence), pulling **sigil
-  3.6.0** (Ed25519 identity, ADR 0004), sakshi, patra, and agnosys
-  transitively via `[deps.libro]`. Validated end-to-end by
-  `programs/crypto_smoke.cyr` (sha256 + ed25519 round-trip + libro chain
-  append/verify, exit 0).
+- **M6-A — persistence dep chain.** First external (non-stdlib) dependency:
+  **libro 2.7.1** (append-only SHA-256 hash-chain store), pulling **sigil
+  3.6.0** (Ed25519), sakshi, patra, and agnosys transitively via
+  `[deps.libro]`. The opt-in stdlib it needs (`ct`/`keccak`/`thread`/
+  `thread_local`/`random`/`fs`/`process`/…) is declared in `cyrius.cyml`.
+- **M6-B — Ed25519 identity (ADR 0004).** A player's identity is a sigil
+  Ed25519 keypair whose seed is `SHA-256(salt‖passphrase)`. The login flow
+  gained passphrase phases: a new name forges an identity (choose + confirm a
+  passphrase); a known name must present it. Only salt + public key are stored
+  — the secret key is re-derived from the typed passphrase and never written.
+- **M6-C — player save shape.** `data/players/<name>.cyml` (one `[player]`
+  TOML section): identity, class, room (by stable id), attrs, vitals, combat
+  profile, inventory (template ids), and timestamps. Inventory persists via a
+  new `OI_TPL_ID` on item instances and re-instantiates from templates on load.
+- **M6-D — save triggers.** On `save`, on disconnect (`quit` / idle reap /
+  dropped socket), at character creation, and a debounced ~5-min tick sweep of
+  dirty sessions — all out of the command hot path ([ADR 0003](docs/adr/0003-single-thread-event-loop-concurrency.md)).
+- **M6-E — load on login.** A returning player's record is verified and
+  restored, dropping them back into their recorded room (or the start room if
+  it has since been removed).
+- **M6-F — crash-safe writes.** Serialize → write `<name>.cyml.tmp` →
+  atomic `rename(2)`. A crash leaves the complete old or new record, never a
+  torn file. Each record is Ed25519-signed over its prefix; load rejects a
+  corrupt or tampered record rather than loading bad state.
+- **libro audit chain.** Login / save / character-creation / auth-failure /
+  tamper-rejection events append to a hash-linked `data/audit.libro`.
+- **Validation.** `programs/crypto_smoke.cyr` (crypto + chain) and
+  `programs/persist_smoke.cyr` (on-disk save→reload round-trip + auth + tamper)
+  build and run to exit 0; 16 new `persist` unit assertions (256 total, all
+  pass); a live-server `kill -9` → restart → restore exercise passes.
 
 ### Fixed
 

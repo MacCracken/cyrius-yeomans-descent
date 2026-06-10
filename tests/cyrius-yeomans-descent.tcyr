@@ -1,6 +1,11 @@
 # cyrius-yeomans-descent test suite
 # Stdlib auto-included via cyrius.cyml; project modules included explicitly.
 
+# M6 persistence chain — opt-in libs before the modules that use them.
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/libro.cyr"
+
 include "src/telnet.cyr"
 include "src/parser.cyr"
 include "src/world.cyr"
@@ -9,6 +14,7 @@ include "src/session.cyr"
 include "src/item.cyr"
 include "src/combat.cyr"
 include "src/classes.cyr"
+include "src/persist.cyr"
 
 # Feed a byte and assert the returned TelEvent.
 fn feed_is(ts, b, want_ev, name): i64 {
@@ -669,6 +675,75 @@ fn test_idle(): i64 {
     return 0;
 }
 
+# === M6 — persistence: identity, save/load round-trip, auth, tamper ===
+fn test_persist(): i64 {
+    test_group("persist");
+    persist_init();
+
+    # Identity derivation is deterministic and passphrase-sensitive.
+    var sk1 = alloc(SK_LEN); var pk1 = alloc(PK_LEN);
+    var sk2 = alloc(SK_LEN); var pk2 = alloc(PK_LEN);
+    var salt = alloc(SALT_LEN); memset(salt, 0xAB, SALT_LEN);
+    ident_derive(salt, "hunter2", 7, sk1, pk1);
+    ident_derive(salt, "hunter2", 7, sk2, pk2);
+    assert_eq(_bytes_eq(pk1, pk2, PK_LEN), 1, "same salt+pass → same pubkey");
+    ident_derive(salt, "wrongpw", 7, sk2, pk2);
+    assert_eq(_bytes_eq(pk1, pk2, PK_LEN), 0, "different pass → different pubkey");
+
+    # Build a session with an identity + non-default stats, then save.
+    var s = fl_alloc(SS_SIZE); memset(s, 0, SS_SIZE);
+    var nmb = fl_alloc(NAME_CAP); store64(s + SS_NAME_BUF, nmb);
+    memcpy(nmb, "TestPlayer", 10); store64(s + SS_NAME_LEN, 10);
+    var blk = sess_ident(s);
+    memcpy(blk, salt, SALT_LEN);
+    ident_derive(salt, "hunter2", 7, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 1234567);
+    store64(s + SS_ROOM, 0 - 1);
+    store64(s + SS_CLASS, 2);
+    store64(s + SS_HP, 27); store64(s + SS_MAXHP, 33); store64(s + SS_AC, 5);
+    store64(s + SS_HIT, 3); store64(s + SS_NDICE, 2); store64(s + SS_DSIZE, 6); store64(s + SS_DMOD, 1);
+    store64(s + SS_STR, 14); store64(s + SS_DEX, 12); store64(s + SS_CON, 13); store64(s + SS_TEC, 11);
+    store64(s + SS_ENERGY, 18); store64(s + SS_MAXENERGY, 20);
+    store64(s + SS_INV, 0);
+    store64(s + SS_AUTHED, 1);
+    assert_eq(player_save(s), 1, "save returns ok");
+    assert_eq(player_exists("TestPlayer", 10), 1, "record exists after save");
+    assert_eq(player_exists("Nobody", 6), 0, "absent for unknown name");
+
+    # Fresh session + correct passphrase restores every field.
+    var s2 = fl_alloc(SS_SIZE); memset(s2, 0, SS_SIZE);
+    var nmb2 = fl_alloc(NAME_CAP); store64(s2 + SS_NAME_BUF, nmb2);
+    memcpy(nmb2, "TestPlayer", 10); store64(s2 + SS_NAME_LEN, 10);
+    assert_eq(player_auth_load(s2, "hunter2", 7), 1, "right pass → loaded");
+    assert_eq(load64(s2 + SS_HP), 27, "hp restored");
+    assert_eq(load64(s2 + SS_MAXHP), 33, "maxhp restored");
+    assert_eq(load64(s2 + SS_AC), 5, "ac restored");
+    assert_eq(load64(s2 + SS_CLASS), 2, "class restored");
+    assert_eq(load64(s2 + SS_STR), 14, "str restored");
+    assert_eq(load64(s2 + SS_TEC), 11, "tec restored");
+    assert_eq(load64(s2 + SS_ENERGY), 18, "energy restored");
+    assert_eq(load64(s2 + SS_AUTHED), 1, "authed after load");
+
+    # Wrong passphrase is rejected (pubkey mismatch).
+    var s3 = fl_alloc(SS_SIZE); memset(s3, 0, SS_SIZE);
+    var nmb3 = fl_alloc(NAME_CAP); store64(s3 + SS_NAME_BUF, nmb3);
+    memcpy(nmb3, "TestPlayer", 10); store64(s3 + SS_NAME_LEN, 10);
+    assert_eq(player_auth_load(s3, "guessguess", 10), 0, "wrong pass → rejected");
+
+    # Tamper: flip a bit in the signed region → the Ed25519 record signature
+    # rejects it (returns -2 even with the right passphrase).
+    _path_for("TestPlayer", 10, g_persist_path);
+    var tn = file_read_all(g_persist_path, g_persist_slurp, SLURP_CAP - 1);
+    store8(g_persist_slurp + 20, load8(g_persist_slurp + 20) ^ 0x01);
+    file_write_all(g_persist_path, g_persist_slurp, tn);
+    var s4 = fl_alloc(SS_SIZE); memset(s4, 0, SS_SIZE);
+    var nmb4 = fl_alloc(NAME_CAP); store64(s4 + SS_NAME_BUF, nmb4);
+    memcpy(nmb4, "TestPlayer", 10); store64(s4 + SS_NAME_LEN, 10);
+    assert_eq(player_auth_load(s4, "hunter2", 7), 0 - 2, "tampered record → rejected");
+
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -688,6 +763,7 @@ fn main() {
     test_combat();
     test_classes();
     test_idle();
+    test_persist();
 
     return assert_summary();
 }

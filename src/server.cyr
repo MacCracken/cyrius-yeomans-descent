@@ -82,9 +82,31 @@ fn open_listener(port): i64 {
 # === Tick advance — M1-A placeholder, M4-A fills in. ===
 
 var g_tick_count = 0;
+# Ticks between debounced save sweeps (M6-D). Computed at serve start from
+# g_tick_ms so a real run saves every ~5 min; 0 disables (no zone / tests).
+var g_save_interval_ticks = 0;
+
+# Persist every authed session that has changed since its last save. Walks
+# the active list defensively (player_save never unlinks, but mirror the
+# idle-sweep pattern). Queued by the tick — never inline in a command path.
+fn save_sweep(): i64 {
+    var s = g_session_head;
+    while (s != 0) {
+        var nxt = load64(s + SS_NEXT);
+        if (load64(s + SS_AUTHED) == 1) {
+            if (load64(s + SS_SAVE_DIRTY) == 1) { player_save(s); }
+        }
+        s = nxt;
+    }
+    return 0;
+}
+
 fn advance_tick(): i64 {
     g_tick_count = g_tick_count + 1;
     combat_tick_all();   # resolve a combat round for every engaged session
+    if (g_save_interval_ticks > 0) {
+        if (g_tick_count % g_save_interval_ticks == 0) { save_sweep(); }
+    }
     return 0;
 }
 
@@ -131,6 +153,9 @@ fn session_list_remove(s): i64 {
 
 # === Session disconnect — unlink, remove from epoll, free. ===
 fn drop_session(epfd, s): i64 {
+    # M6-D: flush state on the way out — covers `quit`, idle reap, and
+    # client-side disconnects alike. A no-op for unauthenticated sessions.
+    if (load64(s + SS_AUTHED) == 1) { player_save(s); }
     sys_epoll_ctl(epfd, EPOLL_CTL_DEL, load64(s + SS_FD), 0);
     session_list_remove(s);
     session_free(s);
@@ -562,6 +587,12 @@ fn cmd_serve(port): i64 {
     if (cc >= 0) { print_num(cc); println(" player classes"); }
     else { println("world: no classes loaded — players spawn classless"); }
     combat_seed(clock_now_ms());   # seed the hidden-roll RNG (M4)
+    # M6: persistence engine — buffers, data/ dirs, libro audit chain — and
+    # the debounced save cadence (~5 min of ticks, never below one).
+    persist_init();
+    g_save_interval_ticks = 300000 / g_tick_ms;
+    if (g_save_interval_ticks < 1) { g_save_interval_ticks = 1; }
+    println("persist: player saves + audit chain ready");
     println("yeoman's descent — starting event-loop listener");
     println("server: listening on port");
     print_num(port);
