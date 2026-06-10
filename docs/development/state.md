@@ -7,6 +7,12 @@
 
 ## Version
 
+**0.6.1** — polish patch, 2026-06-09. Combat reads as lived-in: onlookers
+see fights in third person (`room_combat_line`), mobs show qualitative
+health (`mob_condition`, in `look` / `examine`), and every class recovers
+HP out of combat (CON-scaled, in `classes_upkeep`). No new milestone, no
+new deps. Details below are the 0.6.0 (M5) baseline this builds on.
+
 **0.6.0** — M5 close, 2026-06-09. The four classes are playable. Character
 creation asks your calling (Pikeman / Splicer / Courier / Chaplain,
 `src/classes.cyr` + `data/classes.cyml`); each brings its own attributes,
@@ -94,7 +100,7 @@ Binary at `build/cyrius-yeomans-descent` (~229 KB with `CYRIUS_DCE=1`).
 
 ## Tests
 
-`cyrius test tests/cyrius-yeomans-descent.tcyr` — 232 unit assertions:
+`cyrius test tests/cyrius-yeomans-descent.tcyr` — 240 unit assertions:
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -119,11 +125,11 @@ Binary at `build/cyrius-yeomans-descent` (~229 KB with `CYRIUS_DCE=1`).
 - **combat** (M4) — `parse_dice` (`NdM+K` + malformed default), `die`/
   `roll` bounds, `combat_try_hit` hit/miss distribution, mob + object
   template loading + field values, spawn / keyword-find / remove, corpse
-  synthesis + loot population
+  synthesis + loot population, `mob_condition` thresholds (0.6.1)
 - **classes** (M5) — class load + field values, `cl_id_eq`,
   `class_by_input` (number / prefix / trim / invalid / out-of-range),
   `apply_class`, `classes_upkeep` (energy regen cap, cooldown + buff
-  decay), effective-stat buff helpers (`player_eff_ac/hit`, dmg bonus)
+  decay, 0.6.1 out-of-combat HP regen), effective-stat buff helpers
 - **idle** — the `session_is_idle` threshold predicate
 
 Fuzz: `cyrius fuzz` → `fuzz/parser_fuzz.fcyr`, 100k random inputs +

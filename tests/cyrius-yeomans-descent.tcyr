@@ -551,6 +551,15 @@ fn test_combat(): i64 {
     mob_remove(m);
     assert_eq(room_mob_head(room_at(0)), 0, "removed from room list");
 
+    # mob_condition by HP fraction (rustdrone has 18 max HP) — 0.6.1.
+    var mc = mob_spawn(rd, 0);
+    assert_eq(streq(mob_condition(mc), "unhurt"),          1, "full HP → unhurt");
+    mi_set_hp(mc, 14); assert_eq(streq(mob_condition(mc), "lightly wounded"), 1, "77% → lightly wounded");
+    mi_set_hp(mc, 9);  assert_eq(streq(mob_condition(mc), "wounded"),         1, "50% → wounded");
+    mi_set_hp(mc, 5);  assert_eq(streq(mob_condition(mc), "badly wounded"),   1, "27% → badly wounded");
+    mi_set_hp(mc, 2);  assert_eq(streq(mob_condition(mc), "near death"),      1, "11% → near death");
+    mob_remove(mc);
+
     # Corpse + loot.
     var c = corpse_new("a test mob", 10);
     assert_eq(oi_is_corpse(c), 1, "corpse_new flags corpse");
@@ -612,6 +621,21 @@ fn test_classes(): i64 {
     classes_upkeep(s);
     classes_upkeep(s);
     assert_eq(load64(s + SS_CD0), 0, "cooldown floors at 0");
+
+    # Out-of-combat recovery (0.6.1): CON-scaled HP regen, only when not
+    # engaged. Pikeman CON 16 → +1 + 16/5 = +4 per tick.
+    store64(s + SS_TARGET, 0);
+    store64(s + SS_HP, 10);
+    classes_upkeep(s);
+    assert_eq(load64(s + SS_HP), 14, "out-of-combat regen +4 (CON 16)");
+    store64(s + SS_TARGET, 1);
+    store64(s + SS_HP, 14);
+    classes_upkeep(s);
+    assert_eq(load64(s + SS_HP), 14, "no regen while engaged");
+    store64(s + SS_TARGET, 0);
+    store64(s + SS_HP, 39);
+    classes_upkeep(s);
+    assert_eq(load64(s + SS_HP), 40, "regen caps at max HP");
     fl_free(s);
 
     # Effective-stat helpers (combat.cyr buffs).

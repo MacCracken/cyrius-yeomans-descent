@@ -15,7 +15,7 @@ include "src/combat.cyr"
 include "src/classes.cyr"
 include "src/server.cyr"
 
-var VERSION_STRING = "0.6.0";
+var VERSION_STRING = "0.6.1";
 
 fn print_banner(): i64 {
     println("yeoman's descent — a cyrius-native text MUD");

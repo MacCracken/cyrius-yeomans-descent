@@ -510,7 +510,14 @@ fn session_append_mobs(s, room): i64 {
     while (m != 0) {
         session_appendtx_cstr(s, ansi_mob());
         session_appendtx(s, mi_name_ptr(m), mi_name_len(m));
-        session_appendtx_cstr(s, " is here.");
+        session_appendtx_cstr(s, " is here");
+        # Show wounds (a fresh, unhurt mob reads cleaner without the tag).
+        if (mi_hp(m) < mt_hp(mi_tpl(m))) {
+            session_appendtx_cstr(s, " (");
+            session_appendtx_cstr(s, mob_condition(m));
+            session_appendtx_cstr(s, ")");
+        }
+        session_appendtx_cstr(s, ".");
         session_appendtx_cstr(s, ansi_reset());
         session_appendtx_cstr(s, "\r\n");
         m = mi_next(m);
@@ -649,6 +656,9 @@ fn cmd_examine(s, pa): i64 {
             session_appendtx(s, mt_desc_ptr(tpl), mt_desc_len(tpl));
             session_appendtx_cstr(s, "\r\n");
         }
+        session_appendtx_cstr(s, "It looks ");
+        session_appendtx_cstr(s, mob_condition(m));
+        session_appendtx_cstr(s, ".\r\n");
         return 0;
     }
     session_appendtx_cstr(s, "You see no ");

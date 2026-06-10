@@ -4,6 +4,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-06-09
+
+A polish patch that completes the lived-in feel of combat — no new
+milestone, no new dependencies. Fights are now visible to bystanders, mob
+health reads at a glance, and every class recovers between fights.
+
+### Added
+
+- **Onlooker combat visibility.** Other players in a room now see a fight
+  in third person — `alice strikes a rust-drone.`, `a rust-drone hits
+  alice!`, `… collapses, destroyed.` — instead of nothing. Auto-attacks,
+  misses, ability strikes, and kills all broadcast (`room_combat_line`,
+  non-dropping). The combatant still gets the detailed first-person line.
+- **Mob health condition.** `mob_condition` reports qualitative health
+  (unhurt / lightly wounded / wounded / badly wounded / near death) from
+  the HP fraction; shown in the room's mob list (when hurt) and in
+  `examine`. Hidden numbers stay hidden.
+- **Out-of-combat recovery.** A player regenerates HP each tick while not
+  engaged, scaled by CON (`+1 + CON/5`), so every class — not just the
+  Chaplain — heals between fights. No regen mid-combat (abilities only).
+
+### Changed
+
+- `classes_upkeep` now also runs out-of-combat HP recovery.
+- 8 new unit assertions (240 total): `mob_condition` thresholds, CON-scaled
+  regen, no-regen-while-engaged, regen HP cap.
+
 ## [0.6.0] — 2026-06-09
 
 M5 — the four classes go from text-table flavor to playable mechanics.

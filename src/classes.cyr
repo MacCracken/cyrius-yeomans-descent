@@ -260,7 +260,8 @@ fn cl_id_eq(idx, cstr): i64 {
     return 1;
 }
 
-# Per-tick upkeep for one session: energy regen, cooldown + buff decay.
+# Per-tick upkeep for one session: energy regen, cooldown + buff decay,
+# and out-of-combat HP recovery (0.6.1).
 fn classes_upkeep(s): i64 {
     var e = load64(s + SS_ENERGY) + ENERGY_REGEN;
     if (e > load64(s + SS_MAXENERGY)) { e = load64(s + SS_MAXENERGY); }
@@ -270,6 +271,18 @@ fn classes_upkeep(s): i64 {
     if (load64(s + SS_CD2) > 0) { store64(s + SS_CD2, load64(s + SS_CD2) - 1); }
     if (load64(s + SS_GUARD) > 0) { store64(s + SS_GUARD, load64(s + SS_GUARD) - 1); }
     if (load64(s + SS_STIM) > 0)  { store64(s + SS_STIM, load64(s + SS_STIM) - 1); }
+
+    # Recover HP while out of combat — CON-scaled, so tankier classes mend
+    # faster. In combat (SS_TARGET set) you heal only via abilities.
+    if (load64(s + SS_TARGET) == 0) {
+        var hp = load64(s + SS_HP);
+        var max = load64(s + SS_MAXHP);
+        if (hp < max) {
+            hp = hp + 1 + load64(s + SS_CON) / 5;
+            if (hp > max) { hp = max; }
+            store64(s + SS_HP, hp);
+        }
+    }
     return 0;
 }
 
@@ -340,6 +353,7 @@ fn ability_strike(s, m, dmg, lead): i64 {
     session_appendtx_cstr(s, " damage!");
     session_appendtx_cstr(s, ansi_reset());
     session_appendtx_cstr(s, "\r\n");
+    cb_player_act(s, m, " hammers ", "!\r\n");   # onlookers see the ability land
     if (mi_hp(m) <= 0) { mob_died(s, m); }
     return 0;
 }

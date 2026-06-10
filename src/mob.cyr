@@ -199,6 +199,20 @@ fn world_load_mobs(path): i64 {
     return n;
 }
 
+# Qualitative health of a mob instance, from its HP fraction (0.6.1).
+# Lets a player read the state of a fight without exposing hidden numbers.
+fn mob_condition(m): i64 {
+    var max = mt_hp(mi_tpl(m));
+    if (max <= 0) { return "unhurt"; }
+    var hp = mi_hp(m);
+    if (hp >= max) { return "unhurt"; }
+    var pct = hp * 100 / max;
+    if (pct >= 75) { return "lightly wounded"; }
+    if (pct >= 50) { return "wounded"; }
+    if (pct >= 25) { return "badly wounded"; }
+    return "near death";
+}
+
 # Find a mob template by id, or 0.
 fn mob_tpl_by_id(buf, len): i64 {
     var i = 0;

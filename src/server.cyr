@@ -292,6 +292,32 @@ fn room_append_present(viewer, room_idx): i64 {
     return 0;
 }
 
+# Broadcast a third-person combat line to onlookers in `room_idx` (not the
+# combatant `except_s`): a leading CRLF, then subject + mid + object (if
+# obj_len > 0) + tail. Subject/object are (ptr, len) so either a player
+# name or a mob name fits — "<alice> strikes <drone>." or "<drone> hits
+# <alice>!". Non-dropping (combat tick safety). (0.6.1)
+fn room_combat_line(room_idx, except_s, subj_p, subj_l, mid, obj_p, obj_l, tail): i64 {
+    var t = g_session_head;
+    while (t != 0) {
+        var nxt = load64(t + SS_NEXT);
+        if (t != except_s) {
+            if (load64(t + SS_PHASE) == PHASE_CMD) {
+                if (load64(t + SS_ROOM) == room_idx) {
+                    session_appendtx_cstr(t, "\r\n");
+                    session_appendtx(t, subj_p, subj_l);
+                    session_appendtx_cstr(t, mid);
+                    if (obj_l > 0) { session_appendtx(t, obj_p, obj_l); }
+                    session_appendtx_cstr(t, tail);
+                    flush_session(g_epfd, t);
+                }
+            }
+        }
+        t = nxt;
+    }
+    return 0;
+}
+
 # Find a logged-in player in `room_idx` whose name the typed noun
 # np[0..nl) prefixes (case-insensitive), excluding `viewer`. Returns the
 # session ptr or 0. First match wins.
