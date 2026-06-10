@@ -268,6 +268,7 @@ enum Verb {
     VERB_PATCH     = 36;   # Chaplain
     VERB_STIM      = 37;
     VERB_RALLY     = 38;
+    VERB_PASSWD    = 39;   # 0.8.1 — change passphrase
 }
 
 # === verb_lookup — resolve token `i` to a Verb id (aliases folded in).
@@ -320,6 +321,8 @@ fn verb_lookup(pa, i): i64 {
     # session
     if (tok_eq(pa, i, "quit") == 1) { return VERB_QUIT; }
     if (tok_eq(pa, i, "save") == 1) { return VERB_SAVE; }
+    if (tok_eq(pa, i, "passwd") == 1)   { return VERB_PASSWD; }
+    if (tok_eq(pa, i, "password") == 1) { return VERB_PASSWD; }
     if (tok_eq(pa, i, "help") == 1) { return VERB_HELP; }
 
     # class abilities (M5)
@@ -375,6 +378,7 @@ fn verb_name(v): i64 {
     if (v == VERB_EMOTE)     { return "emote"; }
     if (v == VERB_QUIT)      { return "quit"; }
     if (v == VERB_SAVE)      { return "save"; }
+    if (v == VERB_PASSWD)    { return "passwd"; }
     if (v == VERB_HELP)      { return "help"; }
     return "";
 }

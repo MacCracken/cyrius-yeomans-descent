@@ -49,6 +49,8 @@ var g_fmt_scratch   = 0;   # fmt_int_buf temp
 var g_audit_chain   = 0;
 var g_audit_store   = 0;
 var g_persist_ready = 0;
+var g_loaded_last_login = 0;   # 0.8.1 — prior last_login captured at load,
+                               # for the "last seen …" returning-player greeting
 
 # === Boot: buffers + data dirs + audit chain. Idempotent. ===
 fn persist_init(): i64 {
@@ -366,10 +368,33 @@ fn player_auth_load(s, pass, passlen): i64 {
     var invv = toml_get(pairs, "inv");
     if (invv != 0) { _restore_inv(s, str_data(invv), str_len(invv)); }
 
+    g_loaded_last_login = toml_int(pairs, "last_login", 0);   # 0.8.1 greeting
     store64(s + SS_AUTHED, 1);
     store64(s + SS_SAVE_DIRTY, 0);
     audit_event(SEV_INFO, "login.ok", nm, nl);
     return 1;
+}
+
+# 0.8.1 — append a coarse "N <unit>s ago" relative time for `secs` seconds.
+fn _plural_s(s, n): i64 {
+    if (n != 1) { session_appendtx_cstr(s, "s"); }
+    return 0;
+}
+fn session_append_ago(s, secs): i64 {
+    if (secs < 60)    { session_appendtx_cstr(s, "moments ago"); return 0; }
+    if (secs < 3600)  {
+        var m = secs / 60;
+        session_appendtx_num(s, m); session_appendtx_cstr(s, " minute"); _plural_s(s, m); session_appendtx_cstr(s, " ago");
+        return 0;
+    }
+    if (secs < 86400) {
+        var h = secs / 3600;
+        session_appendtx_num(s, h); session_appendtx_cstr(s, " hour"); _plural_s(s, h); session_appendtx_cstr(s, " ago");
+        return 0;
+    }
+    var d = secs / 86400;
+    session_appendtx_num(s, d); session_appendtx_cstr(s, " day"); _plural_s(s, d); session_appendtx_cstr(s, " ago");
+    return 0;
 }
 
 # === login phase handlers (M6-B/E) =========================================
@@ -377,11 +402,13 @@ fn player_auth_load(s, pass, passlen): i64 {
 
 fn login_begin_pass(s): i64 {
     store64(s + SS_PHASE, PHASE_PASS);
+    session_echo_off(s);   # 0.8.1 — don't echo the passphrase
     session_appendtx_cstr(s, "Passphrase: ");
     return 0;
 }
 fn login_begin_newpass(s): i64 {
     store64(s + SS_PHASE, PHASE_NEWPASS);
+    session_echo_off(s);   # 0.8.1
     session_appendtx_cstr(s, "New operative — choose a passphrase (4-64 chars): ");
     return 0;
 }
@@ -391,7 +418,13 @@ fn login_on_pass(s, buf, len): i64 {
     var rc = player_auth_load(s, buf, len);
     if (rc == 1) {
         store64(s + SS_PHASE, PHASE_CMD);
+        session_echo_on(s);   # 0.8.1 — restore echo now the passphrase is in
         session_appendtx_cstr(s, "\r\nThe lock yields. Welcome back to the Under-Grid.\r\n");
+        if (g_loaded_last_login > 0) {
+            session_appendtx_cstr(s, "Last seen ");
+            session_append_ago(s, get_epoch_secs() - g_loaded_last_login);
+            session_appendtx_cstr(s, ".\r\n");
+        }
         session_resume_world(s);
         session_send_cmd_prompt(s);
         return 0;
@@ -399,9 +432,10 @@ fn login_on_pass(s, buf, len): i64 {
     if (rc == 0) {
         audit_event(SEV_WARNING, "login.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
         session_appendtx_cstr(s, "\r\nThat passphrase is wrong.\r\n");
-        login_begin_pass(s);
+        login_begin_pass(s);   # re-prompt, echo stays off
         return 0;
     }
+    session_echo_on(s);
     session_appendtx_cstr(s, "\r\nYour record is unreadable or has been tampered with. An operator must intervene.\r\n");
     store64(s + SS_QUIT, 1);
     return 0;
@@ -430,9 +464,64 @@ fn login_on_confirm(s, buf, len): i64 {
     }
     store64(blk + IDENT_CREATED, get_epoch_secs());
     store64(s + SS_AUTHED, 1);
+    session_echo_on(s);   # 0.8.1 — passphrase set; restore echo
     audit_event(SEV_INFO, "char.create", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
     session_appendtx_cstr(s, "\r\nIdentity sealed into the grid.\r\n");
     store64(s + SS_PHASE, PHASE_CLASS);
     class_send_prompt(s);
+    return 0;
+}
+
+# === 0.8.1 — passwd: change passphrase from inside the world. =============
+# Re-keys the player: a fresh random salt + the new passphrase derive a new
+# Ed25519 identity, the record is re-signed and saved. Two-step (new +
+# confirm) with echo suppressed, mirroring character creation but returning
+# to the command prompt. Phases PHASE_CHPASS_NEW / PHASE_CHPASS_CONFIRM.
+
+fn passwd_begin(s): i64 {
+    if (load64(s + SS_AUTHED) == 0) {
+        session_appendtx_cstr(s, "You have no persistent record to re-key.\r\n");
+        return 0;
+    }
+    store64(s + SS_PHASE, PHASE_CHPASS_NEW);
+    session_echo_off(s);
+    session_appendtx_cstr(s, "New passphrase (4-64 chars): ");
+    return 0;
+}
+
+# Stash the candidate identity in a scratch block (not SS_IDENT — that still
+# holds the live key until confirm commits). g_persist_dec[0..120) is the
+# candidate ident block: salt|pk|sk.
+fn chpass_on_new(s, buf, len): i64 {
+    if (len < PASS_MIN) { session_appendtx_cstr(s, "Too short. New passphrase (4-64 chars): "); return 0; }
+    if (len > PASS_MAX) { session_appendtx_cstr(s, "Too long. New passphrase (4-64 chars): "); return 0; }
+    var cand = g_persist_dec;            # candidate salt|pk|sk
+    random_bytes(cand, SALT_LEN);
+    ident_derive(cand, buf, len, cand + IDENT_SK, cand + IDENT_PK);
+    store64(s + SS_PHASE, PHASE_CHPASS_CONFIRM);
+    session_appendtx_cstr(s, "Confirm new passphrase: ");
+    return 0;
+}
+
+fn chpass_on_confirm(s, buf, len): i64 {
+    var cand = g_persist_dec;
+    var pk2 = g_persist_dec + 128;
+    var sk2 = g_persist_dec + 192;
+    ident_derive(cand, buf, len, sk2, pk2);
+    if (_bytes_eq(pk2, cand + IDENT_PK, PK_LEN) == 0) {
+        store64(s + SS_PHASE, PHASE_CHPASS_NEW);
+        session_appendtx_cstr(s, "\r\nThose don't match. New passphrase (4-64 chars): ");
+        return 0;
+    }
+    # Commit: copy candidate salt+pk+sk into the live ident block (preserve
+    # the original creation timestamp), re-sign + save under the new key.
+    var blk = sess_ident(s);
+    memcpy(blk, cand, IDENT_SK + SK_LEN);   # salt(16)|pk(32)|sk(64) = 112 bytes
+    store64(s + SS_PHASE, PHASE_CMD);
+    session_echo_on(s);
+    player_save(s);
+    audit_event(SEV_INFO, "passwd.change", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    session_appendtx_cstr(s, "\r\nPassphrase changed. Your record is re-keyed.\r\n");
+    session_send_cmd_prompt(s);
     return 0;
 }

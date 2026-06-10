@@ -327,6 +327,52 @@ fn render_stats(s): i64 {
     return 0;
 }
 
+# === 0.8.3 — operator read-only verbs (@who, @reset). ====================
+# Groundwork for the M8 Joshua interface. Unguarded for now (like @stats);
+# M8 lands operator authentication in front of the @-namespace.
+
+# @who — every in-world session (name + the room it's standing in).
+fn render_who(s): i64 {
+    session_appendtx_cstr(s, "-- connected --\r\n");
+    var n = 0;
+    var p = g_session_head;
+    while (p != 0) {
+        var room = load64(p + SS_ROOM);
+        if (room >= 0) {
+            session_appendtx_cstr(s, "  ");
+            session_appendtx(s, load64(p + SS_NAME_BUF), load64(p + SS_NAME_LEN));
+            session_appendtx_cstr(s, " — ");
+            session_appendtx(s, room_title_ptr(room_at(room)), room_title_len(room_at(room)));
+            session_appendtx_cstr(s, "\r\n");
+            n = n + 1;
+        }
+        p = load64(p + SS_NEXT);
+    }
+    if (n == 0) { session_appendtx_cstr(s, "  (no one in-world)\r\n"); }
+    session_appendtx_cstr(s, "in-world: ");
+    session_appendtx_num(s, n);
+    session_appendtx_cstr(s, "\r\n");
+    return 0;
+}
+
+# @reset — force an immediate zone reset, bypassing the presence gate. The
+# top-up is idempotent (only dead mobs / missing objects respawn), so a
+# forced reset with players present just refills what's gone. Also re-arms
+# the timer and writes the standard reset log line.
+fn render_reset(s): i64 {
+    if (world_room_count() == 0) { session_appendtx_cstr(s, "No zone loaded.\r\n"); return 0; }
+    var mobs = zone_reset_mobs();
+    var objs = zone_reset_objs();
+    g_zone_last_reset_ms = clock_now_ms();
+    zone_reset_log(mobs, objs);
+    session_appendtx_cstr(s, "zone reset forced — mobs +");
+    session_appendtx_num(s, mobs);
+    session_appendtx_cstr(s, ", objs +");
+    session_appendtx_num(s, objs);
+    session_appendtx_cstr(s, "\r\n");
+    return 0;
+}
+
 # === Drain a session's tx queue, arming / unarming EPOLLOUT to match. ===
 #
 # Returns 1 if the session is still alive, 0 if it should be dropped.

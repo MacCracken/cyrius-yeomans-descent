@@ -4,6 +4,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-06-10
+
+Operator read-only verbs — groundwork for the M8 Joshua interface, surfacing
+live server state from inside the world.
+
+### Added
+
+- **`@who`** — lists every in-world session (name + the room it's standing in)
+  and the in-world count.
+- **`@reset`** — forces an immediate zone reset, bypassing the presence gate.
+  The top-up is idempotent (only dead mobs / missing objects respawn), re-arms
+  the reset timer, and writes the standard reset log line. Reports
+  `mobs +N, objs +M`.
+
+### Notes
+
+- The `@`-verb namespace (`@stats`, `@who`, `@reset`) is currently unguarded;
+  M8 lands operator authentication in front of it.
+
+## [0.8.2] — 2026-06-10
+
+A content patch — the Hub gets lived-in. The M7-D object-respawn mechanism
+finally has something to act on: ambient loot and flavor now populate the
+world and restock on each zone reset.
+
+### Added
+
+- **Six flavor/loot object templates** (`data/zones/hub.objs.cyml`): a work
+  notice, a dented tankard, a foil ration, a slag ingot, a clouded optic, and
+  a shrine-token — alongside the existing scrip / cell / shard / core.
+- **`objects =` spawns across 11 Hub rooms** (13 objects total), thematically
+  placed: a notice at the gate and market arch, a tankard in the Flagon, a
+  ration in the bunks, scrap on the stalls and through the foundry, scrip at
+  the exchange, offerings at the Drowned Shrine. They render on `look` and, via
+  M7-D, respawn when the zone resets — so the world restocks itself.
+
+## [0.8.1] — 2026-06-10
+
+A login & identity polish patch — no new milestone. Passphrases stay off the
+screen, returning players get a greeting, and you can change your passphrase
+from inside the world.
+
+### Added
+
+- **`passwd` verb.** Re-key your character from the command prompt: a fresh
+  random salt + the new passphrase derive a new Ed25519 identity, the record
+  is re-signed and saved ([ADR 0004](docs/adr/0004-identity-and-authentication.md)).
+  Two-step (new + confirm), echo-suppressed, audited as `passwd.change`. The
+  old passphrase stops working immediately.
+- **Last-seen greeting.** A returning player is welcomed with `Last seen N
+  <units> ago`, computed from the record's prior `last_login`.
+
+### Changed
+
+- **Passphrases no longer echo.** The server now sends `IAC WILL ECHO` before
+  every passphrase prompt (login, new-character, and `passwd`) and `IAC WONT
+  ECHO` once it's entered, so conformant Telnet clients hide the keystrokes —
+  the deferred ADR-0004 item. Clients that ignore ECHO behave as before.
+- `cmd_on_line` re-prompts with `> ` only when still at the command phase, so a
+  verb that switches phase (like `passwd`) doesn't double-prompt.
+- Toolchain pin → **6.1.22**.
+
 ## [0.8.0] — 2026-06-10
 
 **M7 — zone resets.** The world heals itself: mobs and loot respawn to the

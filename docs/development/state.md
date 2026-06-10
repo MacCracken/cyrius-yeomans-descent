@@ -7,6 +7,28 @@
 
 ## Version
 
+**0.8.3** — operator verbs, 2026-06-10. `@who` lists in-world sessions (name +
+room) and `@reset` forces an immediate zone reset (idempotent top-up, re-arms
+the timer, logs it) — read-only Joshua groundwork (`render_who`/`render_reset`
+in server.cyr). The `@`-namespace is still unguarded; M8 adds operator auth.
+284 tests pass; live-verified.
+
+**0.8.2** — content patch, 2026-06-10. The Hub gets lived-in: six new flavor/
+loot object templates (notice, tankard, ration, ingot, optic, shrine-token) and
+`objects =` spawns across 11 rooms (13 objects) give M7-D's object respawn
+something to act on — ambient loot renders on `look` and restocks on each zone
+reset. Content-only; 284 tests pass, boot spawns 13 objects.
+
+**0.8.1** — login/identity polish, 2026-06-10. Passphrases no longer echo
+(server sends `IAC WILL/WONT ECHO` around every passphrase prompt — login,
+new-character, and the new `passwd` verb), so conformant clients hide the
+keystrokes (the deferred ADR-0004 item). Returning players get a `Last seen N
+ago` greeting from the record's prior `last_login`. The `passwd` verb re-keys a
+character in-world (fresh salt + new passphrase → new Ed25519 identity, re-signed
++ saved, audited; old passphrase dies immediately) via two echo-suppressed phases
+`PHASE_CHPASS_NEW`/`_CONFIRM`. 284 tests pass; live-verified (echo bytes + passwd
++ last-seen + old-pass rejection). No new milestone. Toolchain pin → 6.1.22.
+
 **0.8.0** — M7 close, 2026-06-10. Zones heal themselves. The zone header's
 `reset_secs` (Hub: 900) drives a reset that respawns mobs and loot to the
 authored layout — but `maybe_zone_reset` (in `advance_tick`) defers while any
@@ -52,7 +74,7 @@ persistence (M6) is next.**
 
 ## Toolchain
 
-- **Cyrius pin**: `6.1.21` (`cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.1.22` (`cyrius.cyml [package].cyrius`)
 
 ## Source layout
 
@@ -247,13 +269,19 @@ You are picking up at **M8 — Joshua management interface** ([roadmap.md M8](ro
 
 ### What M8 needs (sketch)
 
-1. **Control channel** — decide the surface: a privileged Telnet verb set
-   (`@who`/`@reload`/`@reset`/`@boot <name>`), a separate admin socket, or a
-   signal/file trigger. ADR-worthy if it adds a new wire/auth surface.
-2. **Operations** — list/boot sessions (walk `g_session_head`), reload a zone
-   (re-run `world_load_*` + respawn), force a reset, dump counters/logs.
-3. **Auth** — operator authentication (reuse the sigil/ADR-0004 machinery, or
-   a separate operator credential). Telnet-no-TLS caveat applies.
+1. **Control channel** — `@stats`/`@who`/`@reset` already exist (0.8.3,
+   `render_*` in server.cyr) but are **unguarded**. Decide the full surface
+   (add `@reload`/`@boot <name>`?) and whether it stays in-band Telnet verbs or
+   moves to a separate admin socket / signal trigger. ADR-worthy if it adds a
+   new wire/auth surface.
+2. **Operations** — `@who` (done) lists sessions; still want boot-session
+   (walk `g_session_head` + `drop_session`), reload a zone (re-run
+   `world_load_*` + `world_spawn_all`/`zone_reset_*`), `@reset` (done), dump
+   counters/logs.
+3. **Auth** — gate the `@`-namespace behind operator authentication (reuse the
+   sigil/ADR-0004 machinery, or a separate operator credential). Telnet-no-TLS
+   caveat applies. **This is the main new work** — the operations are mostly
+   wired already.
 
 ### Quick boot sanity
 

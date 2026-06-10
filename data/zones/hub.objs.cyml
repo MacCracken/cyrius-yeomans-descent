@@ -29,3 +29,51 @@ keywords = "core power sentinel intact"
 ---
 A war-frame's heart, still humming with banked charge. A genuine prize —
 the kind of salvage that starts feuds.
+[[entries]]
+kind = "obj"
+id = "notice"
+name = "a scrawled work-notice"
+keywords = "notice work posting paper board"
+---
+A scrap of board hung with grievances and job-offers in five hands of ink.
+Most are crossed out. A few are bait.
+[[entries]]
+kind = "obj"
+id = "tankard"
+name = "a dented tankard"
+keywords = "tankard mug cup dented"
+---
+Pressed from a reclaimed fuel-can, its rim hammered smooth by a thousand lips.
+It smells, forever, of the Flagon's ozone brew.
+[[entries]]
+kind = "obj"
+id = "ration"
+name = "a foil ration brick"
+keywords = "ration brick foil food bar"
+---
+A dense slab of pressed protein and regret, sealed in scavenged foil. The
+label is long gone; the date was always optimistic.
+[[entries]]
+kind = "obj"
+id = "ingot"
+name = "a half-cast slag ingot"
+keywords = "ingot slag metal bar cast"
+---
+A stub of recast hull-metal, one end still bright where the mould failed.
+Heavy, honest, and worth a few chits to the right buyer.
+[[entries]]
+kind = "obj"
+id = "optic"
+name = "a clouded targeting optic"
+keywords = "optic lens scope targeting glass"
+---
+A war-frame's eye, its lens fogged to milk with age. Dead — but the casing
+alone would fetch a meal.
+[[entries]]
+kind = "obj"
+id = "relic"
+name = "a salt-crusted shrine-token"
+keywords = "relic token shrine charm offering"
+---
+A blank disc of corroded alloy, worn smooth by handling and prayer. It means
+nothing, and the faithful would knife you for it.

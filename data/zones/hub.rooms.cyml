@@ -7,6 +7,7 @@ kind = "room"
 id = "hub.gate"
 title = "The Arcology Gate"
 exit_n = "hub.concourse"
+objects = "notice"
 ---
 A blast door the size of a tenement stands welded half-open, its hydraulics
 long since stripped for parts. Cold air sighs in from the wastes behind you;
@@ -32,6 +33,7 @@ title = "The Rusted Flagon"
 exit_s = "hub.concourse"
 exit_u = "hub.galleries"
 exit_e = "hub.bunks"
+objects = "tankard"
 ---
 The tavern that gives the Hub its heart: a brew-vat the size of a mech-hull
 hisses behind the bar, and the air is thick with yeast and ozone. Faces turn,
@@ -42,6 +44,7 @@ kind = "room"
 id = "hub.bunks"
 title = "The Flop Bunks"
 exit_w = "hub.flagon"
+objects = "ration"
 ---
 Coffin-racks of canvas and wire stacked six high, rented by the watch. A few
 sleepers twitch behind drawn curtains. It is, against all odds, almost quiet
@@ -62,6 +65,7 @@ id = "market.arch"
 title = "Market Arch"
 exit_s = "hub.galleries"
 exit_n = "market.plaza"
+objects = "notice"
 ---
 A triumphal arch built from the casing of a fallen orbital, its plating still
 scorched. Hawkers have colonised every niche. Beyond it, north, the plaza
@@ -84,6 +88,7 @@ title = "The Scrap Stalls"
 exit_w = "market.plaza"
 exit_n = "market.fence"
 mobs = "scavver scavver"
+objects = "optic shard"
 ---
 Trestle after trestle of sorted ruin: capacitor banks, bone-dry cells, optics
 clouded with age. A stallholder eyes your pockets with professional interest.
@@ -105,6 +110,7 @@ id = "market.scrip"
 title = "The Scrip Exchange"
 exit_s = "market.plaza"
 exit_e = "market.fence"
+objects = "scrip"
 ---
 A fortified booth where Hub-scrip is weighed against a dozen dead currencies.
 The teller sits behind armoured glass, abacus in one hand, stun-baton in the
@@ -115,6 +121,7 @@ id = "foundry.mouth"
 title = "Foundry Mouth"
 exit_w = "hub.concourse"
 exit_e = "foundry.floor"
+objects = "ingot"
 ---
 A throat of corrugated iron exhaling forge-heat and the clangour of work. A
 hand-painted sign warns that the Guild is not liable for your limbs. The
@@ -160,6 +167,7 @@ id = "foundry.cooling"
 title = "The Cooling Racks"
 exit_w = "foundry.floor"
 exit_n = "foundry.overseer"
+objects = "ingot"
 ---
 Row upon row of fresh-cast plate, ticking and groaning as it sheds its heat.
 The air here is almost bearable, almost. The casting floor is west; the
@@ -169,6 +177,7 @@ kind = "room"
 id = "foundry.slag"
 title = "The Slag Pits"
 exit_n = "foundry.floor"
+objects = "shard"
 ---
 Where the foundry buries its failures: a sunken trench of cooled slag and
 twisted rejects, picked over by figures who do not look up. It has the feel of
@@ -200,6 +209,7 @@ id = "under.pipes"
 title = "The Pipe Warrens"
 exit_e = "under.cistern"
 exit_s = "under.dark"
+objects = "cell"
 ---
 A clotted tangle of trunk-main and conduit, some still warm, some weeping
 coolant that should not be touched. The going is tight and the dark is total
@@ -221,6 +231,7 @@ id = "under.shrine"
 title = "The Drowned Shrine"
 exit_n = "under.cistern"
 exit_w = "under.dark"
+objects = "relic cell"
 ---
 A shrine to no god anyone will name, half-sunk in the cistern's overflow:
 guttering bio-lume, offerings of clean water and working cells, a smell of
