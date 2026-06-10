@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-09
+
+M4 — the tick gets a job. The placeholder 2.5 s Combat Tick from M1 now
+resolves combat: a player engages a mob with `kill`, and each tick both
+trade hidden-roll attacks until one dies. Mobs leave lootable corpses;
+players respawn at the Hub. The full gameplay loop — explore, fight, loot,
+carry, die, respawn — is playable end to end. Verified under load: 32
+players × 64 mobs tick at a p99 of ~62 µs, ~800× inside the 50 ms budget.
+
+### Added
+
+- **Mobs** (`src/mob.cyr`). Templates load from `<zone>.mobs.cyml`
+  (ADR 0005, `kind = "mob"`): id, display name, keywords, level, HP, AC,
+  to-hit, and an `NdM+K` damage profile. Live instances spawn into rooms
+  from each room's `mobs = "..."` list, on an intrusive room-occupant
+  list; `mob_in_room_by_kw` resolves a typed noun against them.
+- **Items + corpses** (`src/item.cyr`). Object templates from
+  `<zone>.objs.cyml` (`kind = "obj"`); instances live in rooms,
+  inventories, or containers on one shared list. A mob death synthesizes
+  "the corpse of <mob>" holding the mob's `loot`, and `get all from
+  corpse` (the M2 parser feature) empties it. `get` / `drop` /
+  `inventory` wired to the live lists.
+- **Combat** (`src/combat.cyr`). M4-A registry (per-session HP/AC/target +
+  per-mob target). M4-B/C hit (`d20 + hit + AC >= 20`, nat-20 hits /
+  nat-1 misses) and damage (`NdM+K`), hidden, prose-rendered. M4-D
+  aggression: `kill` engages and the mob fights back; `flee` breaks off
+  down a random exit; death disengages. The round runs inside
+  `advance_tick`, flushed per session (the tick never frees a session —
+  drops are left to the epoll path — so broadcasts are non-dropping).
+- **M4-E** death + respawn. Mob → corpse + loot; player → drop inventory,
+  respawn at the Hub start with full HP.
+- **M4-G/H** drift + load test. The M1-H drift hook now wraps the combat
+  tick; `benches/bench_combat.bcyr` drives 32 engaged sessions × 64 mobs
+  through 120 real ticks and asserts p99 < 50 ms (measured ~62 µs).
+- **Hub bestiary + loot** — `data/zones/hub.mobs.cyml` (scavver, rust-
+  drone, wire-gang enforcer, the Foundry Sentinel boss) and
+  `data/zones/hub.objs.cyml` (scrip, cells, plating, the Sentinel's core),
+  spawned across the zone with per-mob loot tables.
+- Unit suite grown 174 → 203 assertions (dice parse, RNG bounds, hit
+  distribution, mob/obj template loading, spawn/find/remove, corpse + loot).
+
+### Changed
+
+- `cmd_dispatch` wires `kill`/`flee`/`get`/`drop`/`inventory`/`examine`
+  to combat + items; the room render lists objects and mobs; `examine`
+  resolves mobs (the M2 resolver's keyword scope is now live mob/item
+  keywords). The session struct gains combat stats (`SS_HP`/`AC`/`TARGET`/
+  weapon dice) and `SS_INV`.
+- `g_epfd` moved to `session.cyr` (ahead of `combat.cyr`); room broadcasts
+  and combat flushes are now non-dropping, so the combat tick can flush
+  mid-walk without freeing a session.
+- `cmd_serve` loads the Hub's objects + mobs and seeds the combat RNG at
+  startup.
+
 ## [0.4.0] — 2026-06-09
 
 M3 — the world becomes physical. The server loads CYML zone files at boot

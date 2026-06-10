@@ -1,0 +1,31 @@
+zone = "hub"
+name = "The Hub — Objects"
+[[entries]]
+kind = "obj"
+id = "scrip"
+name = "a fistful of Hub-scrip"
+keywords = "scrip fistful credits money"
+---
+Grubby chits of stamped alloy, the only currency the Under-Grid agrees on.
+[[entries]]
+kind = "obj"
+id = "cell"
+name = "a spent power cell"
+keywords = "cell power spent battery"
+---
+A drained energy cell, still warm. Worth something to the right tinker.
+[[entries]]
+kind = "obj"
+id = "shard"
+name = "a shard of rust-pitted plating"
+keywords = "shard plating rust scrap"
+---
+A jagged offcut of hull-plate, edges furred with corrosion. Scrap, but solid.
+[[entries]]
+kind = "obj"
+id = "core"
+name = "an intact Sentinel power core"
+keywords = "core power sentinel intact"
+---
+A war-frame's heart, still humming with banked charge. A genuine prize —
+the kind of salvage that starts feuds.

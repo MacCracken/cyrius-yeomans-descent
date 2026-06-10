@@ -20,8 +20,8 @@
 | **0.2.0** | M1 close — Telnet parser (M1-C) + option negotiation (M1-D) + login scaffold (M1-E) + idle timeout (M1-F) + bench harness (M1-G) + observability (M1-H) | ✅ 2026-06-09 |
 | **0.3.0** | M2 — verb-noun parser + fuzz harness | ✅ 2026-06-09 |
 | **0.4.0** | M3 — world / rooms / movement + starter zone | ✅ 2026-06-09 |
-| **0.5.0** | M4 — combat tick + hit/damage math + corpses | next |
-| **0.6.0** | M5 — four classes playable solo through the starter zone | |
+| **0.5.0** | M4 — combat tick + hit/damage math + corpses | ✅ 2026-06-09 |
+| **0.6.0** | M5 — four classes playable solo through the starter zone | next |
 | **0.7.0** | M6 — T.Ron-backed player persistence + crash-safe writes | |
 | **0.8.0** | M7 — zone resets with player-presence gating | |
 | **0.9.0** | M8 — Joshua operator interface | |
@@ -32,7 +32,7 @@
 
 ## In progress
 
-**No active cycle.** M3 closed at 0.4.0. Next slot is **M4-A — combat state registry** ([§M4 sub-bites](#m4--combat-tick-v050)) — the placeholder tick from M1 gets a job. Pickup pointer + boot guide in [`state.md`](state.md).
+**No active cycle.** M4 closed at 0.5.0. Next slot is **M5-A — class selection** ([§M5 sub-bites](#m5--classes--abilities-v060)) — the four classes go from text-table flavor to playable mechanics. Pickup pointer + boot guide in [`state.md`](state.md).
 
 ---
 
@@ -180,6 +180,7 @@ Brief one-liners; per-tag chronology in [`../../CHANGELOG.md`](../../CHANGELOG.m
   - **M1-H** — `@stats` admin verb (connections, logged-in, ticks, tick-drift p99). Gate met: 32 concurrent connect→login→disconnect, sessions reclaimed, tick p99 drift < 10 ms.
 - **M2 (0.3.0)** — the verb-noun parser (`src/parser.cyr`), pure and fuzz-clean. Tokenizer (M2-A) → verb table + aliases (M2-B) → keyword-prefix direct-object resolution (M2-C) → preposition / indirect-object split (M2-D) → `all.X` / `N.X` qualifiers (M2-E) → 100k-input fuzz harness (M2-F, `fuzz/parser_fuzz.fcyr`). `cmd_on_line` routes through the parser; `quit` disconnects via the new `SS_QUIT` flag. Object/world binding deferred to M3 — the resolution matchers run against synthetic scopes for now. Gate met: fuzz clean against 100k random inputs; verb table covered by the 154-assertion suite.
 - **M3 (0.4.0)** — the world becomes physical. [ADR 0005](../adr/0005-zone-file-format.md) picks CYML for zone files; the loader (`src/world.cyr`, M3-B) builds an in-memory room tree at boot and rejects dangling exits. Movement (M3-C) with onlooker broadcasts, ANSI room rendering (M3-D), inspection verbs (M3-E, `examine` resolving the M2 parser against live room presence), room-scoped `say`/`emote` + cross-room `tell` + `who` (M3-F), and the authored 21-room Hub starter zone (M3-G, `data/zones/hub.rooms.cyml`). Gate met: two players walk the Hub end-to-end seeing each other's arrivals / departures / says; 174-assertion suite.
+- **M4 (0.5.0)** — the combat tick. Mobs (`src/mob.cyr`) and items/corpses (`src/item.cyr`) load from `<zone>.mobs/.objs.cyml`; combat (`src/combat.cyr`) resolves a hidden-roll round per tick inside `advance_tick` (M4-A/B/C/D), with `kill`/`flee`, death → corpse + loot, and player respawn (M4-E/F). The Hub gains a bestiary (scavver → Foundry Sentinel boss) and loot tables. Gate met: `benches/bench_combat.bcyr` ticks 32 players × 64 mobs at p99 ≈ 62 µs (50 ms budget); 203-assertion suite.
 
 ---
 

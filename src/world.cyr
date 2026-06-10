@@ -40,7 +40,11 @@ enum RM {
     RM_PROSE_PTR = 144;   # ptr into the file buffer (persists)
     RM_PROSE_LEN = 152;
     RM_EXIT      = 160;   # NDIR i64 exit room indices; -1 = no exit
-    RM_SIZE      = 208;   # 160 + 6*8
+    RM_MOB_HEAD  = 208;   # head of the room's mob-instance list (M4)
+    RM_OBJ_HEAD  = 216;   # head of the room's object-instance list (M4)
+    RM_MOBSPAWN  = 224;   # str: the `mobs` spawn id list (or 0)
+    RM_OBJSPAWN  = 232;   # str: the `objects` spawn id list (or 0)
+    RM_SIZE      = 240;
 }
 enum RmCap {
     RM_ID_CAP    = 48;
@@ -77,6 +81,15 @@ fn room_title_ptr(r): i64 { return r + RM_TITLE; }
 fn room_title_len(r): i64 { return load64(r + RM_TITLE_LEN); }
 fn room_prose_ptr(r): i64 { return load64(r + RM_PROSE_PTR); }
 fn room_prose_len(r): i64 { return load64(r + RM_PROSE_LEN); }
+
+# Room contents list heads (mob.cyr owns the instance structs + list ops;
+# world.cyr just holds the head pointers in the Room struct).
+fn room_mob_head(r): i64      { return load64(r + RM_MOB_HEAD); }
+fn room_set_mob_head(r, v): i64 { store64(r + RM_MOB_HEAD, v); return 0; }
+fn room_obj_head(r): i64      { return load64(r + RM_OBJ_HEAD); }
+fn room_set_obj_head(r, v): i64 { store64(r + RM_OBJ_HEAD, v); return 0; }
+fn room_mobspawn(r): i64      { return load64(r + RM_MOBSPAWN); }
+fn room_objspawn(r): i64      { return load64(r + RM_OBJSPAWN); }
 
 # Exit room index in direction `dir` (0..NDIR), or -1 if no exit / OOB.
 fn room_exit(r, dir): i64 {
@@ -201,6 +214,7 @@ fn world_load_rooms(path): i64 {
     }
 
     g_rooms = alloc(n * RM_SIZE);
+    memset(g_rooms, 0, n * RM_SIZE);   # zero list heads / spawn ptrs
     g_room_count = n;
     g_start_room = 0;
 
@@ -234,6 +248,11 @@ fn world_load_rooms(path): i64 {
 
         store64(rm + RM_PROSE_PTR, cyml_entry_body(e));
         store64(rm + RM_PROSE_LEN, cyml_entry_body_len(e));
+
+        # Spawn lists (space-separated template ids, or absent). Instances
+        # are created by world_spawn after mob/obj templates are loaded.
+        store64(rm + RM_MOBSPAWN, toml_get(pairs, "mobs"));
+        store64(rm + RM_OBJSPAWN, toml_get(pairs, "objects"));
 
         var dir = 0;
         while (dir < NDIR) {

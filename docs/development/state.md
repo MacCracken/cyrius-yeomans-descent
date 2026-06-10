@@ -7,16 +7,16 @@
 
 ## Version
 
-**0.4.0** — M3 close, 2026-06-09. The world is physical. A CYML zone
-loader ([ADR 0005](../adr/0005-zone-file-format.md), `src/world.cyr`)
-builds an in-memory room tree at boot and rejects dangling exits; players
-spawn into it at login and have a location. Movement (`n`/`s`/…) traverses
-exits with auto-look and onlooker broadcasts; rooms render in ANSI;
-`look`/`examine`/`exits`/`inventory` inspect; `say`/`emote` carry to the
-room, `tell` across rooms, `who` lists everyone online. The authored
-21-room Hub (`data/zones/hub.rooms.cyml`) is walkable end-to-end by two
-players who see each other in real time. Items, mobs, and combat are M4-M5;
-the parser (0.3.0), wire (0.2.0), and tick (0.1.0) underneath are intact.
+**0.5.0** — M4 close, 2026-06-09. The Combat Tick has a job. Mobs
+(`src/mob.cyr`) and items/corpses (`src/item.cyr`) load from CYML; combat
+(`src/combat.cyr`) resolves a hidden-roll round per 2.5 s tick inside
+`advance_tick`. A player `kill`s a mob, both trade `d20`-vs-AC attacks
+each tick, mobs die into lootable corpses (`get all from corpse`), and
+players respawn at the Hub. The full loop — explore, fight, loot, carry,
+die, respawn — is playable end to end. Load-proven: 32 players × 64 mobs
+tick at p99 ≈ 62 µs, well inside the 50 ms budget. The world (0.4.0),
+parser (0.3.0), wire (0.2.0), and tick scheduler (0.1.0) underneath are
+intact. Classes (M5) turn the player's flat default stats into mechanics.
 
 ## Toolchain
 
@@ -33,25 +33,33 @@ src/
   parser.cyr     M2 verb-noun parser: tokenizer, verb table + aliases,
                  keyword-prefix object resolution, preposition split,
                  all.X / N.X qualifiers; pure, no session I/O
-  world.cyr      M3 world tree: CYML zone loader, Room struct (208 B),
-                 exit resolution + dangling-ref rejection, verb→dir,
-                 room/exit accessors; pure, no session I/O
-  session.cyr    Session struct (152 B), rx scratch, decoded-line
-                 accumulator, tx queue, login (M1-E) + world entry,
-                 M2/M3 dispatch (movement, room render, examine, social),
-                 ANSI SGR helpers, SS_QUIT teardown, SS_ROOM location
+  world.cyr      M3 world tree: CYML zone loader, Room struct (240 B,
+                 +mob/obj list heads + spawn lists), exit resolution +
+                 dangling-ref rejection, verb→dir; pure, no session I/O
+  mob.cyr        M4 mobs: templates (CYML kind=mob) + live instances,
+                 room-occupant list, keyword lookup, dice parse, spawn
+  session.cyr    Session struct (224 B), login (M1-E) + world entry,
+                 M2/M3/M4 dispatch (movement, render w/ mobs+objs, examine,
+                 social, kill/flee→combat, get/drop/inv→items), ANSI SGR,
+                 combat stats (SS_HP/AC/TARGET/dice) + SS_INV, g_epfd
+  item.cyr       M4-E/F objects: templates (CYML kind=obj) + instances,
+                 corpses + loot, get/drop/inventory, room object render
+  combat.cyr     M4 combat: xorshift RNG, d20 hit + NdM damage, kill/flee,
+                 per-tick round (combat_round), mob death + player respawn
   server.cyr     event loop, listener, signalfd shutdown, tick scheduler,
-                 epoll dispatch, active-session list + idle sweep (M1-F),
-                 observability + render_stats (M1-H), zone load at boot,
-                 g_epfd + room broadcast / presence / who (M3-C/F)
+                 epoll dispatch, idle sweep (M1-F), observability (M1-H),
+                 zone+mob+obj load at boot, room broadcast / presence / who
+                 (M3-C/F, non-dropping), combat_tick_all from advance_tick
   test.cyr       top-level test entrypoint (per cyrius.cyml [build].test)
 
 data/zones/
   hub.rooms.cyml                the authored 21-room Hub starter zone (M3-G)
+  hub.mobs.cyml                 Hub bestiary: scavver → Sentinel boss (M4)
+  hub.objs.cyml                 Hub loot objects (M4)
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (174 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (203 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -64,12 +72,12 @@ fuzz/
                                `cyrius fuzz` auto-discovers fuzz/
 
 benches/
-  bench_telnet.bcyr             IAC-parser hot-path baseline (M1-G);
-                                `cyrius bench` auto-discovers benches/
+  bench_telnet.bcyr             IAC-parser hot-path baseline (M1-G)
+  bench_combat.bcyr            M4-H combat load test (32 players × 64 mobs,
+                               p99 < 50 ms); `cyrius bench` runs benches/
 ```
 
-Binary at `build/cyrius-yeomans-descent` (~182 KB with `CYRIUS_DCE=1`;
-the cyml / toml parsers add the weight over 0.3.0's 131 KB).
+Binary at `build/cyrius-yeomans-descent` (~209 KB with `CYRIUS_DCE=1`).
 
 ## Design
 
@@ -80,7 +88,7 @@ the cyml / toml parsers add the weight over 0.3.0's 131 KB).
 
 ## Tests
 
-`cyrius test tests/cyrius-yeomans-descent.tcyr` — 174 unit assertions:
+`cyrius test tests/cyrius-yeomans-descent.tcyr` — 203 unit assertions:
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -102,28 +110,33 @@ the cyml / toml parsers add the weight over 0.3.0's 131 KB).
 - **world** (M3-B) — zone load, id interning + lookup, `start` field,
   bidirectional exit resolution, title/prose capture, `verb_to_dir`,
   dangling / wrong-kind / missing-file rejection (fixtures in `tests/fixtures/`)
+- **combat** (M4) — `parse_dice` (`NdM+K` + malformed default), `die`/
+  `roll` bounds, `combat_try_hit` hit/miss distribution, mob + object
+  template loading + field values, spawn / keyword-find / remove, corpse
+  synthesis + loot population
 - **idle** — the `session_is_idle` threshold predicate
 
 Fuzz: `cyrius fuzz` → `fuzz/parser_fuzz.fcyr`, 100k random inputs +
 directed adversarial cases, all invariants hold (token/buffer bounds,
 index ranges, no `resolve_all` overrun), no crash / hang / leak.
 
-End-to-end smokes validated locally on Linux x86_64 at the 0.4.0 cut:
+End-to-end smokes validated locally on Linux x86_64 at the 0.5.0 cut:
 
-- the Hub loads (21 rooms); graph check: 0 asymmetric exits, 21/21
-  reachable from the `hub.gate` start — walkable end-to-end
-- two-player walk: A and B spawn at the gate; A moves and B sees
-  `alice heads north`, A sees `bob arrives`; presence (`Also here:`),
-  ANSI title/exits, and `look`/`exits` render the live room
-- social: `say` / `emote` reach the room (not other rooms), `tell`
-  crosses rooms, `who` lists both with room titles, `examine` resolves
-  self and a present player
-- 0.2.0/0.3.0 wire / parser / idle smokes still hold (M3 is additive)
+- combat loop: engage a scavver, watch per-tick rounds (hit/miss + damage
+  both ways, HP condition line); kill → corpse appears, `get all from
+  corpse` loots it, `inventory` / `drop` move items; the boss Sentinel
+  kills the player → death prose + respawn at the gate with full HP
+- mobs / objects render in rooms (red mobs, yellow objects); `examine`
+  resolves a mob to its description
+- 0.4.0 two-player walk + social smokes still hold (M4 is additive)
 
-Benchmark: `cyrius bench` → telnet_feed ≈ 6 ns/byte (mixed), ≈ 5 ns/byte
-(pure data), 16 M iterations, stable (unchanged — parser / world not yet
-benched; M9-C locks the wider baseline). Zone load is one-shot at boot,
-off the tick path, so it has no steady-state cost.
+Benchmark: `cyrius bench` →
+- `bench_telnet` — telnet_feed ≈ 6 ns/byte (mixed), ≈ 5 ns/byte (pure
+  data), 16 M iterations, stable since 0.2.0
+- `bench_combat` (M4-H) — 32 players × 64 mobs through 120 real ticks;
+  **p99 ≈ 62 µs, max ≈ 70 µs** against the 50 ms drift budget (≈ 800×
+  headroom). Combat is O(engaged combatants) per tick, off the accept path.
+- (parser / world p99 baselines land at M9-C.)
 
 `cyrius test src/test.cyr` exits 0 (CI uses this explicit form — see
 `.github/workflows/ci.yml`; the pin reads from `cyrius.cyml`).
@@ -143,73 +156,69 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** M3 closed at 0.4.0. Pick up the next slot per the
+**No active cycle.** M4 closed at 0.5.0. Pick up the next slot per the
 boot guide below.
 
 ---
 
 ## Next-agent boot guide
 
-You are picking up at **M4-A — combat state registry** ([roadmap.md M4 sub-bites](roadmap.md#m4--combat-tick-v050)). M4 gives the placeholder 2.5 s tick a job: engaged combatants resolve a round every tick in lockstep ([ADR 0001](../adr/0001-tick-based-combat-over-cooldowns.md)) — hit/damage math (THAC0-style hidden rolls), aggression, death + corpses, drift instrumentation, and a load test. Ships at v0.5.0. M4 needs mobs and items, which **do not exist yet** — see "What M4 needs first" below.
+You are picking up at **M5-A — class selection** ([roadmap.md M5 sub-bites](roadmap.md#m5--classes--abilities-v060)). M5 turns the four classes (Pikeman / Splicer / Courier / Chaplain) from text-table flavor into playable mechanics: class pick at character creation, per-class attribute scaling, three abilities each, and tick-composed cooldowns ([ADR 0001](../adr/0001-tick-based-combat-over-cooldowns.md) negative consequence — abilities *compose* with the 2.5 s tick, they don't replace it). Ships at v0.6.0.
 
-### What's already built (0.4.0)
+### What's already built (0.5.0)
 
-- **Tick loop (M1-A)** — `cmd_serve`'s epoll loop fires `advance_tick()`
-  every 2.5 s on an absolute schedule with drift-resistant catch-up;
-  `record_tick_drift` feeds the p99 ring. `advance_tick` is still a no-op
-  counter bump — **M4-A/B hang the combat round off it.**
-- **World tree (M3)** — `src/world.cyr`. `world_load_rooms(path)` builds
-  rooms; `room_at(i)`, `room_exit(r, dir)`, `room_id/title/prose_*`
-  accessors. Rooms currently hold only static fields — **no contents
-  list yet** (mob/object instances in a room are M4's to add).
-- **Players in the world** — each session has `SS_ROOM` (current room).
-  `room_broadcast(room, except, mover, a, b, c)` and `room_say_broadcast`
-  (server.cyr) push lines to everyone in a room + flush them; combat prose
-  reuses these. `room_find_player` resolves a name in a room.
-- **Verb-noun parser (M2)** — `cmd_dispatch` (session.cyr) routes verbs.
-  `kill` / `flee` currently fall through to `cmd_object` placeholders —
-  **M4-D wires them.** The resolver (`resolve_noun` / `resolve_nth` /
-  `resolve_all`, `kw_matches`) takes a *scope* = array of NUL-terminated
-  keyword strings; **M4 builds that scope from a room's mob/object
-  contents** (the `keywords` field in mob/obj CYML entries, ADR 0005).
-- **Zone format (ADR 0005)** — mob / object templates are CYML entries
-  with `kind = "mob"` / `"obj"` in their own files
-  (`<zone>.mobs.cyml` / `<zone>.objs.cyml`), ≤ 32 entries each. `world.cyr`
-  loads rooms only so far; **M4/M5 add `world_load_mobs` / `_objs`** and a
-  per-room contents list.
+- **Combat (M4)** — `src/combat.cyr`. `combat_round(s)` resolves one tick
+  for an engaged session; `advance_tick` → `combat_tick_all()` runs it for
+  everyone. Hit = `d20 + hit + AC >= 20` (`combat_try_hit`), damage =
+  `roll(ndice, dsize, dmod)`. **Player stats are flat defaults** in the
+  `PlayerStat` enum (session.cyr: HP 30, AC 8, hit +1, 1d6+1) — **M5-B
+  replaces these with per-class attribute scaling.**
+- **Combat state** lives in SS_ slots (`SS_HP`/`SS_MAXHP`/`SS_AC`/
+  `SS_TARGET`/`SS_HIT`/`SS_NDICE`/`SS_DSIZE`/`SS_DMOD`/`SS_INV`). The
+  `SS_PLAYER` slot (offset 80, reserved since M1-B) still awaits the M6
+  persistence handle; the session is the actor for now. **M5 adds a class
+  id + attribute (STR/DEX/CON/TEC) slots here.**
+- **Mobs (M4)** — `src/mob.cyr`: templates (`world_load_mobs`) + instances
+  (`mob_spawn`, `mob_in_room_by_kw`, `mob_remove`), room-occupant list.
+- **Items (M4)** — `src/item.cyr`: object templates + instances, corpses +
+  loot, `get`/`drop`/`inventory`. Abilities that consume/grant items (e.g.
+  a Chaplain's stims) hook here.
+- **Login flow** — `login_on_name` (session.cyr) captures the name then
+  calls `session_enter_world`. **M5-A inserts class selection between the
+  name prompt and world entry** (a new login phase, or a sub-prompt).
+- **Tick** — `advance_tick` (server.cyr) is the one place per-tick work
+  runs. **Ability cooldowns (M5-G) decrement here**, composed with combat.
 
-### What M4 needs first
+### What M5 needs
 
-M4 is combat, but there is nothing to fight yet. Expect to build, in order:
-
-1. **Mob templates + instances.** Extend `world.cyr` with a `world_load_mobs`
-   (kind="mob") and a per-room contents/occupants list so a room can hold
-   live mobs. Author a few mobs into `data/zones/hub.mobs.cyml` + room
-   `mobs = [...]` spawn lists (the room field is already in the schema).
-2. **Combat state registry (M4-A).** Per-actor engagement record (target,
-   aggro) on the player (session) and the mob instance.
-3. Then hit/damage (M4-B/C) off `advance_tick`, aggression (M4-D, wiring
-   `kill` / `flee`), death + corpses (M4-E/F), drift + load test (M4-G/H).
-
-The `SS_PLAYER` slot (session offset 80, reserved since M1-B) gets a real
-actor/combatant handle when persistence lands (M6); until then the
-session *is* the player-actor — combat state can live in new SS_ slots.
+1. **Class data (M5-B).** A `data/classes.cyml` (single-entry or one entry
+   per class) with per-class STR/DEX/CON/TEC start values + growth, and the
+   derived HP/AC/hit/damage that replace the flat `PlayerStat` defaults.
+   This is the same CYML format ([ADR 0005](../adr/0005-zone-file-format.md) precedent).
+2. **Class selection (M5-A).** A login sub-phase after the name prompt.
+3. **Abilities (M5-C..F).** Three per class, as new verbs that act inside /
+   alongside combat; **tick-composed cooldowns (M5-G)** decremented in
+   `advance_tick`.
+4. **Solo-playable verification (M5-H).** Each class clears the Hub solo,
+   killing the Foundry Sentinel boss (`foundry.overseer`) without dying
+   twice. Tune class stats against the existing bestiary.
 
 ### Reference
 
-- Combat math (1d20 + DEX vs AC, THAC0; weapon dice + STR/TEC): [`../architecture/overview.md` §2.3](../architecture/overview.md) and [ADR 0001](../adr/0001-tick-based-combat-over-cooldowns.md).
-- Resolution scope contract: `src/parser.cyr` M2-C header comment.
-- Mob/obj entry schema: [ADR 0005](../adr/0005-zone-file-format.md).
+- Class table (roles, core commands, attribute focus): [`../architecture/overview.md` §3](../architecture/overview.md).
+- Attributes → combat math: [`../architecture/overview.md` §2.2-2.3](../architecture/overview.md).
+- Cooldowns compose with the tick: [ADR 0001](../adr/0001-tick-based-combat-over-cooldowns.md) (negative consequence).
+- Combat hooks: `src/combat.cyr` (`combat_round`, `roll`, `combat_try_hit`).
 
 ### Quick boot sanity
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test tests/cyrius-yeomans-descent.tcyr   # 174 assertions
+cyrius test tests/cyrius-yeomans-descent.tcyr   # 203 assertions
 cyrius fuzz                                      # parser fuzz, 100k inputs
-cyrius bench                                     # IAC parser baseline
+cyrius bench                                     # telnet baseline + combat load test
 ./build/cyrius-yeomans-descent serve 4000
-# telnet 127.0.0.1 4000 — log in, `look`, walk n/s/e/w, `who`, `say hi`, `quit`
+# telnet 127.0.0.1 4000 — log in, `n`, `kill scavver`, wait a tick, loot the corpse
 ```
 
 ### Open ADRs

@@ -1,0 +1,287 @@
+# mob.cyr — M4 mobs: templates + live instances + room placement.
+#
+# Mob templates load from a CYML `<zone>.mobs.cyml` file (ADR 0005,
+# `kind = "mob"` entries), immutable for the run. A mob *instance* is a
+# live spawn of a template in a room, carrying mutable combat state
+# (current HP, who it is fighting). Rooms hold their occupants on an
+# intrusive list threaded through MI_NEXT (head in the Room struct's
+# RM_MOB_HEAD, world.cyr).
+#
+# Stats are era-standard tabletop ([ADR 0001](../docs/adr/0001-tick-based-combat-over-cooldowns.md)):
+# AC (lower = harder to hit), a flat to-hit bonus, and a damage dice
+# profile (NdM+K). Combat math consumes them in combat.cyr.
+
+# === Mob template layout (offsets in bytes) ===
+enum MT {
+    MT_ID      = 0;      # inline id bytes (MT_ID_CAP)
+    MT_ID_LEN  = 32;
+    MT_NAME    = 40;     # inline display name ("a rust-drone", MT_NAME_CAP)
+    MT_NAME_LEN = 104;
+    MT_KW      = 112;    # inline keywords, NUL-terminated (MT_KW_CAP)
+    MT_KW_LEN  = 176;
+    MT_LEVEL   = 184;
+    MT_HP      = 192;    # max HP
+    MT_AC      = 200;    # armour class (lower = better defence)
+    MT_HIT     = 208;    # flat to-hit bonus
+    MT_NDICE   = 216;    # damage: number of dice
+    MT_DSIZE   = 224;    #         die size
+    MT_DMOD    = 232;    #         flat modifier
+    MT_DESC_PTR = 240;   # description prose (zero-copy into CYML buffer)
+    MT_DESC_LEN = 248;
+    MT_LOOT    = 256;    # str: space-separated object ids dropped on death
+    MT_SIZE    = 264;
+}
+enum MtCap {
+    MT_ID_CAP   = 32;
+    MT_NAME_CAP = 64;
+    MT_KW_CAP   = 64;
+}
+
+# === Mob instance layout ===
+enum MI {
+    MI_TPL    = 0;       # ptr to the template
+    MI_HP     = 8;       # current HP
+    MI_ROOM   = 16;      # room index it occupies
+    MI_TARGET = 24;      # session it is fighting (0 = none)
+    MI_NEXT   = 32;      # intrusive room-occupant list
+    MI_SIZE   = 40;
+}
+
+var g_mob_tpls      = 0;   # contiguous block of MT_SIZE templates
+var g_mob_tpl_count = 0;
+
+# === Template accessors ===
+fn mt_at(i): i64          { return g_mob_tpls + i * MT_SIZE; }
+fn mt_name_ptr(t): i64    { return t + MT_NAME; }
+fn mt_name_len(t): i64    { return load64(t + MT_NAME_LEN); }
+fn mt_kw_ptr(t): i64      { return t + MT_KW; }         # NUL-terminated
+fn mt_level(t): i64       { return load64(t + MT_LEVEL); }
+fn mt_hp(t): i64          { return load64(t + MT_HP); }
+fn mt_ac(t): i64          { return load64(t + MT_AC); }
+fn mt_hit(t): i64         { return load64(t + MT_HIT); }
+fn mt_ndice(t): i64       { return load64(t + MT_NDICE); }
+fn mt_dsize(t): i64       { return load64(t + MT_DSIZE); }
+fn mt_dmod(t): i64        { return load64(t + MT_DMOD); }
+fn mt_desc_ptr(t): i64    { return load64(t + MT_DESC_PTR); }
+fn mt_desc_len(t): i64    { return load64(t + MT_DESC_LEN); }
+fn mt_loot(t): i64        { return load64(t + MT_LOOT); }   # str or 0
+
+# === Instance accessors ===
+fn mi_tpl(m): i64         { return load64(m + MI_TPL); }
+fn mi_hp(m): i64          { return load64(m + MI_HP); }
+fn mi_set_hp(m, v): i64   { store64(m + MI_HP, v); return 0; }
+fn mi_room(m): i64        { return load64(m + MI_ROOM); }
+fn mi_target(m): i64      { return load64(m + MI_TARGET); }
+fn mi_set_target(m, v): i64 { store64(m + MI_TARGET, v); return 0; }
+fn mi_next(m): i64        { return load64(m + MI_NEXT); }
+fn mi_name_ptr(m): i64    { return mt_name_ptr(mi_tpl(m)); }
+fn mi_name_len(m): i64    { return mt_name_len(mi_tpl(m)); }
+
+# Read an int field from a TOML pairs vec, or `def` if absent / non-numeric.
+fn toml_int(pairs, key, def): i64 {
+    var v = toml_get(pairs, key);
+    if (v == 0) { return def; }
+    var n = parse_uint(str_data(v), str_len(v));
+    if (n < 0) { return def; }
+    return n;
+}
+
+# Parse a dice profile "NdM" or "NdM+K" from a str into out_n / out_d /
+# out_mod. Defaults to 1d4+0 on a malformed value.
+fn parse_dice(s, out_n, out_d, out_mod): i64 {
+    store64(out_n, 1);
+    store64(out_d, 4);
+    store64(out_mod, 0);
+    if (s == 0) { return 0; }
+    var p = str_data(s);
+    var len = str_len(s);
+    var i = 0;
+    # leading dice count
+    var nd = 0; var seen = 0;
+    while (i < len) {
+        var c = load8(p + i) & 0xFF;
+        if (c < 48) { break; }
+        if (c > 57) { break; }
+        nd = nd * 10 + (c - 48); seen = 1; i = i + 1;
+    }
+    if (seen == 0) { return 0; }
+    if (i >= len) { return 0; }
+    if ((load8(p + i) & 0xFF) != 100) { return 0; }   # 'd'
+    i = i + 1;
+    var ds = 0; seen = 0;
+    while (i < len) {
+        var c = load8(p + i) & 0xFF;
+        if (c < 48) { break; }
+        if (c > 57) { break; }
+        ds = ds * 10 + (c - 48); seen = 1; i = i + 1;
+    }
+    if (seen == 0) { return 0; }
+    store64(out_n, nd);
+    store64(out_d, ds);
+    # optional +K
+    if (i < len) {
+        if ((load8(p + i) & 0xFF) == 43) {   # '+'
+            i = i + 1;
+            var k = 0;
+            while (i < len) {
+                var c = load8(p + i) & 0xFF;
+                if (c < 48) { break; }
+                if (c > 57) { break; }
+                k = k * 10 + (c - 48); i = i + 1;
+            }
+            store64(out_mod, k);
+        }
+    }
+    return 0;
+}
+
+# === world_load_mobs — parse a `<zone>.mobs.cyml` into templates. ===
+# Returns the template count (>= 0), or a negative WL_ERR_* code.
+fn world_load_mobs(path): i64 {
+    var r = cyml_parse_file_r(path);
+    if (is_ok(r) == 0) { return WL_ERR_IO; }
+    var doc = result_unwrap(r);
+    var n = cyml_doc_entry_count(doc);
+    if (n <= 0)          { return WL_ERR_EMPTY; }
+    if (n > MAX_ENTRIES) { return WL_ERR_OVERCAP; }
+
+    g_mob_tpls = alloc(n * MT_SIZE);
+    memset(g_mob_tpls, 0, n * MT_SIZE);
+    g_mob_tpl_count = n;
+
+    var i = 0;
+    while (i < n) {
+        var e = cyml_doc_entry(doc, i);
+        var hs = str_new(cyml_entry_header(e), cyml_entry_header_len(e));
+        var secs = toml_parse(hs);
+        if (vec_len(secs) == 0) { return WL_ERR_NOID; }
+        var pairs = toml_section_pairs(vec_get(secs, 0));
+
+        var kind = toml_get(pairs, "kind");
+        if (kind == 0) { return WL_ERR_KIND; }
+        if (str_eq_cstr(kind, "mob") == 0) { return WL_ERR_KIND; }
+
+        var t = mt_at(i);
+        var id = toml_get(pairs, "id");
+        if (id == 0) { return WL_ERR_NOID; }
+        store64(t + MT_ID_LEN, copy_str_capped(t + MT_ID, MT_ID_CAP, id));
+
+        var name = toml_get(pairs, "name");
+        # cap at CAP-1 so the memset-zeroed tail leaves a NUL — mob names
+        # are used as cstrs in combat / room prose.
+        if (name != 0) { store64(t + MT_NAME_LEN, copy_str_capped(t + MT_NAME, MT_NAME_CAP - 1, name)); }
+
+        var kw = toml_get(pairs, "keywords");
+        if (kw != 0) {
+            # cap at CAP-1 so the memset-zeroed tail leaves a NUL terminator.
+            store64(t + MT_KW_LEN, copy_str_capped(t + MT_KW, MT_KW_CAP - 1, kw));
+        }
+
+        store64(t + MT_LEVEL, toml_int(pairs, "level", 1));
+        store64(t + MT_HP,    toml_int(pairs, "hp", 10));
+        store64(t + MT_AC,    toml_int(pairs, "ac", 10));
+        store64(t + MT_HIT,   toml_int(pairs, "hit", 0));
+
+        var nd[8]; var dd[8]; var dm[8];
+        parse_dice(toml_get(pairs, "damage"), &nd, &dd, &dm);
+        store64(t + MT_NDICE, load64(&nd));
+        store64(t + MT_DSIZE, load64(&dd));
+        store64(t + MT_DMOD,  load64(&dm));
+
+        store64(t + MT_DESC_PTR, cyml_entry_body(e));
+        store64(t + MT_DESC_LEN, cyml_entry_body_len(e));
+        store64(t + MT_LOOT, toml_get(pairs, "loot"));   # str or 0
+        i = i + 1;
+    }
+    return n;
+}
+
+# Find a mob template by id, or 0.
+fn mob_tpl_by_id(buf, len): i64 {
+    var i = 0;
+    while (i < g_mob_tpl_count) {
+        var t = mt_at(i);
+        if (load64(t + MT_ID_LEN) == len) {
+            var a = t + MT_ID;
+            var j = 0;
+            var same = 1;
+            while (j < len) {
+                if ((load8(a + j) & 0xFF) != (load8(buf + j) & 0xFF)) { same = 0; j = len; }
+                j = j + 1;
+            }
+            if (same == 1) { return t; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# === mob_spawn — create a live instance of `tpl` in room `room_idx`. ===
+fn mob_spawn(tpl, room_idx): i64 {
+    var m = alloc(MI_SIZE);
+    store64(m + MI_TPL, tpl);
+    store64(m + MI_HP, mt_hp(tpl));
+    store64(m + MI_ROOM, room_idx);
+    store64(m + MI_TARGET, 0);
+    # push onto the room's mob list
+    var r = room_at(room_idx);
+    store64(m + MI_NEXT, room_mob_head(r));
+    room_set_mob_head(r, m);
+    return m;
+}
+
+# Unlink a mob instance from its room's list (on death / despawn).
+fn mob_remove(m): i64 {
+    var r = room_at(mi_room(m));
+    var head = room_mob_head(r);
+    if (head == m) { room_set_mob_head(r, mi_next(m)); return 0; }
+    var prev = head;
+    while (prev != 0) {
+        if (mi_next(prev) == m) { store64(prev + MI_NEXT, mi_next(m)); return 0; }
+        prev = mi_next(prev);
+    }
+    return 0;
+}
+
+# Find a mob in `room_idx` whose keywords the typed noun prefixes, or 0.
+fn mob_in_room_by_kw(room_idx, noun_ptr, noun_len): i64 {
+    if (room_idx < 0) { return 0; }
+    var m = room_mob_head(room_at(room_idx));
+    while (m != 0) {
+        if (kw_matches(noun_ptr, noun_len, mt_kw_ptr(mi_tpl(m))) == 1) { return m; }
+        m = mi_next(m);
+    }
+    return 0;
+}
+
+# === world_spawn_all — populate every room from its `mobs` spawn list. ===
+# Splits each room's RM_MOBSPAWN string on spaces; each token is a mob
+# template id, spawned once. Unknown ids are skipped (logged by caller).
+fn world_spawn_all(): i64 {
+    var spawned = 0;
+    var ri = 0;
+    while (ri < g_room_count) {
+        var r = room_at(ri);
+        var s = room_mobspawn(r);
+        if (s != 0) {
+            var p = str_data(s);
+            var len = str_len(s);
+            var i = 0;
+            while (i < len) {
+                # skip spaces
+                var c = load8(p + i) & 0xFF;
+                if (c == 32) { i = i + 1; continue; }
+                # token [start, i)
+                var start = i;
+                while (i < len) {
+                    if ((load8(p + i) & 0xFF) == 32) { break; }
+                    i = i + 1;
+                }
+                var tpl = mob_tpl_by_id(p + start, i - start);
+                if (tpl != 0) { mob_spawn(tpl, ri); spawned = spawned + 1; }
+            }
+        }
+        ri = ri + 1;
+    }
+    return spawned;
+}

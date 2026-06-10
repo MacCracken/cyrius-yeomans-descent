@@ -39,7 +39,35 @@ enum SS {
     SS_PREV       = 128;  # — used by the tick idle sweep (M1-F)
     SS_QUIT       = 136;  # 1 once the `quit` verb asks for teardown (M2)
     SS_ROOM       = 144;  # current room index (M3); -1 until placed
-    SS_SIZE       = 152;
+    # Combat stats (M4). Defaults until classes (M5) / persistence (M6).
+    SS_HP         = 152;  # current hit points
+    SS_MAXHP      = 160;  # max hit points
+    SS_AC         = 168;  # armour class (lower = better defence)
+    SS_TARGET     = 176;  # mob instance being fought (0 = not engaged)
+    SS_HIT        = 184;  # to-hit bonus
+    SS_NDICE      = 192;  # weapon damage: dice count
+    SS_DSIZE      = 200;  #                die size
+    SS_DMOD       = 208;  #                flat modifier
+    SS_INV        = 216;  # head of the player's inventory list (M4-E)
+    SS_SIZE       = 224;
+}
+
+# The published epoll fd, used by room broadcasts (M3-C) and combat
+# flushes (M4) to push bytes to sessions immediately. Single-thread loop,
+# so a global is safe. Declared here (ahead of combat.cyr); cmd_serve
+# (server.cyr) assigns it at startup. 0 outside a running server — flushes
+# then no-op safely (drain to a real fd happens only when armed).
+var g_epfd = 0;
+
+# Starting combatant profile (a scavenged sidearm). Replaced by class +
+# attribute scaling at M5, restored from save at M6.
+enum PlayerStat {
+    PC_HP    = 30;
+    PC_AC    = 8;
+    PC_HIT   = 1;
+    PC_NDICE = 1;
+    PC_DSIZE = 6;
+    PC_DMOD  = 1;
 }
 
 enum SessConst {
@@ -73,6 +101,15 @@ fn session_new(fd, now_ms): i64 {
     store64(s + SS_NAME_BUF, nmb);
     store64(s + SS_TS, telnet_state_new());
     store64(s + SS_ROOM, 0 - 1);   # unplaced until login (M3)
+    # Default combatant profile (M4).
+    store64(s + SS_HP, PC_HP);
+    store64(s + SS_MAXHP, PC_HP);
+    store64(s + SS_AC, PC_AC);
+    store64(s + SS_TARGET, 0);
+    store64(s + SS_HIT, PC_HIT);
+    store64(s + SS_NDICE, PC_NDICE);
+    store64(s + SS_DSIZE, PC_DSIZE);
+    store64(s + SS_DMOD, PC_DMOD);
     return s;
 }
 
@@ -449,6 +486,22 @@ fn ansi_reset(): i64 { return "\x1b[0m"; }      # clear all attributes
 fn ansi_title(): i64 { return "\x1b[1;33m"; }   # bold yellow — room title
 fn ansi_exits(): i64 { return "\x1b[36m"; }     # cyan — exits line
 fn ansi_actor(): i64 { return "\x1b[1;32m"; }   # bold green — players
+fn ansi_mob(): i64   { return "\x1b[31m"; }     # red — hostiles
+
+# List the mobs present in room `room` (one per line, red). The mob.cyr
+# instance list hangs off the Room struct's RM_MOB_HEAD.
+fn session_append_mobs(s, room): i64 {
+    var m = room_mob_head(room_at(room));
+    while (m != 0) {
+        session_appendtx_cstr(s, ansi_mob());
+        session_appendtx(s, mi_name_ptr(m), mi_name_len(m));
+        session_appendtx_cstr(s, " is here.");
+        session_appendtx_cstr(s, ansi_reset());
+        session_appendtx_cstr(s, "\r\n");
+        m = mi_next(m);
+    }
+    return 0;
+}
 
 # Append the exits line for room `r` (cyan label, dir words). Shared by
 # session_show_room and the `exits` verb.
@@ -491,6 +544,8 @@ fn session_show_room(s): i64 {
     session_appendtx(s, room_prose_ptr(r), room_prose_len(r));
     session_appendtx_cstr(s, "\r\n");
     session_append_exits(s, r);
+    session_append_objs(s, room);   # forward ref → item.cyr
+    session_append_mobs(s, room);
     room_append_present(s, room);   # forward ref → server.cyr
     return 0;
 }
@@ -567,6 +622,20 @@ fn cmd_examine(s, pa): i64 {
         session_appendtx_cstr(s, " stands here, taking in the Under-Grid.\r\n");
         return 0;
     }
+    # A mob in the room?
+    var m = mob_in_room_by_kw(load64(s + SS_ROOM), tok_ptr(pa, di), tok_len(pa, di));
+    if (m != 0) {
+        var tpl = mi_tpl(m);
+        session_appendtx_cstr(s, ansi_mob());
+        session_appendtx(s, mi_name_ptr(m), mi_name_len(m));
+        session_appendtx_cstr(s, ansi_reset());
+        session_appendtx_cstr(s, "\r\n");
+        if (mt_desc_len(tpl) > 0) {
+            session_appendtx(s, mt_desc_ptr(tpl), mt_desc_len(tpl));
+            session_appendtx_cstr(s, "\r\n");
+        }
+        return 0;
+    }
     session_appendtx_cstr(s, "You see no ");
     session_appendtx_tok(s, pa, di);
     session_appendtx_cstr(s, " here.\r\n");
@@ -621,16 +690,20 @@ fn cmd_dispatch(s, pa, buf, len): i64 {
         return 0;
     }
     if (verb == VERB_EXAMINE)   { return cmd_examine(s, pa); }
-    if (verb == VERB_INVENTORY) { session_appendtx_cstr(s, "You carry nothing. (items arrive at M4-M5.)\r\n"); return 0; }
+    if (verb == VERB_INVENTORY) { return cmd_inventory(s); }
     if (verb == VERB_WHO)       { return cmd_who(s); }
+
+    if (verb == VERB_GET)  { return cmd_get(s, pa); }
+    if (verb == VERB_DROP) { return cmd_drop(s, pa); }
 
     if (verb == VERB_SAY)   { return cmd_say(s, buf, len); }
     if (verb == VERB_TELL)  { return cmd_tell(s, pa, buf, len); }
     if (verb == VERB_EMOTE) { return cmd_emote(s, buf, len); }
 
-    if (verb == VERB_FLEE)  { session_appendtx_cstr(s, "There is nothing to flee — combat arrives at M4.\r\n"); return 0; }
+    if (verb == VERB_KILL)  { return cmd_kill(s, pa); }
+    if (verb == VERB_FLEE)  { return cmd_flee(s); }
 
-    # Remaining item / combat verbs all take a direct object.
+    # Remaining item verbs all take a direct object.
     return cmd_object(s, pa, verb);
 }
 

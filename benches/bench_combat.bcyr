@@ -1,0 +1,132 @@
+# cyrius-yeomans-descent — M4-H combat load test.
+#
+# The Combat Tick is load-bearing (ADR 0001): every engaged combatant
+# resolves a round each 2.5 s, and the scheduler must stay honest under
+# load. This drives the roadmap M4 gate — 32 simulated players × 64 mobs
+# ticking — and asserts the per-tick cost stays far under the 50 ms p99
+# drift budget.
+#
+# It runs the *real* combat path: 32 sessions, each engaged with a live
+# mob, resolved through combat_tick_all() (the exact function advance_tick
+# calls), with prose built into real tx buffers and flushed to /dev/null.
+# 120 ticks ≈ a 5-minute fight. HP is restored between ticks so every tick
+# carries the full 32-round load.
+
+include "src/telnet.cyr"
+include "src/parser.cyr"
+include "src/world.cyr"
+include "src/mob.cyr"
+include "src/session.cyr"
+include "src/item.cyr"
+include "src/combat.cyr"
+include "src/server.cyr"
+
+enum LoadConst {
+    NPLAYERS = 32;
+    NMOBS    = 64;
+    NTICKS   = 120;     # 5 min / 2.5 s
+    BUDGET_NS = 50000000;   # 50 ms p99 drift budget
+}
+
+fn main(): i64 {
+    alloc_init();
+    combat_seed(0x1234567);
+
+    # World + entities.
+    if (world_load_rooms("data/zones/hub.rooms.cyml") != WL_OK) {
+        println("load: rooms failed"); return 1;
+    }
+    world_load_objs("data/zones/hub.objs.cyml");
+    if (world_load_mobs("data/zones/hub.mobs.cyml") < 0) {
+        println("load: mobs failed"); return 1;
+    }
+    var tpl = mob_tpl_by_id("rustdrone", 9);
+    if (tpl == 0) { println("load: no rustdrone template"); return 1; }
+
+    # /dev/null sink for combat prose flushes.
+    var devnull = syscall(2, "/dev/null", 1, 0);   # open(O_WRONLY)
+    if (devnull < 0) { println("load: cannot open /dev/null"); return 1; }
+
+    # Spawn NMOBS mobs into the start room.
+    var mobs = alloc(NMOBS * 8);
+    var i = 0;
+    while (i < NMOBS) {
+        store64(mobs + i * 8, mob_spawn(tpl, 0));
+        i = i + 1;
+    }
+
+    # Create NPLAYERS sessions, each engaged with a distinct mob.
+    var sess = alloc(NPLAYERS * 8);
+    i = 0;
+    while (i < NPLAYERS) {
+        var s = session_new(devnull, 0);
+        store64(s + SS_PHASE, PHASE_CMD);
+        store64(s + SS_ROOM, 0);
+        store64(s + SS_NAME_LEN, 7);
+        memcpy(load64(s + SS_NAME_BUF), "loadbot", 7);
+        var m = load64(mobs + i * 8);
+        store64(s + SS_TARGET, m);
+        mi_set_target(m, s);
+        session_list_push(s);       # threads onto g_session_head
+        store64(sess + i * 8, s);
+        i = i + 1;
+    }
+    g_epfd = 0;   # flushes fully drain to /dev/null; no epoll needed
+
+    # Drive NTICKS combat ticks, timing each.
+    var samples = alloc(NTICKS * 8);
+    var t = 0;
+    while (t < NTICKS) {
+        var t0 = clock_now_ns();
+        combat_tick_all();
+        var t1 = clock_now_ns();
+        store64(samples + t * 8, t1 - t0);
+
+        # Restore HP so every tick carries the full engaged load.
+        var j = 0;
+        while (j < NPLAYERS) {
+            var s = load64(sess + j * 8);
+            store64(s + SS_HP, load64(s + SS_MAXHP));
+            store64(s + SS_TX_LEN, 0);   # drop drained prose
+            store64(s + SS_TX_OFF, 0);
+            j = j + 1;
+        }
+        j = 0;
+        while (j < NMOBS) {
+            mi_set_hp(load64(mobs + j * 8), mt_hp(tpl));
+            j = j + 1;
+        }
+        t = t + 1;
+    }
+
+    # Insertion-sort the samples for max + p99.
+    var a = 1;
+    while (a < NTICKS) {
+        var key = load64(samples + a * 8);
+        var b = a - 1;
+        while (b >= 0) {
+            if (load64(samples + b * 8) <= key) { break; }
+            store64(samples + (b + 1) * 8, load64(samples + b * 8));
+            b = b - 1;
+        }
+        store64(samples + (b + 1) * 8, key);
+        a = a + 1;
+    }
+    var p99_idx = (NTICKS * 99) / 100;
+    if (p99_idx >= NTICKS) { p99_idx = NTICKS - 1; }
+    var p99 = load64(samples + p99_idx * 8);
+    var maxv = load64(samples + (NTICKS - 1) * 8);
+
+    print("combat load: ", 13); print_num(NPLAYERS);
+    print(" players x ", 11); print_num(NMOBS); println(" mobs");
+    print("  p99 tick: ", 12); print_num(p99 / 1000); print(" us", 3); println("");
+    print("  max tick: ", 12); print_num(maxv / 1000); print(" us", 3); println("");
+    print("  budget:   ", 12); print_num(BUDGET_NS / 1000000); print(" ms p99", 7); println("");
+
+    if (p99 >= BUDGET_NS) { println("  RESULT: FAIL (p99 over budget)"); return 1; }
+    println("  RESULT: PASS");
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

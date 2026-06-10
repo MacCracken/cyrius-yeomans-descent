@@ -19,6 +19,7 @@ exit_s = "hub.gate"
 exit_n = "hub.flagon"
 exit_e = "foundry.mouth"
 exit_w = "under.landing"
+mobs = "scavver"
 ---
 Four tiers of catwalk climb into haze overhead, every railing hung with
 laundry, prayer-ribbon, and salvage. This is where the Under-Grid takes your
@@ -82,6 +83,7 @@ id = "market.stalls"
 title = "The Scrap Stalls"
 exit_w = "market.plaza"
 exit_n = "market.fence"
+mobs = "scavver scavver"
 ---
 Trestle after trestle of sorted ruin: capacitor banks, bone-dry cells, optics
 clouded with age. A stallholder eyes your pockets with professional interest.
@@ -92,6 +94,7 @@ id = "market.fence"
 title = "Fences' Row"
 exit_s = "market.stalls"
 exit_w = "market.scrip"
+mobs = "gangrel"
 ---
 The row where the stalls stop asking where things came from. Shutters slam at
 the sound of boots. This is as deep into the market's teeth as most care to
@@ -124,6 +127,7 @@ exit_w = "foundry.mouth"
 exit_n = "foundry.crucible"
 exit_e = "foundry.cooling"
 exit_s = "foundry.slag"
+mobs = "rustdrone"
 ---
 The beating centre of the foundry, where molten salvage is poured into hull-
 moulds older than the city. Sparks fall like slow rain. Ways lead off in every
@@ -145,6 +149,7 @@ id = "foundry.overseer"
 title = "Overseer's Catwalk"
 exit_w = "foundry.crucible"
 exit_s = "foundry.cooling"
+mobs = "sentinel"
 ---
 The highest walk in the foundry, where the Guild-overseer watches the pour
 through a slit visor and says nothing to anyone. From here the whole floor is a
@@ -205,6 +210,7 @@ id = "under.dark"
 title = "The Dark Run"
 exit_n = "under.pipes"
 exit_e = "under.shrine"
+mobs = "rustdrone"
 ---
 The deepest of the public ways, where the lamps fail one by one and the
 silence has weight. Something has scratched a long count into the wall, and

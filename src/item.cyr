@@ -1,0 +1,383 @@
+# item.cyr — M4-E/F objects: templates, instances, corpses, loot.
+#
+# Object templates load from a CYML `<zone>.objs.cyml` (ADR 0005,
+# `kind = "obj"`). An instance is a live object that can sit in a room, in
+# a container (a corpse), or in a player's inventory — all the same
+# intrusive list (OI_NEXT), differing only in which head it hangs off.
+#
+# A corpse is a synthesized container instance (no template): killing a
+# mob leaves "the corpse of <mob>" in the room, holding the mob's loot.
+# `get all from corpse` (the M2 parser already produces the structure)
+# moves a corpse's contents into the player's inventory.
+
+# === Object template layout ===
+enum OT {
+    OT_ID       = 0;     # inline id (OT_ID_CAP)
+    OT_ID_LEN   = 32;
+    OT_NAME     = 40;    # inline display name (OT_NAME_CAP)
+    OT_NAME_LEN = 104;
+    OT_KW       = 112;   # inline keywords, NUL-terminated (OT_KW_CAP)
+    OT_KW_LEN   = 176;
+    OT_DESC_PTR = 184;
+    OT_DESC_LEN = 192;
+    OT_SIZE     = 200;
+}
+enum OtCap { OT_ID_CAP = 32; OT_NAME_CAP = 64; OT_KW_CAP = 64; }
+
+# === Object instance layout ===
+enum OI {
+    OI_NEXT      = 0;    # intrusive list (room / inventory / corpse)
+    OI_CONTENTS  = 8;    # head of contained items (containers / corpses)
+    OI_IS_CORPSE = 16;   # 1 for a synthesized corpse
+    OI_NAME      = 24;   # inline display name (OI_NAME_CAP)
+    OI_NAME_LEN  = 88;
+    OI_KW        = 96;   # inline keywords, NUL-terminated (OI_KW_CAP)
+    OI_KW_LEN    = 160;
+    OI_DESC_PTR  = 168;
+    OI_DESC_LEN  = 176;
+    OI_SIZE      = 184;
+}
+enum OiCap { OI_NAME_CAP = 64; OI_KW_CAP = 64; }
+
+var g_obj_tpls      = 0;
+var g_obj_tpl_count = 0;
+
+# === Template accessors ===
+fn ot_at(i): i64        { return g_obj_tpls + i * OT_SIZE; }
+
+# === Instance accessors ===
+fn oi_next(o): i64       { return load64(o + OI_NEXT); }
+fn oi_contents(o): i64   { return load64(o + OI_CONTENTS); }
+fn oi_is_corpse(o): i64  { return load64(o + OI_IS_CORPSE); }
+fn oi_name_ptr(o): i64   { return o + OI_NAME; }
+fn oi_name_len(o): i64   { return load64(o + OI_NAME_LEN); }
+fn oi_kw_ptr(o): i64     { return o + OI_KW; }       # NUL-terminated
+fn oi_desc_ptr(o): i64   { return load64(o + OI_DESC_PTR); }
+fn oi_desc_len(o): i64   { return load64(o + OI_DESC_LEN); }
+
+# === Intrusive list ops. `slot` is the ADDRESS of the head pointer
+# (room+RM_OBJ_HEAD, session+SS_INV, or corpse+OI_CONTENTS). ===
+fn ilist_push(slot, o): i64 {
+    store64(o + OI_NEXT, load64(slot));
+    store64(slot, o);
+    return 0;
+}
+fn ilist_remove(slot, o): i64 {
+    var head = load64(slot);
+    if (head == o) { store64(slot, oi_next(o)); store64(o + OI_NEXT, 0); return 0; }
+    var prev = head;
+    while (prev != 0) {
+        if (oi_next(prev) == o) {
+            store64(prev + OI_NEXT, oi_next(o));
+            store64(o + OI_NEXT, 0);
+            return 0;
+        }
+        prev = oi_next(prev);
+    }
+    return 0;
+}
+# First item in the list whose keywords the noun prefixes, or 0.
+fn ilist_find_kw(head, np, nl): i64 {
+    var o = head;
+    while (o != 0) {
+        if (kw_matches(np, nl, oi_kw_ptr(o)) == 1) { return o; }
+        o = oi_next(o);
+    }
+    return 0;
+}
+
+# === world_load_objs — parse a `<zone>.objs.cyml` into templates. ===
+fn world_load_objs(path): i64 {
+    var r = cyml_parse_file_r(path);
+    if (is_ok(r) == 0) { return WL_ERR_IO; }
+    var doc = result_unwrap(r);
+    var n = cyml_doc_entry_count(doc);
+    if (n <= 0)          { return WL_ERR_EMPTY; }
+    if (n > MAX_ENTRIES) { return WL_ERR_OVERCAP; }
+
+    g_obj_tpls = alloc(n * OT_SIZE);
+    memset(g_obj_tpls, 0, n * OT_SIZE);
+    g_obj_tpl_count = n;
+
+    var i = 0;
+    while (i < n) {
+        var e = cyml_doc_entry(doc, i);
+        var hs = str_new(cyml_entry_header(e), cyml_entry_header_len(e));
+        var secs = toml_parse(hs);
+        if (vec_len(secs) == 0) { return WL_ERR_NOID; }
+        var pairs = toml_section_pairs(vec_get(secs, 0));
+
+        var kind = toml_get(pairs, "kind");
+        if (kind == 0) { return WL_ERR_KIND; }
+        if (str_eq_cstr(kind, "obj") == 0) { return WL_ERR_KIND; }
+
+        var t = ot_at(i);
+        var id = toml_get(pairs, "id");
+        if (id == 0) { return WL_ERR_NOID; }
+        store64(t + OT_ID_LEN, copy_str_capped(t + OT_ID, OT_ID_CAP, id));
+        var name = toml_get(pairs, "name");
+        if (name != 0) { store64(t + OT_NAME_LEN, copy_str_capped(t + OT_NAME, OT_NAME_CAP - 1, name)); }
+        var kw = toml_get(pairs, "keywords");
+        if (kw != 0) { store64(t + OT_KW_LEN, copy_str_capped(t + OT_KW, OT_KW_CAP - 1, kw)); }
+        store64(t + OT_DESC_PTR, cyml_entry_body(e));
+        store64(t + OT_DESC_LEN, cyml_entry_body_len(e));
+        i = i + 1;
+    }
+    return n;
+}
+
+fn obj_tpl_by_id(buf, len): i64 {
+    var i = 0;
+    while (i < g_obj_tpl_count) {
+        var t = ot_at(i);
+        if (load64(t + OT_ID_LEN) == len) {
+            var a = t + OT_ID;
+            var j = 0; var same = 1;
+            while (j < len) {
+                if ((load8(a + j) & 0xFF) != (load8(buf + j) & 0xFF)) { same = 0; j = len; }
+                j = j + 1;
+            }
+            if (same == 1) { return t; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# === item_new — a fresh instance of object template `tpl`. ===
+fn item_new(tpl): i64 {
+    var o = alloc(OI_SIZE);
+    memset(o, 0, OI_SIZE);
+    store64(o + OI_NAME_LEN, copy_bytes_capped(o + OI_NAME, OI_NAME_CAP - 1, tpl + OT_NAME, load64(tpl + OT_NAME_LEN)));
+    store64(o + OI_KW_LEN,   copy_bytes_capped(o + OI_KW,   OI_KW_CAP - 1,   tpl + OT_KW,   load64(tpl + OT_KW_LEN)));
+    store64(o + OI_DESC_PTR, load64(tpl + OT_DESC_PTR));
+    store64(o + OI_DESC_LEN, load64(tpl + OT_DESC_LEN));
+    return o;
+}
+
+# Copy up to `cap` raw bytes; return bytes copied. (str-free variant of
+# copy_str_capped, for inline-to-inline template copies.)
+fn copy_bytes_capped(dst, cap, src, len): i64 {
+    var n = len;
+    if (n > cap) { n = cap; }
+    var i = 0;
+    while (i < n) { store8(dst + i, load8(src + i) & 0xFF); i = i + 1; }
+    return n;
+}
+
+# === corpse_new — a container instance "the corpse of <name>". ===
+fn corpse_new(name_ptr, name_len): i64 {
+    var o = alloc(OI_SIZE);
+    memset(o, 0, OI_SIZE);
+    store64(o + OI_IS_CORPSE, 1);
+    # name = "the corpse of " + mob name (bounded).
+    var lead = "the corpse of ";
+    var pos = 0;
+    pos = pos + copy_bytes_capped(o + OI_NAME + pos, OI_NAME_CAP - 1 - pos, lead, strlen(lead));
+    pos = pos + copy_bytes_capped(o + OI_NAME + pos, OI_NAME_CAP - 1 - pos, name_ptr, name_len);
+    store64(o + OI_NAME_LEN, pos);
+    # keywords: just "corpse" (NUL-terminated by memset tail).
+    copy_bytes_capped(o + OI_KW, OI_KW_CAP - 1, "corpse", 6);
+    store64(o + OI_KW_LEN, 6);
+    return o;
+}
+
+# === corpse_of — fill the combat hook: drop a loot-bearing corpse. ===
+# Called from mob_died (combat.cyr). Builds the corpse, spawns the mob's
+# loot into it, and pushes it onto the room's object list.
+fn corpse_of(m, room): i64 {
+    var tpl = mi_tpl(m);
+    var corpse = corpse_new(mt_name_ptr(tpl), mt_name_len(tpl));
+    # Spawn loot from the template's `loot` id list into the corpse.
+    var loot = mt_loot(tpl);
+    if (loot != 0) {
+        var p = str_data(loot);
+        var len = str_len(loot);
+        var i = 0;
+        while (i < len) {
+            if ((load8(p + i) & 0xFF) == 32) { i = i + 1; continue; }
+            var start = i;
+            while (i < len) { if ((load8(p + i) & 0xFF) == 32) { break; } i = i + 1; }
+            var ot = obj_tpl_by_id(p + start, i - start);
+            if (ot != 0) { ilist_push(corpse + OI_CONTENTS, item_new(ot)); }
+        }
+    }
+    ilist_push(room_at(room) + RM_OBJ_HEAD, corpse);
+    return 0;
+}
+
+# === player_drop_all — dump the player's inventory into the room. ===
+# Called on player death (combat.cyr). Moves every inventory item to the
+# room's object list.
+fn player_drop_all(s, room): i64 {
+    var o = load64(s + SS_INV);
+    while (o != 0) {
+        var nxt = oi_next(o);
+        ilist_push(room_at(room) + RM_OBJ_HEAD, o);
+        o = nxt;
+    }
+    store64(s + SS_INV, 0);
+    return 0;
+}
+
+# === ANSI for items (handled here to keep item prose self-contained). ===
+fn ansi_item(): i64 { return "\x1b[33m"; }   # yellow — objects / corpses
+
+# List the objects in room `room`, one per line. Called from
+# session_show_room (forward ref from session.cyr).
+fn session_append_objs(s, room): i64 {
+    var o = room_obj_head(room_at(room));
+    while (o != 0) {
+        session_appendtx_cstr(s, ansi_item());
+        session_appendtx(s, oi_name_ptr(o), oi_name_len(o));
+        session_appendtx_cstr(s, " lies here.");
+        session_appendtx_cstr(s, ansi_reset());
+        session_appendtx_cstr(s, "\r\n");
+        o = oi_next(o);
+    }
+    return 0;
+}
+
+# Append one item's display name (yellow).
+fn append_item_name(s, o): i64 {
+    session_appendtx_cstr(s, ansi_item());
+    session_appendtx(s, oi_name_ptr(o), oi_name_len(o));
+    session_appendtx_cstr(s, ansi_reset());
+    return 0;
+}
+
+# === get_from — move item(s) from `from_slot` to `to_slot`. ===
+# qall=1 with noun_l==0 → everything (skipping corpses); qall=1 with a
+# noun → every match; qall=0 → the first match. `where` names the source
+# for the not-found message.
+fn get_from(s, from_slot, to_slot, qall, np, nl, where): i64 {
+    if (qall == 1) {
+        var moved = 0;
+        var o = load64(from_slot);
+        while (o != 0) {
+            var nxt = oi_next(o);
+            var take = 1;
+            if (oi_is_corpse(o) == 1) { take = 0; }                 # never auto-take corpses
+            if (nl > 0) { if (kw_matches(np, nl, oi_kw_ptr(o)) == 0) { take = 0; } }
+            if (take == 1) {
+                ilist_remove(from_slot, o);
+                ilist_push(to_slot, o);
+                session_appendtx_cstr(s, "You take ");
+                append_item_name(s, o);
+                session_appendtx_cstr(s, ".\r\n");
+                moved = moved + 1;
+            }
+            o = nxt;
+        }
+        if (moved == 0) { session_appendtx_cstr(s, "There is nothing to take.\r\n"); }
+        return 0;
+    }
+    var o = ilist_find_kw(load64(from_slot), np, nl);
+    if (o == 0) {
+        session_appendtx_cstr(s, "There is nothing like that ");
+        session_appendtx_cstr(s, where);
+        session_appendtx_cstr(s, ".\r\n");
+        return 0;
+    }
+    if (oi_is_corpse(o) == 1) {
+        session_appendtx_cstr(s, "You can't carry that.\r\n");
+        return 0;
+    }
+    ilist_remove(from_slot, o);
+    ilist_push(to_slot, o);
+    session_appendtx_cstr(s, "You take ");
+    append_item_name(s, o);
+    session_appendtx_cstr(s, ".\r\n");
+    return 0;
+}
+
+# === cmd_get — get <item> [from <container>], get all [from <corpse>]. ===
+fn cmd_get(s, pa): i64 {
+    if (world_room_count() == 0) { session_appendtx_cstr(s, "There is nothing here.\r\n"); return 0; }
+    if (parsed_has_dobj(pa) == 0) { session_appendtx_cstr(s, "Get what?\r\n"); return 0; }
+    var di = parsed_dobj(pa);
+    var room = load64(s + SS_ROOM);
+    var room_slot = room_at(room) + RM_OBJ_HEAD;
+    var inv_slot = s + SS_INV;
+
+    var kind[8]; var num[8]; var bp[8]; var bl[8];
+    qual_parse(pa, di, &kind, &num, &bp, &bl);
+    var qall = 0;
+    if (load64(&kind) == QUAL_ALL) { qall = 1; }
+    var np = load64(&bp);
+    var nl = load64(&bl);
+
+    # get X from <container>
+    if (parsed_prep(pa) == PREP_FROM) {
+        if (parsed_has_iobj(pa) == 1) {
+            var ii = parsed_iobj(pa);
+            var container = ilist_find_kw(load64(room_slot), tok_ptr(pa, ii), tok_len(pa, ii));
+            if (container == 0) {
+                session_appendtx_cstr(s, "You see no ");
+                session_appendtx_tok(s, pa, ii);
+                session_appendtx_cstr(s, " here.\r\n");
+                return 0;
+            }
+            return get_from(s, container + OI_CONTENTS, inv_slot, qall, np, nl, "in there");
+        }
+    }
+    # get X from the room
+    return get_from(s, room_slot, inv_slot, qall, np, nl, "here");
+}
+
+# === cmd_drop — drop <item> / drop all from inventory to the room. ===
+fn cmd_drop(s, pa): i64 {
+    if (world_room_count() == 0) { session_appendtx_cstr(s, "There is nowhere to drop it.\r\n"); return 0; }
+    if (parsed_has_dobj(pa) == 0) { session_appendtx_cstr(s, "Drop what?\r\n"); return 0; }
+    var di = parsed_dobj(pa);
+    var inv_slot = s + SS_INV;
+    var room_slot = room_at(load64(s + SS_ROOM)) + RM_OBJ_HEAD;
+
+    var kind[8]; var num[8]; var bp[8]; var bl[8];
+    qual_parse(pa, di, &kind, &num, &bp, &bl);
+    var np = load64(&bp);
+    var nl = load64(&bl);
+
+    if (load64(&kind) == QUAL_ALL) {
+        var moved = 0;
+        var o = load64(inv_slot);
+        while (o != 0) {
+            var nxt = oi_next(o);
+            var take = 1;
+            if (nl > 0) { if (kw_matches(np, nl, oi_kw_ptr(o)) == 0) { take = 0; } }
+            if (take == 1) {
+                ilist_remove(inv_slot, o);
+                ilist_push(room_slot, o);
+                session_appendtx_cstr(s, "You drop ");
+                append_item_name(s, o);
+                session_appendtx_cstr(s, ".\r\n");
+                moved = moved + 1;
+            }
+            o = nxt;
+        }
+        if (moved == 0) { session_appendtx_cstr(s, "You have nothing to drop.\r\n"); }
+        return 0;
+    }
+    var o = ilist_find_kw(load64(inv_slot), np, nl);
+    if (o == 0) { session_appendtx_cstr(s, "You aren't carrying that.\r\n"); return 0; }
+    ilist_remove(inv_slot, o);
+    ilist_push(room_slot, o);
+    session_appendtx_cstr(s, "You drop ");
+    append_item_name(s, o);
+    session_appendtx_cstr(s, ".\r\n");
+    return 0;
+}
+
+# === cmd_inventory — list what the player carries. ===
+fn cmd_inventory(s): i64 {
+    var o = load64(s + SS_INV);
+    if (o == 0) { session_appendtx_cstr(s, "You carry nothing.\r\n"); return 0; }
+    session_appendtx_cstr(s, "You are carrying:\r\n");
+    while (o != 0) {
+        session_appendtx_cstr(s, "  ");
+        append_item_name(s, o);
+        session_appendtx_cstr(s, "\r\n");
+        o = oi_next(o);
+    }
+    return 0;
+}

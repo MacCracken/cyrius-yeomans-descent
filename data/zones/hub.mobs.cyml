@@ -1,0 +1,59 @@
+zone = "hub"
+name = "The Hub — Bestiary"
+[[entries]]
+kind = "mob"
+id = "scavver"
+name = "a hunched scrap-scavver"
+keywords = "scavver scrap hunched"
+level = 1
+hp = 10
+ac = 9
+hit = 0
+damage = "1d4"
+loot = "scrip"
+---
+A stooped figure in layered rags, fingers worn to horn from a life of
+picking salvage. It eyes you the way it eyes everything: as parts.
+[[entries]]
+kind = "mob"
+id = "rustdrone"
+name = "a rust-pitted security drone"
+keywords = "rust drone security pitted"
+level = 2
+hp = 18
+ac = 7
+hit = 1
+damage = "1d6"
+loot = "cell shard"
+---
+A derelict enforcement drone, hovering on a stuttering repulsor and trailing
+sparks. Its target-lock optic still glows a patient, hostile red.
+[[entries]]
+kind = "mob"
+id = "gangrel"
+name = "a wire-gang enforcer"
+keywords = "wire gang enforcer gangrel"
+level = 3
+hp = 26
+ac = 6
+hit = 2
+damage = "1d8"
+loot = "scrip cell"
+---
+Muscle for one of the cable-fiefs, sheathed in scavenged riot-plate and
+carrying a length of live conduit like a club. It does not ask questions.
+[[entries]]
+kind = "mob"
+id = "sentinel"
+name = "the Foundry Sentinel"
+keywords = "foundry sentinel boss"
+level = 5
+hp = 45
+ac = 4
+hit = 4
+damage = "2d6+1"
+loot = "core scrip"
+---
+A war-frame from the city's better days, still bolted to the overseer's post
+and still, somehow, awake. Molten light leaks from the seams of its armour as
+it turns the full weight of its attention on you.

@@ -84,6 +84,7 @@ fn open_listener(port): i64 {
 var g_tick_count = 0;
 fn advance_tick(): i64 {
     g_tick_count = g_tick_count + 1;
+    combat_tick_all();   # resolve a combat round for every engaged session
     return 0;
 }
 
@@ -95,10 +96,9 @@ var g_session_count = 0;
 # live connection without a separate container.
 var g_session_head = 0;
 
-# The epoll fd, published as a global so room broadcasts (M3-C) can flush
-# onlooker sessions immediately. Single-thread loop, so a global is safe;
-# set once at serve start.
-var g_epfd = 0;
+# g_epfd (the published epoll fd, used by broadcast/flush) is declared in
+# session.cyr so combat.cyr — included before server.cyr — can reference
+# it. cmd_serve assigns it at startup.
 
 # Idle-disconnect threshold (ms). Default 5 minutes; overridable at
 # startup via the YD_IDLE_MS env var (testing / ops tuning).
@@ -326,7 +326,7 @@ fn room_broadcast(room_idx, except_s, mover_s, a, b, c): i64 {
                     session_appendtx_cstr(t, a);
                     session_appendtx_cstr(t, b);
                     session_appendtx_cstr(t, c);
-                    if (flush_session(g_epfd, t) == 0) { drop_session(g_epfd, t); }
+                    flush_session(g_epfd, t);   # non-dropping (see deliver_to)
                 }
             }
         }
@@ -335,10 +335,27 @@ fn room_broadcast(room_idx, except_s, mover_s, a, b, c): i64 {
     return 0;
 }
 
-# Flush one session immediately (e.g. a directed `tell` recipient who has
-# no pending event this cycle). Drops the session on a flush error.
+# Flush one session immediately (e.g. a directed `tell` recipient, or a
+# combatant mid-tick). Non-dropping: a broken socket is reaped on its next
+# epoll HUP in dispatch_session, never freed here — so this is safe to call
+# while walking the session list (the combat tick does).
 fn deliver_to(t): i64 {
-    if (flush_session(g_epfd, t) == 0) { drop_session(g_epfd, t); }
+    flush_session(g_epfd, t);
+    return 0;
+}
+
+# Resolve one combat round for every engaged, logged-in session. Called
+# from advance_tick. The tick never frees a session, so the walk is safe
+# even though combat prose flushes mid-loop.
+fn combat_tick_all(): i64 {
+    var s = g_session_head;
+    while (s != 0) {
+        var nxt = load64(s + SS_NEXT);
+        if (load64(s + SS_PHASE) == PHASE_CMD) {
+            if (load64(s + SS_TARGET) != 0) { combat_round(s); }
+        }
+        s = nxt;
+    }
     return 0;
 }
 
@@ -360,7 +377,7 @@ fn room_say_broadcast(room_idx, except_s, speaker_s, lead, body, body_len, tail)
                     session_appendtx_cstr(t, lead);
                     session_appendtx(t, body, body_len);
                     session_appendtx_cstr(t, tail);
-                    if (flush_session(g_epfd, t) == 0) { drop_session(g_epfd, t); }
+                    flush_session(g_epfd, t);   # non-dropping (see deliver_to)
                 }
             }
         }
@@ -486,11 +503,23 @@ fn cmd_serve(port): i64 {
         println("world: loaded zone");
         print_num(world_room_count());
         println(" rooms");
+        # Object + mob templates, then spawn mobs into rooms (M4).
+        var oc = world_load_objs("data/zones/hub.objs.cyml");
+        if (oc >= 0) { print_num(oc); println(" object templates"); }
+        var mc = world_load_mobs("data/zones/hub.mobs.cyml");
+        if (mc >= 0) {
+            var sp = world_spawn_all();
+            print_num(mc); print(" mob templates, ", 16); print_num(sp); println(" spawned");
+        } else {
+            println("world: no mobs loaded (code below)");
+            print_num(mc); println("");
+        }
     } else {
         println("world: no zone loaded (code below) — running roomless");
         print_num(wl);
         println("");
     }
+    combat_seed(clock_now_ms());   # seed the hidden-roll RNG (M4)
     println("yeoman's descent — starting event-loop listener");
     println("server: listening on port");
     print_num(port);

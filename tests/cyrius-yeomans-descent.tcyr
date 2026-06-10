@@ -4,7 +4,10 @@
 include "src/telnet.cyr"
 include "src/parser.cyr"
 include "src/world.cyr"
+include "src/mob.cyr"
 include "src/session.cyr"
+include "src/item.cyr"
+include "src/combat.cyr"
 
 # Feed a byte and assert the returned TelEvent.
 fn feed_is(ts, b, want_ev, name): i64 {
@@ -489,6 +492,80 @@ fn test_world(): i64 {
     return 0;
 }
 
+# === M4 — combat: dice, mobs, items, corpses ===
+fn test_combat(): i64 {
+    test_group("combat");
+
+    # parse_dice
+    var nd[8]; var dd[8]; var dm[8];
+    parse_dice(str_from("2d6+1"), &nd, &dd, &dm);
+    assert_eq(load64(&nd), 2, "2d6+1 → 2 dice");
+    assert_eq(load64(&dd), 6, "2d6+1 → d6");
+    assert_eq(load64(&dm), 1, "2d6+1 → +1");
+    parse_dice(str_from("1d4"), &nd, &dd, &dm);
+    assert_eq(load64(&dd), 4, "1d4 → d4");
+    assert_eq(load64(&dm), 0, "1d4 → +0");
+    parse_dice(str_from("junk"), &nd, &dd, &dm);
+    assert_eq(load64(&dd), 4, "malformed → 1d4 default");
+
+    # die / roll bounds (seeded)
+    combat_seed(99);
+    var lo = 99; var hi = 0; var k = 0;
+    while (k < 300) { var x = die(6); if (x < lo) { lo = x; } if (x > hi) { hi = x; } k = k + 1; }
+    assert_eq(lo, 1, "die(6) min is 1");
+    assert_eq(hi, 6, "die(6) max is 6");
+    k = 0; lo = 999; hi = 0;
+    while (k < 300) { var x = roll(2, 6, 1); if (x < lo) { lo = x; } if (x > hi) { hi = x; } k = k + 1; }
+    assert(lo >= 3, "2d6+1 floor is 3");
+    assert(hi <= 13, "2d6+1 ceiling is 13");
+
+    # combat_try_hit produces both outcomes on a coin-flip case.
+    var hits = 0; var misses = 0; k = 0;
+    while (k < 300) {
+        if (combat_try_hit(0, 8) == 1) { hits = hits + 1; } else { misses = misses + 1; }
+        k = k + 1;
+    }
+    assert(hits > 0, "some attacks hit");
+    assert(misses > 0, "some attacks miss");
+
+    # Mob templates from the Hub bestiary.
+    assert(world_load_mobs("data/zones/hub.mobs.cyml") >= 4, "hub mobs load");
+    var rd = mob_tpl_by_id("rustdrone", 9);
+    assert(rd != 0, "rustdrone template found");
+    assert_eq(mt_hp(rd), 18, "rustdrone hp 18");
+    assert_eq(mt_ac(rd), 7, "rustdrone ac 7");
+    assert_eq(mt_ndice(rd), 1, "rustdrone 1 die");
+    assert_eq(mt_dsize(rd), 6, "rustdrone d6");
+
+    # Object templates.
+    assert(world_load_objs("data/zones/hub.objs.cyml") >= 4, "hub objs load");
+    assert(obj_tpl_by_id("scrip", 5) != 0, "scrip template found");
+
+    # Spawn into a fixture room, find by keyword, remove.
+    world_load_rooms("tests/fixtures/loop.rooms.cyml");
+    var m = mob_spawn(rd, 0);
+    assert_eq(room_mob_head(room_at(0)), m, "spawned mob on room list");
+    assert(mob_in_room_by_kw(0, "rust", 4) == m, "found by keyword prefix");
+    assert(mob_in_room_by_kw(0, "zzz", 3) == 0, "no keyword match → 0");
+    mob_remove(m);
+    assert_eq(room_mob_head(room_at(0)), 0, "removed from room list");
+
+    # Corpse + loot.
+    var c = corpse_new("a test mob", 10);
+    assert_eq(oi_is_corpse(c), 1, "corpse_new flags corpse");
+    assert_eq(kw_matches("corpse", 6, oi_kw_ptr(c)), 1, "corpse matches 'corpse'");
+    store64(rd + MT_LOOT, str_from("scrip cell"));
+    corpse_of(mob_spawn(rd, 0), 0);
+    var corpse = room_obj_head(room_at(0));
+    assert(corpse != 0, "corpse left in room");
+    assert_eq(oi_is_corpse(corpse), 1, "room object is a corpse");
+    var cnt = 0; var o = oi_contents(corpse);
+    while (o != 0) { cnt = cnt + 1; o = oi_next(o); }
+    assert_eq(cnt, 2, "corpse holds 2 loot items");
+
+    return 0;
+}
+
 # === M1-F — idle predicate ===
 fn test_idle(): i64 {
     test_group("idle");
@@ -519,6 +596,7 @@ fn main() {
     test_prep();
     test_qual();
     test_world();
+    test_combat();
     test_idle();
 
     return assert_summary();
