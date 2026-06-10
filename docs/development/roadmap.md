@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-06-09
+> **Last Updated**: 2026-06-10 (v1.0.0)
 >
 > Milestone plan through v1.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
@@ -107,40 +107,40 @@ Four classes go from text-table flavor to playable mechanics.
 
 **Gate:** each class fully playable solo through the starter zone; ability-cooldown text legible inside the tick prose stream.
 
-### M6 — Persistence via T.Ron (v0.7.0)
+### M6 — Persistence via libro + sigil (v0.7.0) ✅
 
-Players survive server restart. Crash-safe writes. Asynchronous (or queued) — disk I/O cannot block the loop ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md) negative consequence).
+Players survive server restart. Crash-safe writes. Queued — disk I/O cannot block the loop ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md) negative consequence). **Shipped at 0.7.0.** (Originally framed "via T.Ron"; the t-ron repo is an MCP security monitor and is not used — the crash-safe primitive is **libro**, with **sigil** for identity. See [ADR 0006](../adr/0006-persistence-shape.md).)
 
-**Sub-bites:**
+**Sub-bites (as shipped):**
 
-- **M6-A — T.Ron dep landing.** Pull T.Ron into `cyrius.cyml [deps]`. If T.Ron isn't ready, this milestone moves; the dep gap is tracked in `state.md`.
-- **M6-B — Identity model ADR.** **ADR 0004 ([open](#open-adrs))** — name+password (era-correct) vs sigil Ed25519 (AGNOS-ecosystem aligned). Decided before any M6 code.
-- **M6-C — Player save shape.** Attrs (STR / DEX / CON / TEC + class + level + XP), inventory (object ids + counts + worn/wielded slot bindings), location (zone + room id), HP / stamina, identity (name + hashed password OR fingerprint), creation / last-login timestamps.
-- **M6-D — Save triggers.** On `quit`, on `save`, on every level-up, and on a debounced timer (every 5 minutes per player) — but **queued, never inline** in the loop.
+- **M6-A — dep landing.** `[deps.libro]` 2.7.1, pulling sigil/sakshi/patra/agnosys transitively; the required opt-in stdlib listed in `cyrius.cyml`.
+- **M6-B — Identity model.** [ADR 0004](../adr/0004-identity-and-authentication.md): **Ed25519 keypair derived from `SHA-256(salt‖passphrase)`** (sigil) — server stores only salt + pubkey.
+- **M6-C — Player save shape.** Attrs (STR / DEX / CON / TEC + class), inventory (template ids), location (room id), HP / energy / combat profile, identity (salt + pubkey), creation / last-login timestamps. (No level/XP — not implemented.)
+- **M6-D — Save triggers.** On `quit`, on `save`, on character creation, and on a debounced ~5-minute tick sweep — **queued, never inline** in the loop.
 - **M6-E — Load on login.** Look up by name; restore full state into a session struct; place into the recorded room (or starter Hub if the room no longer exists).
-- **M6-F — Crash-safe writes.** Atomic file replacement (write to `.tmp` + rename), per T.Ron's transactional semantics. Partial writes recovered on next start.
+- **M6-F — Crash-safe writes.** Atomic file replacement (write to `.tmp` + rename). Each record is Ed25519-signed; partial writes are discarded on next start.
 
-**Gate:** `kill -9` the server mid-tick during active combat → restart → no player data loss; the player respawns at their last room with full attrs / inventory.
+**Gate met:** `kill -9` mid-tick during active combat → restart → no player data loss; the player respawns at their last room with full attrs / inventory.
 
-### M7 — Zone resets (v0.8.0)
+### M7 — Zone resets (v0.8.0) ✅
 
-Mobs and loot respawn. Players don't get respawn-stomped.
+Mobs and loot respawn. Players don't get respawn-stomped. **Shipped at 0.8.0.**
 
-**Sub-bites:**
+**Sub-bites (as shipped):**
 
-- **M7-A — Per-zone reset timer.** Configurable interval per zone (default 15-30 min); tracked from last reset, not last server start.
+- **M7-A — Per-zone reset timer.** Configurable per zone via the `reset_secs` header field (the Hub uses 15 min); `YD_RESET_SECS` overrides. Tracked from last reset, not last server start.
 - **M7-B — Player-presence gate.** Reset checks every room in the zone; if any room contains a connected player, defer the reset to the next tick. (Empty-zone check is single-writer per [ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md) — no race.)
-- **M7-C — Mob respawn.** From zone-file mob spawns; full HP / inventory; original position. Existing-but-dead mob slot reused.
-- **M7-D — Loot respawn.** Object spawns reapplied; existing objects in the room left in place (no double-up).
-- **M7-E — Reset event log.** Each reset writes a single line: `[ts] zone=X reset (rooms=N, mobs=M, objs=O)`. Joshua reads this at M8.
+- **M7-C — Mob respawn.** From zone-file mob spawns; full HP; tops each room up to its authored mob multiset (living mobs not duplicated).
+- **M7-D — Loot respawn.** Object spawns reapplied; existing objects in the room left in place (no double-up, matched by template id).
+- **M7-E — Reset event log.** Each reset writes a single line: `[ts] zone=X reset (rooms=N, mobs=M, objs=O)` — for the operator interface (post-1.0) to read.
 
-**Gate:** empty zone resets within its window; a zone with a player in any room does not reset; reset event log matches observed state.
+**Gate met:** empty zone resets within its window; a zone with a player in any room does not reset; reset event log matches observed state.
 
-### M8 — Joshua management interface (v0.9.0)
+### M8 — Joshua management interface (deferred — post-1.0)
 
-The operator surface. Joshua is the AGNOS game-management tool; this milestone wires the MUD's admin verbs into it.
+The operator surface. Joshua is the AGNOS game-management tool; this milestone wires the MUD's admin verbs into it. **Deferred to post-1.0** — 1.0.0 ships without it. The verb groundwork exists: `@stats` / `@who` / `@reset` (`render_*` in `server.cyr`), gated behind `YD_ADMIN`; `g_session_head` enumerates sessions; `g_zone_last_reset_ms = 0` forces a reset; the libro audit chain + reset log are the data surfaces. The remaining work is the Joshua control channel + replacing the `YD_ADMIN` gate with real operator authentication.
 
-**Sub-bites:**
+**Sub-bites (post-1.0):**
 
 - **M8-A — Joshua dep landing.** Pull Joshua into `cyrius.cyml [deps]`. Same dep-gap caveat as M6.
 - **M8-B — Live player list.** `joshua mud players` → name / class / level / location / idle-time / connection-time.
@@ -151,20 +151,22 @@ The operator surface. Joshua is the AGNOS game-management tool; this milestone w
 
 **Gate:** the v1.0 live-ops procedures (kick a misbehaving player, ban a repeat offender, broadcast a server-restart warning, reload a zone after a content fix) are all runnable from Joshua alone, no MUD-server shell access required.
 
-### M9 — Hardening + v1.0 (v1.0.0)
+### M9 — Hardening → 1.0 (executed across 0.9.0 / 0.9.1 / 1.0.0)
 
-The closeout.
+The closeout. Rather than one milestone, this shipped as the 0.9.x line: the
+security sweep at **0.9.0**, the surface freeze at **0.9.1** ([ADR 0007](../adr/0007-frozen-1.0-surface.md)),
+and the clean release at **1.0.0**.
 
 **Sub-bites:**
 
-- **M9-A — Security audit.** Full sweep per [CLAUDE.md § Process](../../CLAUDE.md) and [first-party-standards § Security Hardening](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md#security-hardening-required-before-every-release). Every input path (Telnet bytes, command lines, zone files, save files, Joshua RPC), every buffer, every syscall consumer. Findings filed at `docs/audit/YYYY-MM-DD-audit.md`. Severity-graded (CRITICAL / HIGH / MEDIUM / LOW). All CRITICAL / HIGH close before 1.0; MEDIUM / LOW may carry forward with a written deferral rationale.
-- **M9-B — CVE sweep.** Cross-check the codebase against the historical MUD-server CVE record (CircleMUD / tinymud / SMAUG / DikuMUD-family disclosures) — buffer overflows in IAC handling, parser stack-smash via long input lines, save-file path traversal, command-shell injection via player names.
-- **M9-C — Benchmark baselines locked.** `docs/benchmarks.md` snapshot: IAC parser ns/byte, verb-parser p99 µs, tick-drift p99 ms at N players, accept-loop sessions/sec. Re-runs at every future minor compare against the 1.0 baseline.
-- **M9-D — Public API freeze.** Anything outside `src/` that another tool would script against (Joshua RPC surface, zone-file schema, save-file schema) gets a written ABI/format contract. Future changes need an ADR + migration path.
-- **M9-E — Closeout pass.** Per [CLAUDE.md § Process](../../CLAUDE.md): full test suite, benchmark baseline re-run, dead-code audit, refactor pass on the minor's accretion, doc sync (CHANGELOG, state.md, doc-health.md), version verification (`VERSION` / `cyrius.cyml` / git tag in lockstep), clean DCE build.
-- **M9-F — Internal playtest.** Summer-of-Games slate. Two-week multi-player session with the AGNOS internal cohort. Crash-bug-free; no player-data corruption; no operator-required intervention more than once per day. Sign-off in `docs/audit/YYYY-MM-DD-playtest.md`.
+- **M9-A — Security audit (✅ 0.9.0).** Full sweep over every input path (Telnet bytes, command lines, zone files, save files), buffers, and syscall consumers. Found + fixed two heap overflows (one pre-auth), an OOB read, and a DoS; documented in the CHANGELOG 0.9.0 entry. (No Joshua RPC surface — M8 deferred.)
+- **M9-B — CVE sweep (✅ 0.9.0).** Cross-checked against current CVE classes — telnet pre-auth option-negotiation overflows (CVE-2026-32746), Ed25519 malleability (CVE-2020-36843), MUD-family buffer/injection bugs. Applicability judged and documented.
+- **M9-C — Benchmark baselines.** Combat-tick bench in `benches/`; parser/world p99 baselines remain a post-1.0 nicety (not a 1.0 gate).
+- **M9-D — Public surface freeze (✅ 0.9.1).** [ADR 0007](../adr/0007-frozen-1.0-surface.md): command verbs + `@`-namespace, the save-record schema (now `schema`-stamped), Telnet/wire behaviour, the zone-file format, and the env knobs are locked for 1.x. Post-1.0 changes need a major bump or a `schema` migration.
+- **M9-E — Closeout pass (1.0.0).** Full test suite (298 assertions), dead-code/DCE build, doc sync (README, guides, CHANGELOG, state.md), version verification (`VERSION` / `cyrius.cyml` / `VERSION_STRING` in lockstep).
+- **M9-F — Internal playtest (1.0.0).** Multi-player session with the AGNOS internal cohort: crash-bug-free; no player-data corruption.
 
-**Gate:** all v1.0 criteria green; sign-off captured.
+**Gate:** all v1.0 criteria (below) green.
 
 ---
 
@@ -186,6 +188,11 @@ Brief one-liners; per-tag chronology in [`../../CHANGELOG.md`](../../CHANGELOG.m
 - **M3 (0.4.0)** — the world becomes physical. [ADR 0005](../adr/0005-zone-file-format.md) picks CYML for zone files; the loader (`src/world.cyr`, M3-B) builds an in-memory room tree at boot and rejects dangling exits. Movement (M3-C) with onlooker broadcasts, ANSI room rendering (M3-D), inspection verbs (M3-E, `examine` resolving the M2 parser against live room presence), room-scoped `say`/`emote` + cross-room `tell` + `who` (M3-F), and the authored 21-room Hub starter zone (M3-G, `data/zones/hub.rooms.cyml`). Gate met: two players walk the Hub end-to-end seeing each other's arrivals / departures / says; 174-assertion suite.
 - **M4 (0.5.0)** — the combat tick. Mobs (`src/mob.cyr`) and items/corpses (`src/item.cyr`) load from `<zone>.mobs/.objs.cyml`; combat (`src/combat.cyr`) resolves a hidden-roll round per tick inside `advance_tick` (M4-A/B/C/D), with `kill`/`flee`, death → corpse + loot, and player respawn (M4-E/F). The Hub gains a bestiary (scavver → Foundry Sentinel boss) and loot tables. Gate met: `benches/bench_combat.bcyr` ticks 32 players × 64 mobs at p99 ≈ 62 µs (50 ms budget); 203-assertion suite.
 - **M5 (0.6.0)** — the four classes (`src/classes.cyr`, `data/classes.cyml`). Class selection at login (M5-A), per-class attributes + combat profile (M5-B), and twelve abilities (M5-C..F) on an energy + tick-cooldown + status framework (M5-G) that composes with the auto-attack. Gate met: each class clears the Hub solo and kills the Foundry Sentinel without dying (M5-H); 232-assertion suite.
+- **M6 (0.7.0)** — player persistence via **libro + sigil** (`src/persist.cyr`). Ed25519 identity derived from a passphrase ([ADR 0004](../adr/0004-identity-and-authentication.md)); crash-safe signed per-player CYML saves with `.tmp`+rename writes ([ADR 0006](../adr/0006-persistence-shape.md)); load+auth on login; libro audit chain. Gate met: `kill -9` mid-tick → restart → no data loss.
+- **M7 (0.8.0)** — zone resets (`src/server.cyr` `maybe_zone_reset`, `mob.cyr`/`item.cyr` respawn). Per-zone `reset_secs` timer, player-presence gate (defer while occupied), mob/loot top-up without duplication, reset event log. Gate met: empty zone resets in window; occupied zone defers.
+- **0.8.1–0.8.3** — polish: password echo suppression + `passwd` verb + last-seen greeting (0.8.1); lived-in Hub room objects (0.8.2); `@who` / `@reset` operator verbs (0.8.3).
+- **0.9.0** — security sweep: CVE-class audit + two heap-overflow / OOB / DoS fixes (save-load validation; "a signature proves authorship, not field validity").
+- **0.9.1** — surface freeze ([ADR 0007](../adr/0007-frozen-1.0-surface.md)): save `schema` stamp; `@`-admin gated behind `YD_ADMIN`.
 
 ---
 
@@ -193,29 +200,28 @@ Brief one-liners; per-tag chronology in [`../../CHANGELOG.md`](../../CHANGELOG.m
 
 A release qualifies for 1.0 when:
 
-1. **M0–M8 + hardening have all shipped at least once.**
-2. **`cyrius audit` passes from a clean build** (lint / test / bench / doc).
+1. **M0–M7 + the 0.8.x polish + 0.9.x hardening have all shipped.** (M8 — the Joshua operator interface — is deferred post-1.0 and is **not** a 1.0 gate.)
+2. **Build + test + bench pass from a clean build.**
 3. **TCP / Telnet server accepts concurrent player sessions reliably** — connect → log in → walk a zone → engage combat → die / loot / quit, across N simultaneous sessions without state corruption.
 4. **Verb-noun parser handles the full v1.0 verb table without ambiguity** — fuzz harness clean against 100k random inputs.
 5. **Combat tick (2.5s) runs deterministically under load** — drift < 50 ms p99 with all four classes engaged across N players × M mobs.
 6. **Zone reset semantics enforced** — no respawn while players present; respawn within the reset window once empty.
-7. **T.Ron-backed persistence** — players survive `kill -9` mid-tick; no data loss.
-8. **Joshua game management interface online for live ops** — operator can list / kick / ban / broadcast / reload zones.
-9. **Security audit pass logged** in `docs/audit/YYYY-MM-DD-audit.md`.
-10. **Benchmarks captured** in `docs/benchmarks.md` (tick throughput, parser p99, connection capacity).
-11. **CHANGELOG complete** from v0.1.0 onward.
+7. **libro + sigil-backed persistence** — players survive `kill -9` mid-tick; no data loss; Ed25519-signed, validated-on-load records.
+8. **Security sweep passed** — memory-safety + CVE-class audit complete, all findings fixed (0.9.0); save-load validation in force.
+9. **Public surface frozen** — [ADR 0007](../adr/0007-frozen-1.0-surface.md); save records `schema`-stamped; `@`-admin gated behind `YD_ADMIN`.
+10. **CHANGELOG complete** from v0.1.0 onward; README + guides current.
 
 ---
 
-## Open ADRs
+## ADRs
 
-The decisions queued ahead of their consumer milestones:
+All ADRs are filed and **Accepted** — none open at 1.0. Index in [`../adr/README.md`](../adr/README.md):
 
-- **ADR 0004 — Identity & authentication model.** Name+password (DikuMUD/CircleMUD tradition, era-correct, no key-management UX cost) vs sigil Ed25519 (AGNOS-ecosystem aligned, agora-precedented, no password-on-wire — but Telnet has no TLS so plaintext passwords are the same problem). Resolved before **M6-B**.
-- ~~**ADR 0005 — Zone file format.**~~ **Resolved 2026-06-09** → [ADR 0005](../adr/0005-zone-file-format.md): **CYML** (`lib/cyml.cyr`), one file per zone per entity kind (`<zone>.rooms/.mobs/.objs.cyml`), ≤ 32 entries/file. Header fields + markdown prose body per entry.
-- **ADR 0006 — Persistence shape with T.Ron.** Per-player file vs single-store transactional log vs hybrid. Depends on T.Ron's transactional API surface as of M6 landing. Resolved at **M6-A**.
+- [0001](../adr/0001-tick-based-combat-over-cooldowns.md) tick-based combat · [0002](../adr/0002-raw-tcp-telnet-protocol.md) raw TCP/Telnet · [0003](../adr/0003-single-thread-event-loop-concurrency.md) single-thread event loop
+- [0004](../adr/0004-identity-and-authentication.md) Ed25519 identity from a passphrase (resolved at M6) · [0005](../adr/0005-zone-file-format.md) CYML zone format (M3) · [0006](../adr/0006-persistence-shape.md) per-player signed saves + libro audit (M6)
+- [0007](../adr/0007-frozen-1.0-surface.md) frozen 1.0 surface (0.9.1)
 
-Filed when their first consumer lands; numbered in flight, not pre-allocated.
+Post-1.0, the Joshua operator channel (M8) likely earns a new ADR if it adds a new wire/auth surface.
 
 ---
 

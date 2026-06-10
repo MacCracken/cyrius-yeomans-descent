@@ -3,7 +3,7 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-06-09
+> **Last refresh**: 2026-06-10 (v1.0.0)
 
 ## Version
 
@@ -152,7 +152,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (203 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (298 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -181,7 +181,7 @@ Binary at `build/cyrius-yeomans-descent` (~229 KB with `CYRIUS_DCE=1`).
 
 ## Tests
 
-`cyrius test tests/cyrius-yeomans-descent.tcyr` — 240 unit assertions:
+`cyrius test tests/cyrius-yeomans-descent.tcyr` — 298 unit assertions:
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,

@@ -84,7 +84,7 @@ loop forever:
 **Negative**
 
 - **One CPU core is the ceiling.** A hot loop that pegs a single core caps total throughput. The hybrid (H) split is the documented escape hatch, but until then the upper bound is real.
-- **Any blocking call stalls every player.** A synchronous disk write inside the loop pauses combat, movement, and chat for everyone. T.Ron's persistence layer (M6) must offer either non-blocking writes or a queue-and-flush model; if it doesn't, that becomes a load-bearing requirement at M6 integration time.
+- **Any blocking call stalls every player.** A synchronous disk write inside the loop pauses combat, movement, and chat for everyone. The persistence layer (M6) must offer either non-blocking writes or a queue-and-flush model. _(Resolved at M6: persistence is libro+sigil — [ADR 0006](0006-persistence-shape.md) — with queued, debounced, never-inline saves; the original "T.Ron" framing was dropped.)_
 - **A bug in one player's command path can hang the world.** A parser infinite loop on a malformed input freezes every other player. The verb parser fuzz harness (M2 gate) earns its keep here — protection that wasn't strictly necessary in a fork-isolated model is necessary now.
 - **No "trivial" per-session resource isolation.** A pathological client cannot crash the server (no per-conn address space to corrupt the parent through), but it can consume the loop's CPU budget. Input rate limiting and slowloris-style timeouts move from "operational nicety" to "load-bearing safety net."
 

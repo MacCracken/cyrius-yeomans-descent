@@ -4,6 +4,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-06-10
+
+**Yeoman's Descent 1.0 — feature-complete.** The clean cut: a stabilisation-only
+release against the frozen 0.9.1 surface ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)).
+No new verbs, save fields, zone fields, or env knobs — nothing observable
+changed from 0.9.1. The full game loop is implemented, secured, and documented.
+
+### The 1.0 game
+
+- **Wire** — raw TCP / Telnet, RFC 854 IAC + RFC 1143 negotiation, per-session
+  line handling, passphrase echo suppression.
+- **Parser** — verb-noun with direct/indirect objects, prepositions, and
+  `all.X` / `N.X` qualifiers; fuzz-clean.
+- **World** — a hand-authored 21-room Hub across four districts, with ambient
+  loot that restocks on reset.
+- **Combat** — a 2.5 s server-wide tick, hidden `1d20`+mods vs AC, corpses + loot.
+- **Classes** — Pikeman / Splicer / Courier / Chaplain, each with three abilities
+  on an energy + cooldown + status framework; each clears the Hub solo.
+- **Persistence** — Ed25519 identity derived from a passphrase (sigil); crash-safe,
+  signed, schema-stamped per-player saves; a libro audit chain. Reconnect
+  restores attrs / room / inventory; survives `kill -9`.
+- **Zone resets** — presence-gated mob/loot respawn on a per-zone timer.
+- **Security** — memory-safety + CVE-class swept (0.9.0); every loaded save field
+  validated; the `@`-admin namespace gated behind `YD_ADMIN`.
+
+### Documentation
+
+- README rewritten for 1.0 (status, libro+sigil backend, real usage).
+- New player/operator guides: `docs/guides/playing.md`, `commands.md`,
+  `running.md`; `getting-started.md` refreshed.
+- Stale-data sweep across all docs: corrected the legacy "backed by T.Ron" /
+  "managed via Joshua" framing (persistence is libro+sigil; Joshua/M8 is
+  deferred post-1.0), refreshed the architecture overview, roadmap, and state
+  snapshot, and updated test counts (298).
+
+### Deferred (post-1.0)
+
+- **M8 — Joshua operator interface.** The `@`-admin verbs are groundwork; full
+  operator authentication and the Joshua control channel come after 1.0.
+
 ## [0.9.1] — 2026-06-10
 
 **Surface freeze.** The public surface is enumerated and locked for 1.0 so the

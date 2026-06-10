@@ -22,8 +22,11 @@ In scope:
 - The TCP socket server and any state it persists
 - The verb-noun parser (string handling, buffer bounds, command dispatch)
 - The combat tick loop and any cross-player effects it computes
-- Persistence backed by T.Ron
+- Persistence: Ed25519 identity + signed per-player saves via sigil, and the
+  libro audit chain — including save-record validation on load
 - Zone reset logic and any privilege boundaries between players
+- The `@`-admin verbs (note: gated behind `YD_ADMIN`, default off; no operator
+  authentication yet — see [ADR 0007](docs/adr/0007-frozen-1.0-surface.md))
 
 Out of scope:
 

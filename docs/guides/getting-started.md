@@ -1,11 +1,16 @@
 # Getting started with cyrius-yeomans-descent
 
-## Build
+This guide is for **building and contributing**. To *play*, see
+[playing.md](playing.md); to *run/operate* a server, see [running.md](running.md);
+for the full command list, [commands.md](commands.md).
+
+## Build & run
 
 ```sh
-cyrius deps                              # resolve dependencies
+cyrius deps                                               # resolve dependencies
 cyrius build src/main.cyr build/cyrius-yeomans-descent    # compile
-cyrius test                              # run [build].test + tests/*.tcyr
+cyrius test                                               # run [build].test + tests/*.tcyr
+./build/cyrius-yeomans-descent serve 4000                 # run; connect via `telnet 127.0.0.1 4000`
 ```
 
 ## Layout

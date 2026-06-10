@@ -1,6 +1,6 @@
 # Yeoman's Descent — Architecture Overview
 
-> **Last Updated**: 2026-05-24
+> **Last Updated**: 2026-06-10 (v1.0.0 — feature-complete)
 >
 > System-level design for cyrius-yeomans-descent. The *what* of the system: concept, modules, data flow, and the load-bearing invariants every contributor needs in their head. Decisions (the *why*) live in [`../adr/`](../adr/); single-point non-obvious quirks live as numbered notes alongside this file.
 
@@ -10,10 +10,14 @@
 
 **Yeoman's Descent** is a classic text-based Multi-User Dungeon (MUD) set in a gritty techno-feudal universe. Players begin as low-ranking serfs or squires and must delve into the "Under-Grid" — a massive, subterranean arcology of ruined servers, rusted automated defenses, and rogue AI fiefdoms. The game relies entirely on text parsing, ANSI color aesthetics, and deep, imaginative world-building, accurately reflecting the DikuMUD and LPMud era of the late 1980s to mid-1990s.
 
-- **Target slate**: Summer of Games internal testing
-- **Engine & backend**: Cyrius-native TCP socket server
-- **State management**: T.Ron (transactional memory + persistent player state)
-- **Game management interface**: Joshua
+- **Engine & backend**: Cyrius-native TCP socket server (no external runtime)
+- **State management**: per-player Ed25519-signed CYML saves with crash-safe
+  `.tmp`+rename writes ([ADR 0006](../adr/0006-persistence-shape.md)); **libro**
+  (append-only SHA-256 hash-chain) for the audit log + **sigil** (Ed25519
+  identity, [ADR 0004](../adr/0004-identity-and-authentication.md))
+- **Game management interface**: a `@`-admin verb set (`@stats`/`@who`/`@reset`,
+  gated behind `YD_ADMIN`); a full operator interface (Joshua) is a post-1.0
+  milestone
 
 ## 2. Combat System & Mechanics
 
@@ -72,7 +76,7 @@ The backend replicates the Telnet era while benefiting from modern stability.
 
 - **Telnet protocol** — players connect via raw TCP sockets using standard clients (Mudlet, CMUD) or a browser-based Telnet wrapper.
 - **Verb-noun parser** — a robust NLP-lite parser designed to interpret complex string commands (e.g., `give monoblade to kiran` or `put all.rations in backpack`).
-- **Zones & resets** — the game world is compartmentalized into zones. A routine "zone reset" triggers every 15-30 minutes, respawning mobs and loot, **but only if the room currently contains no active players**.
+- **Zones & resets** — the game world is compartmentalized into zones. A routine "zone reset" triggers on a per-zone timer (authored as `reset_secs`; the Hub uses 15 min), respawning mobs and loot, **but only while no active player occupies the zone** (the reset defers until it empties).
 
 ## See Also
 

@@ -18,7 +18,7 @@
 
 ## Goal
 
-Own the MUD server. A raw-TCP / Telnet multi-user dungeon with a verb-noun parser, a server-wide 2.5s combat tick, classic THAC0-style hidden-roll combat, and zone resets — backed by T.Ron for persistent player state and managed via Joshua. Cyrius-native, no external runtime.
+Own the MUD server. A raw-TCP / Telnet multi-user dungeon with a verb-noun parser, a server-wide 2.5s combat tick, classic THAC0-style hidden-roll combat, and zone resets — backed by **libro + sigil** for crash-safe, Ed25519-signed persistent player state (per ADR 0004 / 0006). Cyrius-native, no external runtime. (Joshua, the operator interface, is a post-1.0 milestone — see roadmap.)
 
 See [`docs/architecture/overview.md`](docs/architecture/overview.md) for the full design (combat math, class structure, parser, zone-reset semantics).
 
