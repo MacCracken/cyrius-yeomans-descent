@@ -4,6 +4,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-06-21
+
+**Telnet echo fix — visible input + masked passphrase.** The login flow announced
+`WILL ECHO` at connect, which makes a conformant client stop local-echoing — but
+the server never echoed input, so names and commands were typed **blind**. Now the
+client line-echoes normal input (visible), and the server takes over echo only at
+the passphrase prompts, masking each character with `*`. Telnet-wire behaviour only;
+the frozen 1.0 surface ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)) is
+untouched, and the fix applies to both the Linux and AGNOS builds.
+
+### Fixed
+- **`src/telnet.cyr` — dropped `WILL ECHO` from `telnet_announce`** (kept `WILL SGA`).
+  A conformant client now line-echoes the name + commands, so the player sees what
+  they type instead of typing blind.
+- **`src/session.cyr` `session_push_line_byte` — `*`-masked passphrase echo.** During
+  the passphrase phases (`PHASE_PASS`/`NEWPASS`/`CONFIRMPASS`/`CHPASS_*`, which raise
+  `WILL ECHO` via `session_echo_off`), the server now draws a `*` per character,
+  erases on backspace, and emits CR/LF — the passphrase shows as `****` rather than
+  being invisible. Normal input stays client-echoed (no double echo); `nc` and other
+  clients that ignore `WILL ECHO` now also show typed input.
+
 ## [1.1.0] — 2026-06-21
 
 **AGNOS compatibility — Yeoman's Descent runs as a sovereign ring-3 network service on the AGNOS kernel.** `cyrius build --agnos` now produces a static agnos ELF that agnsh execs from disk, serving the telnet MUD over the AGNOS kernel's TCP stack. End-to-end QEMU-validated (`agnosticos/docker/descent-sweep/`): boot agnos → agnsh `run /bin/descent serve 4000` → a host client connects over SLIRP, receives the login banner, and the session responds to input (name → passphrase prompt). The frozen 1.0 surface ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)) holds — no new verbs, save fields, zone fields, or env knobs; AGNOS support is purely additive platform code behind `#ifdef CYRIUS_TARGET_AGNOS`, and **Linux behavior is byte-identical**.
