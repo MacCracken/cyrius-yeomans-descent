@@ -27,28 +27,58 @@ enum FdTag {
     TAG_SIGNAL   = 2;
 }
 
+#ifdef CYRIUS_TARGET_AGNOS
+# agnos's syscall peer defines no epoll event-mask constants (epoll there
+# watches only signalfd/timerfd, and sys_epoll_ctl is 3-arg — no event struct).
+# descent's agnos poll loop never epoll-watches sockets, but dispatch_session's
+# shared `events & EPOLLIN` test still needs the bit defined to compile + read.
+enum AgnosEpollCompat {
+    EPOLLIN  = 1;
+    EPOLLOUT = 4;
+}
+#endif
+
 # === fcntl helper — set O_NONBLOCK on an fd ===
 fn set_nonblock(fd): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    # agnos sockets are inherently non-blocking — sock_accept#57 / sock_recv#49
+    # never park, and there is no fcntl in the frozen 0–59 syscall surface. No-op.
+    return 0;
+#else
     var flags = syscall(SYS_FCNTL, fd, 3, 0);                # F_GETFL
     if (flags < 0) { return flags; }
     return syscall(SYS_FCNTL, fd, 4, flags | O_NONBLOCK);    # F_SETFL
+#endif
 }
 
 # === Block SIGINT / SIGTERM and return a signalfd watching them ===
 fn install_signal_fd(): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    # agnos has no sigset / signalfd in the frozen surface. The agnos serve loop
+    # (cmd_serve) never installs one — shutdown is process-kill / in-band. The
+    # Linux-only sigset_new/sigset_add/SIG_BLOCK/sys_signalfd symbols would be
+    # undefined for CYRIUS_TARGET_AGNOS, so the body must be gated out entirely.
+    return 0 - 1;
+#else
     var mask = sigset_new();
     sigset_add(mask, SIGINT);
     sigset_add(mask, SIGTERM);
     var pr = sys_sigprocmask(SIG_BLOCK, mask, 0);
     if (pr < 0) { return pr; }
     return sys_signalfd(0 - 1, mask, 0);
+#endif
 }
 
 # === Epoll registration helpers ===
 
 fn epoll_add_in(epfd, fd, data_tag): i64 {
+#ifndef CYRIUS_TARGET_AGNOS
     var ev = epoll_event_new(EPOLLIN, data_tag);
     return sys_epoll_ctl(epfd, EPOLL_CTL_ADD, fd, ev);
+#endif
+    # agnos: never called (the poll loop sweeps g_session_head); epoll_event_new
+    # + 4-arg sys_epoll_ctl are Linux-only. Stub so the file compiles --agnos.
+    return 0;
 }
 
 # Toggle EPOLLOUT on a session's fd. `armed` = 1 adds it, 0 removes it.
@@ -56,10 +86,14 @@ fn epoll_add_in(epfd, fd, data_tag): i64 {
 # requested state.
 fn session_set_out(epfd, s, armed): i64 {
     if (load64(s + SS_OUT_ARMED) == armed) { return 0; }
+#ifndef CYRIUS_TARGET_AGNOS
     var ev_mask = EPOLLIN;
     if (armed == 1) { ev_mask = EPOLLIN | EPOLLOUT; }
     var ev = epoll_event_new(ev_mask, s);
     sys_epoll_ctl(epfd, EPOLL_CTL_MOD, load64(s + SS_FD), ev);
+#endif
+    # agnos: no epoll; the poll loop flushes every session each sweep, so tx
+    # backpressure needs no EPOLLOUT arming — we just track the intended state.
     store64(s + SS_OUT_ARMED, armed);
     return 0;
 }
@@ -210,7 +244,9 @@ fn drop_session(epfd, s): i64 {
     # M6-D: flush state on the way out — covers `quit`, idle reap, and
     # client-side disconnects alike. A no-op for unauthenticated sessions.
     if (load64(s + SS_AUTHED) == 1) { player_save(s); }
+#ifndef CYRIUS_TARGET_AGNOS
     sys_epoll_ctl(epfd, EPOLL_CTL_DEL, load64(s + SS_FD), 0);
+#endif
     session_list_remove(s);
     session_free(s);
     g_session_count = g_session_count - 1;
@@ -598,7 +634,11 @@ fn handle_accept(epfd, listener_fd, now_ms): i64 {
         var nb = set_nonblock(cfd);
         if (nb < 0) { sock_close(cfd); continue; }
         var s = session_new(cfd, now_ms);
+#ifndef CYRIUS_TARGET_AGNOS
         epoll_add_in(epfd, cfd, s);
+#endif
+        # agnos: sockets can't be epoll-watched; session_list_push alone enrolls
+        # the conn — the poll loop's per-session recv sweep services it.
         session_list_push(s);
         g_session_count = g_session_count + 1;
         # Opening Telnet salvo (IAC WILL ECHO / WILL SGA) ahead of any
@@ -718,6 +758,7 @@ fn cmd_serve(port): i64 {
         println("");
         return 1;
     }
+#ifndef CYRIUS_TARGET_AGNOS
     var sigfd = install_signal_fd();
     if (sigfd < 0) {
         println("server: failed to install signalfd (errno below)");
@@ -776,9 +817,43 @@ fn cmd_serve(port): i64 {
             while (next_tick <= now) { next_tick = next_tick + g_tick_ms; }
         }
     }
-    println("server: shutdown signal received; closing listener.");
     sys_close(epfd);
     sys_close(sigfd);
+#endif
+#ifdef CYRIUS_TARGET_AGNOS
+    # agnos: epoll watches only signalfd/timerfd (never sockets) and epoll_wait
+    # is 3-arg (no timeout) — so the epoll socket-multiplexer can't be used.
+    # Instead, a sleep_ms-paced poll loop: each pass drains pending accepts
+    # (sock_accept#57 is non-blocking), sweeps every session for readable bytes
+    # (sock_recv#49 non-blocking — see session_on_readable's agnos branch), then
+    # runs the combat tick on its absolute 2.5 s schedule. No signalfd —
+    # shutdown is process-kill / in-band. ~20 ms cadence ≈ 50 sweeps/s.
+    g_epfd = 0;   # room broadcasts call flush_session(g_epfd, …); epfd is unused on agnos
+    var next_tick = clock_now_ms() + g_tick_ms;
+    var stop = 0;
+    while (stop == 0) {
+        handle_accept(0, lfd, clock_now_ms());
+        # Non-blocking recv sweep over the active-session list. drop_session
+        # unlinks the current node, so capture SS_NEXT before dispatch.
+        var s = g_session_head;
+        while (s != 0) {
+            var nxt = load64(s + SS_NEXT);
+            var keep = dispatch_session(0, s, EPOLLIN, clock_now_ms());
+            if (keep == 0) { drop_session(0, s); }
+            s = nxt;
+        }
+        var now = clock_now_ms();
+        if (now >= next_tick) {
+            record_tick_drift(now - next_tick);
+            advance_tick();
+            sweep_idle(0, now);
+            next_tick = next_tick + g_tick_ms;
+            while (next_tick <= now) { next_tick = next_tick + g_tick_ms; }
+        }
+        sys_sleep_ms(20);
+    }
+#endif
+    println("server: shutdown signal received; closing listener.");
     sock_close(lfd);
     return 0;
 }

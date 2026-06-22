@@ -1,10 +1,10 @@
 [package]
 name = "cyrius-yeomans-descent"
-version = "1.0.1"
+version = "${file:VERSION}"
 description = "Yeoman's Descent — a Cyrius-native text MUD server set in a techno-feudal arcology"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.1.23"
+cyrius = "6.2.36"
 
 [build]
 entry = "src/main.cyr"
@@ -49,5 +49,5 @@ stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "slice", "syscalls", "as
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
 path = "../libro"
-tag = "2.7.1"
+tag = "2.7.7"
 modules = ["dist/libro.cyr"]

@@ -959,6 +959,21 @@ fn session_on_readable(s, now_ms): i64 {
     var fd = load64(s + SS_FD);
     var done = 0;
     var alive = 1;
+#ifdef CYRIUS_TARGET_AGNOS
+    # agnos: sys_read on a socket fd is the BLOCKING recv adapter, which would
+    # park the single-threaded poll loop on an idle session. Use the NON-BLOCKING
+    # sock_recv #49 directly (tagged fd → conn_id). Return sense is INVERTED from
+    # Linux: >0 = bytes, 0 = WOULD_BLOCK (drained — keep alive), -1 = EOF/error.
+    var conn = _agnos_fd_conn(fd);
+    while (done == 0) {
+        var room = RX_CAP - len;
+        if (room <= 0) { done = 1; continue; }
+        var n = sys_sock_recv(conn, rx + len, room);
+        if (n == 0) { done = 1; continue; }             # WOULD_BLOCK — nothing more now
+        if (n < 0) { alive = 0; done = 1; continue; }   # EOF / error — drop
+        len = len + n;
+    }
+#else
     while (done == 0) {
         var room = RX_CAP - len;
         if (room <= 0) { done = 1; continue; }
@@ -977,6 +992,7 @@ fn session_on_readable(s, now_ms): i64 {
         }
         len = len + n;
     }
+#endif
     store64(s + SS_RX_LEN, len);
     if (len > 0) { store64(s + SS_LAST_MS, now_ms); }
     session_consume_rx(s);

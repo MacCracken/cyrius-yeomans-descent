@@ -4,6 +4,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-06-21
+
+**AGNOS compatibility — Yeoman's Descent runs as a sovereign ring-3 network service on the AGNOS kernel.** `cyrius build --agnos` now produces a static agnos ELF that agnsh execs from disk, serving the telnet MUD over the AGNOS kernel's TCP stack. End-to-end QEMU-validated (`agnosticos/docker/descent-sweep/`): boot agnos → agnsh `run /bin/descent serve 4000` → a host client connects over SLIRP, receives the login banner, and the session responds to input (name → passphrase prompt). The frozen 1.0 surface ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)) holds — no new verbs, save fields, zone fields, or env knobs; AGNOS support is purely additive platform code behind `#ifdef CYRIUS_TARGET_AGNOS`, and **Linux behavior is byte-identical**.
+
+### Added
+- **AGNOS build target (`CYRIUS_TARGET_AGNOS`).** The event loop is platform-split: AGNOS `epoll` watches only signalfd/timerfd (never sockets) and is 3-arg (no timeout), so the Linux epoll socket-multiplexer becomes a **`sleep_ms`#41-paced poll loop** — non-blocking `sock_accept`#57 drain → non-blocking `sock_recv`#49 sweep over the active-session list → the absolute 2.5 s combat-tick schedule. The Linux epoll loop is untouched.
+- `session_on_readable` AGNOS branch using non-blocking `sock_recv`#49 (correct WOULD_BLOCK/EOF sense — inverted from Linux; `sys_read` on an agnos socket fd is the *blocking* adapter and would park the single-threaded loop).
+- AGNOS gates: `set_nonblock` no-op (sockets inherently non-blocking), `install_signal_fd`/epoll-ctl helpers compiled out, `EPOLLIN`/`EPOLLOUT` compat constants, in-band/process-kill shutdown.
+
+### Changed
+- Toolchain pinned to cyrius **6.2.36**; the M6 persistence chain rides patra **1.12.3** + libro **2.7.7** (the AGNOS syscall-ABI fixes: WAL time / entropy / clock / `lseek` / flock).
+- `cyrius.cyml` `version` now resolves from the `VERSION` file (`${file:VERSION}`) — single source of truth.
+
 ## [1.0.1] — 2026-06-10
 
 **Gateway-verified maintenance release.** Nothing observable changed from 1.0.0 — the frozen 1.0 surface ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)) holds: no new verbs, save fields, zone fields, or env knobs, and no source change. This bump records Yeoman's Descent as the verified target of the **agora Descent link** (agora 1.4.0, its [ADR 0017](https://github.com/MacCracken/agora/blob/main/docs/adr/0017-descent-link-gateway.md)): a logged-in agora citizen can now step through a portal and reach this MUD over the shared telnet substrate.
