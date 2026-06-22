@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.3] — 2026-06-22
+
+Bug-fix release: the world loads + is interactable on AGNOS, character creation no
+longer crashes, and Telnet stays in clean line mode. Frozen 1.0 surface
+([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)) holds — these are wire/build/content
+fixes, not surface changes.
+
+### Fixed
+
+- **Character creation crashed (`SIGILL`) — missing `thread_local` includes.** sigil 3.7
+  banks the SHA-256 message schedule per-thread (`cbank()` → `thread_local_get`), but
+  `lib/thread.cyr` / `lib/thread_local.cyr` were never included (the `[deps]`-stdlib
+  auto-prepend pulls `ct`/`keccak`/`random` but **not** `thread`/`thread_local`), so those
+  calls compiled to `ud2`/SIGILL trap stubs. `sha256` — and therefore `ident_derive` —
+  trapped the instant a player chose a passphrase, dropping the connection and failing the
+  `persist` test suite. Added the two explicit includes to `src/main.cyr` and the test
+  harness. The whole 298-assertion suite is green again. (Regression rode in with the 1.1.0
+  agnos re-vendor of sigil; pre-1.1 sigil didn't bank per-thread.)
+- **AGNOS ran "roomless" — relative data paths.** The world / class loaders and the persist
+  store used relative paths (`data/zones/...`), but AGNOS's VFS requires **absolute** paths
+  (a path not leading with `/` returns `FS_NONE`), so every load silently failed and the
+  server served an empty world. Centralised the data paths in one `#ifdef
+  CYRIUS_TARGET_AGNOS` block — `/data/...` on AGNOS, `data/...` on Linux (unchanged). The
+  Hub (21 rooms, mobs, objects, classes) now loads on the sovereign kernel.
+- **`examine`/`look` couldn't see room objects.** `cmd_examine` resolved the noun against
+  players and mobs but never the room's objects or the player's inventory — so a visible
+  object (the Hub's work-notice) reported "You see no … here." Examine now resolves room
+  objects + carried items and renders the object's description, so examining a readable
+  (the work-notice, postings) reads it.
+- **Telnet: server no longer agrees to echo normal input.** 1.1.2 dropped the connect-time
+  option salvo but left `ECHO` *preferred*, so a client's unsolicited `DO ECHO` still drew
+  `WILL ECHO` and the server would echo normal input (double-echo). `ECHO` is now
+  tracked-but-unpreferred: an unsolicited `DO ECHO` is refused (`WONT ECHO`, line mode
+  preserved), while the passphrase prompt raises a tracked `WILL ECHO` so its `*` masking
+  still works. `session_echo_off`/`on` guard `SS_TS` for bare test sessions.
+
 ## [1.1.2] — 2026-06-21
 
 **Telnet cooked-line-mode fix — backspace, Enter, and no stray `^M` / `^?`.** 1.1.1's

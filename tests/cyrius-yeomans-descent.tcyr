@@ -2,6 +2,8 @@
 # Stdlib auto-included via cyrius.cyml; project modules included explicitly.
 
 # M6 persistence chain — opt-in libs before the modules that use them.
+include "lib/thread.cyr"        # sigil 3.7 cbank() → thread_local_get; MUST be
+include "lib/thread_local.cyr"  # explicit or sha256 SIGILLs (see src/main.cyr)
 include "lib/sakshi.cyr"
 include "lib/sigil.cyr"
 include "lib/libro.cyr"

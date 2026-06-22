@@ -191,14 +191,17 @@ fn session_appendtx_cstr(s, cstr): i64 {
 # show the passphrase as before (no worse than pre-0.8.1).
 fn session_echo_off(s): i64 {
     # Track that WE asked to echo (Q_WANTYES) so the client's DO ECHO ack lands as
-    # a confirmation, not a naive refusal — ECHO is tracked-but-unpreferred.
-    opt_set_us(load64(s + SS_TS), OPT_ECHO, Q_WANTYES);
+    # a confirmation, not a naive refusal — ECHO is tracked-but-unpreferred. Guard
+    # SS_TS: test harnesses build bare sessions with no telnet state (SS_TS == 0).
+    var ts = load64(s + SS_TS);
+    if (ts != 0) { opt_set_us(ts, OPT_ECHO, Q_WANTYES); }
     var b[3];
     store8(&b + 0, IAC); store8(&b + 1, WILL); store8(&b + 2, OPT_ECHO);
     return session_appendtx(s, &b, 3);
 }
 fn session_echo_on(s): i64 {
-    opt_set_us(load64(s + SS_TS), OPT_ECHO, Q_NO);   # back to client-echo line mode
+    var ts = load64(s + SS_TS);
+    if (ts != 0) { opt_set_us(ts, OPT_ECHO, Q_NO); }   # back to client-echo line mode
     var b[3];
     store8(&b + 0, IAC); store8(&b + 1, WONT); store8(&b + 2, OPT_ECHO);
     return session_appendtx(s, &b, 3);

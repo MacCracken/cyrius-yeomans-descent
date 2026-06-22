@@ -6,9 +6,15 @@
 # need explicit `include` per first-party convention.
 
 # M6 persistence chain (opt-in, never auto-resolved — see cyrius.cyml).
-# Order: sakshi → sigil → libro (libro calls sigil + sakshi); the stdlib
-# crypto modules (ct/keccak/thread/thread_local/random) auto-prepend ahead
-# of these via [deps] stdlib.
+# Order: thread/thread_local → sakshi → sigil → libro (libro calls sigil +
+# sakshi). thread/thread_local MUST be included explicitly: sigil 3.7's crypto
+# banks the SHA message-schedule per-thread via `cbank()` → `thread_local_get`,
+# and the [deps]-stdlib auto-prepend does NOT pull them (unlike ct/keccak/random)
+# — leaving thread_local_* as `ud2`/SIGILL trap stubs that crash `sha256` the
+# instant ident derivation runs (regression surfaced 1.1.x; pre-1.1 sigil didn't
+# bank per-thread). ct/keccak/random still auto-prepend ahead of sigil.
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
 include "lib/sakshi.cyr"
 include "lib/sigil.cyr"
 include "lib/libro.cyr"
@@ -24,7 +30,7 @@ include "src/classes.cyr"
 include "src/persist.cyr"   # uses sigil/libro + session/item/world/classes enums
 include "src/server.cyr"
 
-var VERSION_STRING = "1.1.2";
+var VERSION_STRING = "1.1.3";
 
 fn print_banner(): i64 {
     println("yeoman's descent — a cyrius-native text MUD");
