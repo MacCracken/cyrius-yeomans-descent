@@ -57,6 +57,31 @@ var g_persist_ready = 0;
 var g_loaded_last_login = 0;   # 0.8.1 — prior last_login captured at load,
                                # for the "last seen …" returning-player greeting
 
+# Data paths. agnos's VFS requires ABSOLUTE paths (kernel `vfs.cyr`: a path that
+# doesn't lead with '/' returns FS_NONE), and the world content is staged at the
+# agnos-fs root `/data` (cf. cyrius-doom defaulting to `/DOOM1.WAD`). On Linux the
+# server runs from the repo root with relative `data/...`. Defined here (before
+# server.cyr in the include order) so both files share them.
+#ifdef CYRIUS_TARGET_AGNOS
+var DP_DATADIR   = "/data";
+var DP_PLAYERS   = "/data/players";
+var DP_PLAYERS_S = "/data/players/";
+var DP_AUDIT     = "/data/audit.libro";
+var DP_ROOMS     = "/data/zones/hub.rooms.cyml";
+var DP_OBJS      = "/data/zones/hub.objs.cyml";
+var DP_MOBS      = "/data/zones/hub.mobs.cyml";
+var DP_CLASSES   = "/data/classes.cyml";
+#else
+var DP_DATADIR   = "data";
+var DP_PLAYERS   = "data/players";
+var DP_PLAYERS_S = "data/players/";
+var DP_AUDIT     = "data/audit.libro";
+var DP_ROOMS     = "data/zones/hub.rooms.cyml";
+var DP_OBJS      = "data/zones/hub.objs.cyml";
+var DP_MOBS      = "data/zones/hub.mobs.cyml";
+var DP_CLASSES   = "data/classes.cyml";
+#endif
+
 # === Boot: buffers + data dirs + audit chain. Idempotent. ===
 fn persist_init(): i64 {
     if (g_persist_ready == 1) { return 0; }
@@ -68,10 +93,10 @@ fn persist_init(): i64 {
     g_persist_dec   = alloc(256);
     g_ident_scratch = alloc(256);
     g_fmt_scratch   = alloc(32);
-    sys_mkdir("data", 0x1ED);            # 0755 — ignore EEXIST
-    sys_mkdir("data/players", 0x1ED);
+    sys_mkdir(DP_DATADIR, 0x1ED);        # 0755 — ignore EEXIST
+    sys_mkdir(DP_PLAYERS, 0x1ED);
     g_audit_chain = chain_new();
-    g_audit_store = filestore_open(str_from("data/audit.libro"));
+    g_audit_store = filestore_open(str_from(DP_AUDIT));
     g_persist_ready = 1;
     return 0;
 }
@@ -105,7 +130,7 @@ fn _bytes_eq(a, b, n): i64 {
 # Build data/players/<lower(name)>.cyml (NUL-terminated) into `out`.
 # Returns the path length (excluding the NUL).
 fn _path_for(name, len, out): i64 {
-    var pre = "data/players/";
+    var pre = DP_PLAYERS_S;
     var off = 0;
     var i = 0;
     while ((load8(pre + i) & 0xFF) != 0) { store8(out + off, load8(pre + i)); off = off + 1; i = i + 1; }

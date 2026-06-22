@@ -229,7 +229,10 @@ fn opt_set_him(ts, opt, st): i64 {
 # suppressing GA. Everything else is refused. NAWS / TERMINAL-TYPE /
 # LINEMODE are intentionally untracked until a later milestone needs them.
 fn opt_pref_us(opt): i64 {
-    if (opt == OPT_ECHO)              { return 1; }
+    # ECHO is intentionally NOT preferred: we never volunteer to echo, so an
+    # unsolicited client DO ECHO is refused (WONT ECHO) and the client keeps
+    # local-echoing — cooked line mode. WILL ECHO is raised by hand, transiently,
+    # only around the passphrase prompt (session_echo_off → us = Q_WANTYES).
     if (opt == OPT_SUPPRESS_GO_AHEAD) { return 1; }
     return 0;
 }
@@ -240,6 +243,7 @@ fn opt_pref_him(opt): i64 {
 # Tracked == either side has a preference. Untracked options route to
 # naive-refuse so we never accidentally agree to anything unpreferred.
 fn opt_tracked(opt): i64 {
+    if (opt == OPT_ECHO)        { return 1; }   # we drive ECHO by hand for masking
     if (opt_pref_us(opt)  != 0) { return 1; }
     if (opt_pref_him(opt) != 0) { return 1; }
     return 0;

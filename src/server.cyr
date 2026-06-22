@@ -710,15 +710,15 @@ fn cmd_serve(port): i64 {
     obs_init();
     # Load the starter zone. A failure is non-fatal — the server still
     # runs, with the verbs answering their no-zone placeholders.
-    var wl = world_load_rooms("data/zones/hub.rooms.cyml");
+    var wl = world_load_rooms(DP_ROOMS);
     if (wl == WL_OK) {
         println("world: loaded zone");
         print_num(world_room_count());
         println(" rooms");
         # Object + mob templates, then spawn mobs into rooms (M4).
-        var oc = world_load_objs("data/zones/hub.objs.cyml");
+        var oc = world_load_objs(DP_OBJS);
         if (oc >= 0) { print_num(oc); println(" object templates"); }
-        var mc = world_load_mobs("data/zones/hub.mobs.cyml");
+        var mc = world_load_mobs(DP_MOBS);
         if (mc >= 0) {
             var sp = world_spawn_all();
             var so = zone_reset_objs();   # M7-D: place authored room objects
@@ -733,7 +733,7 @@ fn cmd_serve(port): i64 {
         println("");
     }
     # Player classes (M5).
-    var cc = world_load_classes("data/classes.cyml");
+    var cc = world_load_classes(DP_CLASSES);
     if (cc >= 0) { print_num(cc); println(" player classes"); }
     else { println("world: no classes loaded — players spawn classless"); }
     combat_seed(clock_now_ms());   # seed the hidden-roll RNG (M4)

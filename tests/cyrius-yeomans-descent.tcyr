@@ -117,25 +117,35 @@ fn test_telnet(): i64 {
 fn test_negotiation(): i64 {
     test_group("negotiation");
 
-    # N1: announce queues IAC WILL ECHO + IAC WILL SGA (6 bytes).
+    # N1: the announce is silent — the client keeps cooked line mode (it
+    # local-echoes + edits the line itself). We never volunteer ECHO/SGA, so
+    # us-ECHO stays NO. (Masking is raised by hand at the passphrase — see N2b.)
     var ts = telnet_state_new();
     telnet_announce(ts);
-    assert_eq(telnet_tx_len(ts), 6, "announce is two 3-byte triples");
-    var b = telnet_tx_buf(ts);
-    assert_eq(load8(b + 1) & 0xFF, WILL,     "salvo[0] verb = WILL");
-    assert_eq(load8(b + 2) & 0xFF, OPT_ECHO, "salvo[0] opt = ECHO");
-    assert_eq(load8(b + 5) & 0xFF, OPT_SUPPRESS_GO_AHEAD, "salvo[1] opt = SGA");
-    assert_eq(opt_us(ts, OPT_ECHO), Q_WANTYES, "us-ECHO is WANTYES after announce");
+    assert_eq(telnet_tx_len(ts), 0, "announce queues nothing (line mode)");
+    assert_eq(opt_us(ts, OPT_ECHO), Q_NO, "us-ECHO stays NO after announce");
 
-    # N2: peer DO ECHO confirms our announce — no further reply, us=YES.
+    # N2: an unsolicited DO ECHO is REFUSED (WONT ECHO) — the server never echoes
+    # normal input, the client keeps local-echoing. us-ECHO stays NO.
     var t2 = telnet_state_new();
     telnet_announce(t2);
     telnet_tx_consume(t2);
     telnet_feed(t2, IAC);
     telnet_feed(t2, DO);
     telnet_feed(t2, OPT_ECHO);
-    assert_eq(telnet_tx_len(t2), 0, "DO ECHO after announce draws no reply");
-    assert_eq(opt_us(t2, OPT_ECHO), Q_YES, "us-ECHO settles at YES");
+    assert_eq(telnet_tx_len(t2), 3, "unsolicited DO ECHO draws a refusal");
+    assert_eq(load8(telnet_tx_buf(t2) + 1) & 0xFF, WONT, "DO ECHO → WONT ECHO");
+    assert_eq(opt_us(t2, OPT_ECHO), Q_NO, "us-ECHO stays NO (we won't echo normal input)");
+
+    # N2b: but a hand-raised WILL ECHO (passphrase masking, session_echo_off sets
+    # us=WANTYES) IS honoured — the peer's DO ECHO confirms it, us=YES, no reply.
+    var t2b = telnet_state_new();
+    opt_set_us(t2b, OPT_ECHO, Q_WANTYES);
+    telnet_feed(t2b, IAC);
+    telnet_feed(t2b, DO);
+    telnet_feed(t2b, OPT_ECHO);
+    assert_eq(telnet_tx_len(t2b), 0, "DO ECHO confirms our WANTYES — no reply");
+    assert_eq(opt_us(t2b, OPT_ECHO), Q_YES, "passphrase WILL ECHO settles at YES");
 
     # N3: peer DONT ECHO after announce — accept silently, us=NO.
     var t3 = telnet_state_new();

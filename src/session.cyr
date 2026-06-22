@@ -190,11 +190,15 @@ fn session_appendtx_cstr(s, cstr): i64 {
 # salvo around the login / passwd prompts; clients that ignore ECHO just
 # show the passphrase as before (no worse than pre-0.8.1).
 fn session_echo_off(s): i64 {
+    # Track that WE asked to echo (Q_WANTYES) so the client's DO ECHO ack lands as
+    # a confirmation, not a naive refusal — ECHO is tracked-but-unpreferred.
+    opt_set_us(load64(s + SS_TS), OPT_ECHO, Q_WANTYES);
     var b[3];
     store8(&b + 0, IAC); store8(&b + 1, WILL); store8(&b + 2, OPT_ECHO);
     return session_appendtx(s, &b, 3);
 }
 fn session_echo_on(s): i64 {
+    opt_set_us(load64(s + SS_TS), OPT_ECHO, Q_NO);   # back to client-echo line mode
     var b[3];
     store8(&b + 0, IAC); store8(&b + 1, WONT); store8(&b + 2, OPT_ECHO);
     return session_appendtx(s, &b, 3);
@@ -715,6 +719,22 @@ fn cmd_examine(s, pa): i64 {
         session_appendtx_cstr(s, "It looks ");
         session_appendtx_cstr(s, mob_condition(m));
         session_appendtx_cstr(s, ".\r\n");
+        return 0;
+    }
+    # An object lying in the room, or one the player is carrying. Examining an
+    # object renders its description — which for readables (the work-notice,
+    # postings) IS the act of reading it.
+    var o = ilist_find_kw(room_obj_head(room_at(load64(s + SS_ROOM))), tok_ptr(pa, di), tok_len(pa, di));
+    if (o == 0) { o = ilist_find_kw(load64(s + SS_INV), tok_ptr(pa, di), tok_len(pa, di)); }
+    if (o != 0) {
+        session_appendtx_cstr(s, ansi_item());
+        session_appendtx(s, oi_name_ptr(o), oi_name_len(o));
+        session_appendtx_cstr(s, ansi_reset());
+        session_appendtx_cstr(s, "\r\n");
+        if (oi_desc_len(o) > 0) {
+            session_appendtx(s, oi_desc_ptr(o), oi_desc_len(o));
+            session_appendtx_cstr(s, "\r\n");
+        }
         return 0;
     }
     session_appendtx_cstr(s, "You see no ");
