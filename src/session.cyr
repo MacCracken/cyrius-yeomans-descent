@@ -884,7 +884,20 @@ fn session_on_line(s, buf, len): i64 {
 fn session_push_line_byte(s, b): i64 {
     var ln = load64(s + SS_LINE_BUF);
     var len = load64(s + SS_LINE_LEN);
+    # During passphrase entry the client is in server-echo (character) mode —
+    # session_echo_off raised WILL ECHO — so the server draws the line: a '*'
+    # mask per char, an erase on backspace, and the CR LF. For normal input the
+    # client line-echoes, so the server stays silent (no double echo).
+    var phase = load64(s + SS_PHASE);
+    var is_pass = 0;
+    if (phase == PHASE_PASS)           { is_pass = 1; }
+    if (phase == PHASE_NEWPASS)        { is_pass = 1; }
+    if (phase == PHASE_CONFIRMPASS)    { is_pass = 1; }
+    if (phase == PHASE_CHPASS_NEW)     { is_pass = 1; }
+    if (phase == PHASE_CHPASS_CONFIRM) { is_pass = 1; }
+
     if (b == 13) {
+        if (is_pass == 1) { session_appendtx_cstr(s, "\r\n"); }
         session_on_line(s, ln, len);
         store64(s + SS_LINE_LEN, 0);
         return 0;
@@ -892,10 +905,22 @@ fn session_push_line_byte(s, b): i64 {
     if (b == 10) {
         # len == 0 here is the LF half of a CR LF pair — absorb it.
         if (len == 0) { return 0; }
+        if (is_pass == 1) { session_appendtx_cstr(s, "\r\n"); }
         session_on_line(s, ln, len);
         store64(s + SS_LINE_LEN, 0);
         return 0;
     }
+    # Backspace (BS) / DEL: drop the last buffered byte; in masked mode erase it
+    # on screen too (back-space-back).
+    if (b == 8 || b == 127) {
+        if (len > 0) {
+            store64(s + SS_LINE_LEN, len - 1);
+            if (is_pass == 1) { session_appendtx_cstr(s, "\b \b"); }
+        }
+        return 0;
+    }
+    # Ignore other control bytes (telnet IAC is already stripped upstream).
+    if (b < 32) { return 0; }
     if (len >= LINE_CAP) {
         store64(s + SS_LINE_LEN, 0);
         session_appendtx_cstr(s, "(line too long — buffer reset)\r\n");
@@ -903,6 +928,11 @@ fn session_push_line_byte(s, b): i64 {
     }
     store8(ln + len, b);
     store64(s + SS_LINE_LEN, len + 1);
+    if (is_pass == 1) {
+        var star[1];
+        store8(&star + 0, 42);   # '*'
+        session_appendtx(s, &star, 1);
+    }
     return 0;
 }
 

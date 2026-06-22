@@ -332,8 +332,12 @@ fn telnet_handle_negotiation(ts, verb, opt): i64 {
 # Sent ahead of the banner so a conformant client negotiates before any
 # application bytes flow. The caller drains telnet_tx_* afterwards.
 fn telnet_announce(ts): i64 {
-    opt_set_us(ts, OPT_ECHO, Q_WANTYES);
-    ts_emit_iac3(ts, WILL, OPT_ECHO);
+    # No WILL ECHO at connect — that would make a conformant client stop
+    # local-echoing, and the server doesn't echo normal input, so the player
+    # would type the name + every command BLIND. Leaving ECHO alone lets the
+    # client line-echo normal input (visible). The passphrase prompts raise
+    # WILL ECHO themselves (session_echo_off) and the server masks with '*'.
+    # WILL SGA still helps (character-at-a-time, no go-ahead turn markers).
     opt_set_us(ts, OPT_SUPPRESS_GO_AHEAD, Q_WANTYES);
     ts_emit_iac3(ts, WILL, OPT_SUPPRESS_GO_AHEAD);
     return 0;

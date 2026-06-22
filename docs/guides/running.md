@@ -19,6 +19,39 @@ event loop. It runs single-threaded: one kernel thread multiplexes every
 connection via epoll and owns all world state ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)).
 Shut down cleanly with SIGINT/SIGTERM; a `kill -9` is safe too (see Persistence).
 
+## On AGNOS
+
+Since **1.1.0** the same server builds and runs natively on the
+[AGNOS](https://github.com/MacCracken/agnosticos) kernel (no Linux, no libc):
+
+```sh
+cyrius build --agnos src/main.cyr build/descent-agnos     # static agnos ELF64
+```
+
+`agnsh` runs it from disk on the booted kernel, serving over AGNOS's own TCP stack:
+
+```
+[ASSIST] > run /bin/descent serve 4000
+```
+
+What differs is entirely internal — players see no change. AGNOS `epoll` watches
+only signalfd/timerfd (never sockets) and is 3-arg, so the Linux epoll multiplexer
+([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)) becomes a
+`sleep_ms`-paced poll loop: drain non-blocking `sock_accept`, sweep the session
+list with non-blocking `sock_recv` — same single-threaded single-owner model, same
+2.5 s combat tick. Persistence (`data/players/`, `data/audit.libro`) works
+identically via AGNOS's `flock`/`lseek`. Clean shutdown is in-band / process-kill
+(AGNOS has no signalfd); the env knobs below are unchanged.
+
+To boot AGNOS and play the MUD off the sovereign kernel end-to-end (QEMU — no
+hardware needed), use the container harness in the **agnosticos** repo at
+`docker/descent-sweep/`:
+
+```sh
+./run.sh serve        # boots AGNOS + descent, then from your host: telnet 127.0.0.1 4444
+./run.sh              # or the automated assert-and-exit smoke
+```
+
 ## Configuration (environment)
 
 | Env var | Default | Effect |

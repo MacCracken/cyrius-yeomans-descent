@@ -40,8 +40,39 @@ Then connect with any Telnet client:
 telnet 127.0.0.1 4000        # or: nc 127.0.0.1 4000
 ```
 
-(Mudlet, TinTin++, or a browser WebSocket-to-Telnet bridge all work. A
-conformant client honours the server's `WILL ECHO` and hides your passphrase.)
+(Mudlet, TinTin++, `nc`, or a browser WebSocket-to-Telnet bridge all work. Your
+client line-echoes what you type for names and commands; at the passphrase prompt
+the server takes over echo and masks each character with `*`.)
+
+### On AGNOS
+
+Since **1.1.0**, Descent also builds and runs as a sovereign ring-3 service on the
+[AGNOS](https://github.com/MacCracken/agnosticos) kernel itself — no Linux, no libc,
+the same source behind `#ifdef CYRIUS_TARGET_AGNOS`:
+
+```sh
+cyrius build --agnos src/main.cyr build/descent-agnos     # static agnos ELF64
+```
+
+`agnsh` execs it from disk and it serves over the AGNOS kernel's TCP stack:
+
+```
+[ASSIST] > run /bin/descent serve 4000
+```
+
+The only difference from the Linux build is internal: AGNOS `epoll` watches only
+signalfd/timerfd (never sockets) and is 3-arg, so the Linux epoll socket-multiplexer
+becomes a `sleep_ms`-paced poll loop (non-blocking `sock_accept`#57 + `sock_recv`#49).
+The verbs, save format, telnet wire, and combat tick are **byte-identical** to the
+Linux server — the frozen 1.0 surface holds ([ADR 0003](docs/adr/0003-single-thread-event-loop-concurrency.md),
+[ADR 0007](docs/adr/0007-frozen-1.0-surface.md)).
+
+To boot AGNOS and play the MUD off the sovereign kernel end-to-end (QEMU), use the
+container harness — boot, then telnet in from your host:
+
+```sh
+cd ../agnosticos/docker/descent-sweep && ./run.sh serve   # then: telnet 127.0.0.1 4444
+```
 
 ## Playing
 
