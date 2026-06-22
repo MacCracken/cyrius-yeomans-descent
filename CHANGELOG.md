@@ -4,6 +4,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-06-21
+
+**Telnet cooked-line-mode fix — backspace, Enter, and no stray `^M` / `^?`.** 1.1.1's
+echo fix dropped WILL ECHO but kept WILL SGA, which pushes conformant clients into
+character-at-a-time mode: the client stops cooking the line, so backspace was inert
+(rendered `^?`), carriage return showed as `^M`, and Enter could mishandle the line.
+This drops the connect-time option salvo entirely, leaving the client in its default
+**cooked line mode** — it local-echoes, edits with backspace, and submits a clean line
+on Enter. The passphrase prompts still raise WILL ECHO themselves for the masked `*`
+echo. Telnet-wire only; frozen 1.0 surface ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md))
+untouched; applies to both the Linux and AGNOS builds.
+
+### Fixed
+- **`src/telnet.cyr` `telnet_announce` — no connect-time WILL ECHO / WILL SGA salvo.**
+  Conformant clients (`telnet`, `nc`, Mudlet) stay in cooked line mode: backspace
+  deletes, CR submits, no raw `^M` / `^?` on screen, and Enter advances. The passphrase
+  masking is unchanged — it raises WILL ECHO around its own prompt and the server draws
+  `*` per char.
+
 ## [1.1.1] — 2026-06-21
 
 **Telnet echo fix — visible input + masked passphrase.** The login flow announced

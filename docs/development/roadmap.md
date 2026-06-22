@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-06-10 (v1.0.0)
+> **Last Updated**: 2026-06-21 (v1.1.1 — added the Post-1.0 bug backlog; 1.1.x added the AGNOS build target + telnet echo fix)
 >
 > Milestone plan through v1.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
@@ -37,6 +37,50 @@
 ## In progress
 
 **No active cycle.** 0.9.1 closed — the public surface is frozen for 1.0 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)): command verbs + `@`-namespace, save-record schema v1 (now stamped + version-gated), Telnet/wire behaviour, zone-file format, env knobs. The `@`-admin namespace is gated behind `YD_ADMIN` (default off). Next slot is **1.0.0 — clean release**: a stabilisation-only release — final adversarial/security pass, a full playtest sign-off, no observable changes to the frozen surface. **M8 (Joshua) is deferred to post-1.0.** Pickup pointer in [`state.md`](state.md).
+
+---
+
+## Post-1.0 backlog — known bugs
+
+Surfaced playing the AGNOS build (1.1.x) over telnet. The 1.0 Telnet/wire surface is
+frozen ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — these are wire-behaviour
+**fixes**, not surface changes, so they don't need a major bump.
+
+### B1 — Telnet line discipline in character mode (1.1.x)
+
+A conformant telnet client that honours the connect-time **WILL SGA** switches to
+character-at-a-time mode and stops cooking the line locally — but the server only does
+full server-side line editing for the passphrase (`session_push_line_byte`'s `is_pass`
+path). For normal input (name, class selection, commands) the discipline is incomplete:
+
+- **Return displays `^M`.** The raw CR (0x0D) isn't consumed/cooked; the client renders
+  it literally — e.g. `Enter a number or name: teacher^M`.
+- **Enter doesn't advance.** The line isn't dispatched cleanly (CR-in-stream / char-mode
+  handling), so e.g. class selection doesn't move forward.
+- **Backspace doesn't delete — shows `^?`.** DEL (0x7F) / BS (0x08) aren't handled for
+  normal input; the client renders the raw control char instead of erasing.
+
+**Root cause:** character-at-a-time mode (induced by WILL SGA) requires the server to own
+the full line discipline — echo, CR→CRLF + dispatch, backspace erase, strip CR from the
+buffer — for *all* input, not just the passphrase. The 1.1.1 echo change (dropped WILL
+ECHO, kept WILL SGA) made the raw control chars visible.
+
+**Fix options (pick one):**
+1. **Full server-side line editing for all phases** — extend the `is_pass` handling in
+   `session_push_line_byte` to every phase: echo each char, draw CR/LF on Enter, erase on
+   backspace, never buffer the CR (`*` mask stays passphrase-only). Server owns the line.
+2. **Drop WILL SGA from `telnet_announce`** — keep the client in pure line-mode (it cooks
+   backspace + CR locally and sends a clean line); raise WILL ECHO only around the
+   passphrase (already done via `session_echo_off`). Simpler; the conventional MUD model. *(Recommended.)*
+
+**Status:** Option 2 shipped at **1.1.2** — the connect-time option salvo is dropped, so
+cooked-mode clients (`telnet` / `nc` / Mudlet) now get working backspace, clean Enter, and no
+`^M` / `^?`, with the passphrase still masked. **Remaining (review later):** Option 1 — full
+server-side line editing for character-at-a-time clients — only matters if descent later
+re-adopts WILL SGA / char-mode for advanced client features. Parked until then.
+
+Verify against `telnet`, `nc`, and Mudlet; QEMU-repro via `agnosticos/docker/descent-sweep/`
+(`./run.sh serve` → telnet in).
 
 ---
 

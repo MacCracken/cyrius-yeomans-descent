@@ -332,14 +332,15 @@ fn telnet_handle_negotiation(ts, verb, opt): i64 {
 # Sent ahead of the banner so a conformant client negotiates before any
 # application bytes flow. The caller drains telnet_tx_* afterwards.
 fn telnet_announce(ts): i64 {
-    # No WILL ECHO at connect — that would make a conformant client stop
-    # local-echoing, and the server doesn't echo normal input, so the player
-    # would type the name + every command BLIND. Leaving ECHO alone lets the
-    # client line-echo normal input (visible). The passphrase prompts raise
-    # WILL ECHO themselves (session_echo_off) and the server masks with '*'.
-    # WILL SGA still helps (character-at-a-time, no go-ahead turn markers).
-    opt_set_us(ts, OPT_SUPPRESS_GO_AHEAD, Q_WANTYES);
-    ts_emit_iac3(ts, WILL, OPT_SUPPRESS_GO_AHEAD);
+    # No option salvo at connect — stay silent so the client keeps its default
+    # COOKED LINE MODE: it local-echoes, handles backspace, and turns CR into a
+    # line submission itself, then sends one clean line. Announcing options broke
+    # this: WILL ECHO made the client stop local-echoing (the server doesn't echo
+    # normal input → blind typing), and WILL SGA pushed conformant clients into
+    # character-at-a-time mode where they stop cooking the line — raw ^M / ^? on
+    # screen, backspace inert, Enter mishandled — while the server only owns the
+    # line discipline for the passphrase. The passphrase prompts raise WILL ECHO
+    # themselves (session_echo_off) for the masked '*' echo, then drop it again.
     return 0;
 }
 
