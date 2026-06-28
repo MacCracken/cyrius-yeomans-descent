@@ -4,6 +4,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.4] — 2026-06-27
+
+**Migrate off the 29-element hand-ordered stdlib list onto libro's dependency
+sidecar.** The M6 persistence chain's crypto/store leaves (ct/keccak/random/thread/
+thread_local for sigil; fs/process/hashmap/slice + bayan for libro — json/bigint were
+carved into bayan @6.1.25) are no longer hand-listed in `[deps].stdlib`. As of cyrius
+6.2.46–.48 + libro 2.7.8, the libro fold ships a `dist/libro.deps` sidecar declaring
+exactly those leaves; `cyrius deps` auto-resolves them transitively (topological order,
+fail-loud on a missing one) when `[deps.libro]` resolves. `[deps].stdlib` now lists
+only descent's OWN direct M1 surface (18 leaves). **This ends the omit-one→runtime-SIGILL
+trap** the hand-ordered list existed to paper over. Toolchain pin 6.2.36 → **6.2.48**;
+libro pin → **2.7.8**. Verified: `cyrius build` compiles clean (no undefined-fn warnings).
+
 ## [1.1.3] — 2026-06-22
 
 Bug-fix release: the world loads + is interactable on AGNOS, character creation no

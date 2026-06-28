@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Yeoman's Descent — a Cyrius-native text MUD server set in a techno-feudal arcology"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.2.36"
+cyrius = "6.2.48"
 
 [build]
 entry = "src/main.cyr"
@@ -18,26 +18,17 @@ output = "cyrius-yeomans-descent"
 # by net.cyr's Result return shape), fnptr (vec internals), freelist
 # (per-session arena freed at disconnect per ADR 0003).
 #
-# M6 chain (persistence). Cyrius stdlib is OPT-IN, never auto-resolved:
-# the libro/sigil bundles carry NO stdlib includes, so the consumer must
-# list every module their crypto/store paths touch. Omitting one is a
-# *runtime SIGILL*, not a build error — cyrius 6.1.x only warns on an
-# undefined fn and emits a `ud2` trap, so it builds then dies the moment
-# the path runs (sigil 3.7.8 CHANGELOG diagnosed this against THIS repo).
-#   ct/keccak/random — sigil 3.6.0 constant-time compare + ML-DSA shake256
-#                      + AES-GCM/RFC6979 RNG; MUST precede the sigil
-#                      include (cyrius is single-pass forward-resolution).
-#   thread/thread_local — sigil 3.6 replaced its batch mutex with per-thread
-#                      crypto-scratch banks; cbank() lazily calls
-#                      thread_local_init() on EVERY sha256/ed25519 call, so
-#                      even a single serial verify needs both (libro 2.7.1
-#                      lists the same pair). Omitting thread_local was the
-#                      original SIGILL.
-#   fs/process       — libro FileStore (flock) + atomic replace.
-#   hashmap/json/slice/bigint — libro entry/query/merkle/proof internals.
-# sigil/sakshi/patra/agnosys are NOT listed here — they resolve
-# TRANSITIVELY via [deps.libro] (listing them too = double-write error).
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "slice", "syscalls", "assert", "bench", "args", "net", "chrono", "result", "tagged", "fnptr", "freelist", "cyml", "toml", "fs", "process", "hashmap", "json", "bigint", "ct", "keccak", "thread", "thread_local", "random"]
+# M6 chain (persistence) — the crypto/store stdlib leaves (ct/keccak/random/
+# thread/thread_local for sigil; fs/process/hashmap/slice + bayan [json/bigint
+# carved into bayan @6.1.25] for libro) are NO LONGER hand-listed here. As of
+# cyrius 6.2.46/.47/.48 the libro fold ships a `dist/libro.deps` SIDECAR that
+# declares exactly those leaves; `cyrius deps` auto-resolves them (in topological
+# order, fail-loud on a missing one) when [deps.libro] resolves. That ENDS the
+# omit-one→runtime-SIGILL trap this 29-element hand-ordered list used to paper
+# over — and the hand-ordering with it. sigil/sakshi/patra resolve TRANSITIVELY
+# via [deps.libro] (and are excluded from the sidecar so they don't double-write).
+# Only descent's OWN direct M1 surface remains below.
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "net", "chrono", "result", "tagged", "fnptr", "freelist", "cyml", "toml"]
 
 # M6 persistence (ADR 0004 Ed25519 identity + crash-safe hash-chain store).
 # libro = append-only SHA-256 hash-linked store (FileStore: flock +
