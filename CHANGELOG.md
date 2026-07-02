@@ -24,12 +24,13 @@ in `persist_init` immediately after world-load whenever it ran on agnos / under 
   Root cause fixed upstream in cyrius 6.3.31 (issue `2026-07-02-freelist-agnos-mmap-abi`).
 
 ### Fixed
-- **CI dep resolution** (`cyrius deps` failed *"dep patra requires 'sync' … not in the cyrius
-  stdlib"*). Declared **`atomic` + `sync`** in `[deps].stdlib`: these are **patra's** transitive
-  leaves (via `[deps.libro]` → patra), and libro's `dist/libro.deps` sidecar only carries the leaves
-  libro's *own* code references, so patra's `atomic`/`sync` never propagated to a consumer. `bayan`
-  rides libro 2.7.10's sidecar (which fixes the companion *"libro requires 'bayan'"* error);
-  `thread_local` rides it too.
+- **CI dep resolution** (`cyrius deps` failed *"dep libro requires 'bayan' / dep patra requires
+  'sync' … not in the cyrius stdlib"*). The `Install Cyrius toolchain` step in `ci.yml` +
+  `release.yml` hand-rolled a `curl … tar … cp -r lib/*` install that **flattened the stdlib into
+  `$HOME/.cyrius/lib`**, so `cyrius deps` (which reads the *versioned* layout) couldn't find it — the
+  tarball ships those modules fine. Switched both workflows to the **upstream
+  `scripts/install.sh`** (`CYRIUS_VERSION=<pin> sh`), which lays out `$HOME/.cyrius` the way
+  `cyrius deps` expects — matching patra's / sigil's CI. No source or `[deps]` change.
 
 **Migrate off the 29-element hand-ordered stdlib list onto libro's dependency
 sidecar.** The M6 persistence chain's crypto/store leaves (ct/keccak/random/thread/

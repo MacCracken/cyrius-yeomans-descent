@@ -34,12 +34,7 @@ output = "cyrius-yeomans-descent"
 # — `std` expands to exactly those, in the same order, so this resolves the SAME
 # symbol set as the old hand list with no boilerplate + no order-sensitivity. Only
 # descent's non-core surface is listed explicitly.
-# atomic + sync: patra's transitive leaves (via [deps.libro] → patra). libro's
-# dist/libro.deps sidecar only carries the leaves libro's OWN code references, so
-# patra's atomic/sync don't propagate — descent must declare them itself or
-# `cyrius deps` fails "dep patra requires 'sync' … not in the cyrius stdlib".
-# (thread_local rides libro's sidecar; bayan rides it too as of libro 2.7.10.)
-stdlib = ["std", "assert", "bench", "args", "net", "chrono", "result", "tagged", "fnptr", "freelist", "atomic", "sync", "cyml", "toml"]
+stdlib = ["std", "assert", "bench", "args", "net", "chrono", "result", "tagged", "fnptr", "freelist", "cyml", "toml"]
 
 # M6 persistence (ADR 0004 Ed25519 identity + crash-safe hash-chain store).
 # libro = append-only SHA-256 hash-linked store (FileStore: flock +
