@@ -23,7 +23,13 @@ in `persist_init` immediately after world-load whenever it ran on agnos / under 
   target-dispatch helper; the local hand-patch is retired). `[deps.libro]` tag `2.7.7` → **`2.7.10`**.
   Root cause fixed upstream in cyrius 6.3.31 (issue `2026-07-02-freelist-agnos-mmap-abi`).
 
-## [1.1.4] — 2026-06-27
+### Fixed
+- **CI dep resolution** (`cyrius deps` failed *"dep patra requires 'sync' … not in the cyrius
+  stdlib"*). Declared **`atomic` + `sync`** in `[deps].stdlib`: these are **patra's** transitive
+  leaves (via `[deps.libro]` → patra), and libro's `dist/libro.deps` sidecar only carries the leaves
+  libro's *own* code references, so patra's `atomic`/`sync` never propagated to a consumer. `bayan`
+  rides libro 2.7.10's sidecar (which fixes the companion *"libro requires 'bayan'"* error);
+  `thread_local` rides it too.
 
 **Migrate off the 29-element hand-ordered stdlib list onto libro's dependency
 sidecar.** The M6 persistence chain's crypto/store leaves (ct/keccak/random/thread/
