@@ -4,6 +4,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.5] — 2026-07-02
+
+**agnos server startup fixed — freelist agnos mmap (cyrius 6.3.32) + libro 2.7.10.** Re-synced the
+vendored stdlib to cyrius 6.3.32, which carries the official fix for the freelist allocator's agnos
+mmap ABI — retiring the local hand-patch. Before it, agnos `fl_alloc` (libro's audit chain, reached
+via `persist_init` → `chain_new`) issued the Linux 6-arg `mmap` with the length in **arg2**, but
+agnos `mmap#27` reads it from **arg1** → `mmap(0)` → 0 → the first store SIGSEGV'd. descent crashed
+in `persist_init` immediately after world-load whenever it ran on agnos / under mirshi.
+
+### Fixed
+- **agnos server startup** — descent now boots its persistence (`persist: player saves + audit chain
+  ready`), binds, and serves on agnos. Verified end-to-end under mirshi (`--root <rootfs> --net`):
+  the world loads (21 rooms), it listens on `:4000`, and a telnet client reaches the login banner.
+
+### Changed
+- `cyrius lib sync` → **6.3.32** vendored stdlib (official `freelist.cyr` with the `_fl_mmap`
+  target-dispatch helper; the local hand-patch is retired). `[deps.libro]` tag `2.7.7` → **`2.7.10`**.
+  Root cause fixed upstream in cyrius 6.3.31 (issue `2026-07-02-freelist-agnos-mmap-abi`).
+
 ## [1.1.4] — 2026-06-27
 
 **Migrate off the 29-element hand-ordered stdlib list onto libro's dependency

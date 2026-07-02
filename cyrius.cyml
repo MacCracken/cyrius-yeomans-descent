@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Yeoman's Descent — a Cyrius-native text MUD server set in a techno-feudal arcology"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.2.48"
+cyrius = "6.3.32"
 
 [build]
 entry = "src/main.cyr"
@@ -28,7 +28,13 @@ output = "cyrius-yeomans-descent"
 # over — and the hand-ordering with it. sigil/sakshi/patra resolve TRANSITIVELY
 # via [deps.libro] (and are excluded from the sidecar so they don't double-write).
 # Only descent's OWN direct M1 surface remains below.
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "net", "chrono", "result", "tagged", "fnptr", "freelist", "cyml", "toml"]
+#
+# v6.3.32 (cyrius modularity lever-1 Phase D): the 7 universal-core leaves
+# (string/fmt/alloc/io/vec/str/syscalls) are now the built-in `std` DEFAULT GROUP
+# — `std` expands to exactly those, in the same order, so this resolves the SAME
+# symbol set as the old hand list with no boilerplate + no order-sensitivity. Only
+# descent's non-core surface is listed explicitly.
+stdlib = ["std", "assert", "bench", "args", "net", "chrono", "result", "tagged", "fnptr", "freelist", "cyml", "toml"]
 
 # M6 persistence (ADR 0004 Ed25519 identity + crash-safe hash-chain store).
 # libro = append-only SHA-256 hash-linked store (FileStore: flock +
@@ -40,5 +46,5 @@ stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "b
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
 path = "../libro"
-tag = "2.7.7"
+tag = "2.7.10"
 modules = ["dist/libro.cyr"]
