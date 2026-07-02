@@ -25,12 +25,15 @@ in `persist_init` immediately after world-load whenever it ran on agnos / under 
 
 ### Fixed
 - **CI dep resolution** (`cyrius deps` failed *"dep libro requires 'bayan' / dep patra requires
-  'sync' … not in the cyrius stdlib"*). The `Install Cyrius toolchain` step in `ci.yml` +
-  `release.yml` hand-rolled a `curl … tar … cp -r lib/*` install that **flattened the stdlib into
-  `$HOME/.cyrius/lib`**, so `cyrius deps` (which reads the *versioned* layout) couldn't find it — the
-  tarball ships those modules fine. Switched both workflows to the **upstream
-  `scripts/install.sh`** (`CYRIUS_VERSION=<pin> sh`), which lays out `$HOME/.cyrius` the way
-  `cyrius deps` expects — matching patra's / sigil's CI. No source or `[deps]` change.
+  'sync' … not in the cyrius stdlib"*), two causes, both realigned to patra's / sigil's CI:
+  1. The `Install Cyrius toolchain` step in `ci.yml` + `release.yml` hand-rolled a
+     `curl … tar … cp -r lib/*` install that **flattened the stdlib into `$HOME/.cyrius/lib`**, so
+     `cyrius deps` (which reads the *versioned* layout) couldn't find it — the tarball ships those
+     modules fine. Switched both workflows to the **upstream `scripts/install.sh`**.
+  2. A **stale committed `lib/` snapshot** (81 vendored stdlib files, predating `bayan`/`sync`)
+     shadowed the fresh resolution — `cyrius deps` read the incomplete snapshot instead of vendoring
+     current leaves. `.gitignore` now ignores all of `lib/` (patra keeps `/lib` fully untracked);
+     untrack the old snapshot once with `git rm -r --cached lib/`.
 
 **Migrate off the 29-element hand-ordered stdlib list onto libro's dependency
 sidecar.** The M6 persistence chain's crypto/store leaves (ct/keccak/random/thread/
