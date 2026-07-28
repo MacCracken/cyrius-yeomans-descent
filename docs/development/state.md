@@ -3,14 +3,36 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-28 (v1.2.0)
+> **Last refresh**: 2026-07-28 (v1.3.0)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.2.0 tree.
+> tests, boot guide) describes the **current** 1.3.0 tree.
 
 ## Version
+
+**1.3.0** — the 1.3.0 pair, 2026-07-28. **M10 (wire-safe prose)** and
+**M11 (migration-gate repair)**. Suite 298 → **333 assertions**; `cyrius audit`
+exits 0; host and `--agnos` both build warning-free.
+
+M10 fixed the one *live* defect: `telnet_feed` decodes `IAC IAC` to a literal
+0xFF (correct RFC 854), `session_push_line_byte` drops only `b < 32` so it
+survived, and `cmd_say` handed it straight to every listener — a player could
+inject a bare Telnet command byte into another player's protocol stream. New
+`session_appendtx_prose` doubles 0xFF and drops C0/DEL, and is a *bounded*
+writer: `LINE_CAP` and `TX_CAP` are both 4096, so a full line of 0xFF escapes to
+8192 and a truncation between a pair would re-create the defect. Verified
+end-to-end with two real clients — before `AA\xffBB`, after `AA\xff\xffBB`.
+C1 (0x80-0x9F) is deliberately kept: those are UTF-8 continuation bytes.
+
+M11 repaired four latent defects in the save migration gate, each of which would
+otherwise have shipped *with* the 2.0 bump it protects — see the CHANGELOG.
+Worth carrying forward: **M11-A is unprovable until M14.** While
+`SCHEMA_VERSION == 1` the old and new missing-stamp defaults agree, so its test
+is a pin, not a proof. Same shape for M11-C and M11-D: they guard surfaces v1
+cannot reach, so both are unit-tested directly — an end-to-end test passes
+against the unfixed code and proves nothing.
 
 **1.2.0** — toolchain + dep upgrade and the first clean audit, 2026-07-28. Cyrius
 `6.3.32` → **`6.4.83`**, libro `2.7.10` → **`2.8.2`** (sigil **3.12.1**, patra
@@ -256,7 +278,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test tests/cyrius-yeomans-descent.tcyr` — 298 unit assertions:
+`cyrius test` — **333** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -386,11 +408,13 @@ _None yet._
 **No active cycle.** 1.2.0 (toolchain + dep upgrade, first clean audit) closed.
 The tree builds, `cyrius audit` exits 0, and 298 tests + 3 benches pass.
 
-**Next is the 1.3.0 pair: M10 (wire-safe prose) + M11 (migration-gate repair).**
-Both are 1.x — they touch no ADR-0007-frozen surface — and M11 is the hard
-prerequisite for the 2.0 save-schema bump, because the migration gate currently
-defaults a stampless record's schema to `SCHEMA_VERSION` rather than the literal
-1. Fix it *before* the constant moves, or the bug ships with the bump.
+**1.3.0 shipped (M10 + M11).** Next is **1.4.0 — M12 (instance lifecycle)**:
+nothing the world creates is ever reclaimed. Mob and object instances come from
+`alloc` and `mob_remove` only unlinks; corpses are never removed from a room at
+all. It blocks M13, M15, M17 and M20. Mind the trap recorded in the milestone:
+`mob_died` clears only the *killing* session's `SS_TARGET`, so a second attacker
+keeps a stale pointer — inert today precisely because nothing is freed, and a
+use-after-free the moment anything is.
 
 **M8 (Joshua) moved to the backlog**: it was blocked on an upstream Cyrius port,
 and specced against a management CLI that turned out to be an AI-NPC simulation

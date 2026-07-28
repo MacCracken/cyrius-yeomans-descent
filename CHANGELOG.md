@@ -4,6 +4,105 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-07-28
+
+### Fixed — M10, wire-safe prose (1.3.0)
+
+**A player could inject a bare Telnet IAC into another player's protocol
+stream.** `telnet_feed` decodes `IAC IAC` into a literal 0xFF data byte — correct
+RFC 854 behaviour, and the suite asserts it — but `session_push_line_byte` drops
+only `b < 32`, so 0xFF survived into the line buffer, and `cmd_say` handed that
+buffer straight to every listener's socket. RFC 854 requires a data-stream 0xFF
+be re-sent as `IAC IAC`; sending it bare means a conformant client reads the
+start of a Telnet command. The comment on that input filter — *"telnet IAC is
+already stripped upstream"* — was wrong, and is corrected: IAC is stripped as
+**framing**, while the escaped literal is deliberately preserved as **data**.
+
+Verified end-to-end against a running server with two real clients. Before:
+the listener receives `AA\xffBB`. After: `AA\xff\xffBB`.
+
+- **New `session_appendtx_prose`** — the appender for anything a player typed.
+  Doubles 0xFF; drops C0 and DEL (ESC among them, so player text cannot forge
+  the SGR runs `ansi_title()` / `ansi_actor()` emit). It writes into the tx queue
+  directly rather than delegating, because `session_appendtx` truncates silently
+  at `TX_CAP`: `LINE_CAP` and `TX_CAP` are both 4096, so a full line of 0xFF
+  escapes to 8192, and a truncation landing *between* the two bytes of a pair
+  would emit the exact lone IAC this fixes. Escape pairs are written whole or
+  not at all.
+- **Routed every player-authored byte through it** — `cmd_say`, `cmd_emote`,
+  both halves of `cmd_tell`, and `room_say_broadcast`'s body. Server literals
+  (the `lead`/`tail` parameters) and authored zone prose are deliberately left
+  on the raw appender: sanitizing `room_prose_ptr` would strip zone authors'
+  formatting to fix a byte no authored file contains.
+- **Player names too** — 10 emission sites across `session.cyr` / `server.cyr`
+  (`room_broadcast`, `room_append_present`, `cmd_who`, `render_who`,
+  `cmd_examine`, the `tell` headers). `login_name_ok` already constrains names
+  to leading-alpha alnum, so this is defence in depth — but it is the same path
+  M21's persisted `title` will use.
+
+**Deviation from the milestone sketch:** it specified dropping "C0/C1". C1
+(0x80–0x9F) is **kept** — as raw bytes those are UTF-8 continuation bytes, the
+tokenizer explicitly passes UTF-8 through, and dropping them would corrupt every
+non-ASCII name and message to fix nothing a Telnet client reacts to.
+
+### Fixed — M11, the save-record migration gate (1.3.0)
+
+Four defects in the persistence layer, all latent while `SCHEMA_VERSION == 1` and
+all load-bearing the moment it moves. This is the hard prerequisite for the 2.0
+schema bump: each one would otherwise have shipped *with* the bump it protects.
+
+- **A stamp-less record no longer re-labels itself.** `player_auth_load` read
+  `toml_int(pairs, "schema", SCHEMA_VERSION)` — the default for a *missing* key
+  was the current version. 0.7.0–0.9.0 records carry no stamp and **are** v1, so
+  the instant `SCHEMA_VERSION` became 2 every one of them would have claimed to
+  be v2 and skipped the v1 read path. Now pinned to a literal `SCHEMA_V1` via a
+  new `_record_schema`, which also clamps a nonsense `schema = 0` up to 1 so
+  callers can branch on `>= 2` without a third case.
+- **"Written by a newer server" is no longer reported as tampering.** The schema
+  gate returned the same code as a failed `ed25519_verify`, so an operator
+  rolling a deploy back told every returning player their record had been
+  attacked — and wrote a `SEV_SECURITY` audit entry for what is a versioning
+  event. New `PL_ERR_SCHEMA` with its own message; still refuses the session,
+  since a downgraded server must not half-load a record it doesn't understand.
+- **The save-record writer is bounded.** `_ac` / `_ap` / `_ai` / `_fstr` /
+  `_fint` appended into the 4096-byte `g_persist_save` with no check; the only
+  guard was inside `_build_record`'s inventory loop. Appends now fail closed and
+  propagate a poisoned offset, checked once before signing — so no partially
+  built record can ever be signed or written. **Not a live overflow today** (the
+  unguarded fields are all short-capped), but every variable-length 2.0 field
+  would have landed straight on it.
+- **Control bytes in string fields are refused.** `_find_sig_offset` ends the
+  signed prefix at the first line beginning `sig `, so a newline inside a value
+  could move that boundary. Unreachable in v1 — the CYML parser ends a value at
+  the newline first — but the guard has to exist before 2.0 adds free text.
+
+**Behaviour change:** a record from a newer server now produces *"Your record was
+written by a newer server than this one."* instead of the tamper message. Not a
+frozen-surface item ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md) does not
+enumerate login error text), and the old text was simply wrong.
+
+### Added
+
+- **`migration` test group** — 21 new assertions (298 → 319). Verified by
+  mutation: reverting the writer bound fails 4, neutering the control-byte guard
+  fails 2, dropping the schema clamp fails 1. The missing-stamp assertion is
+  documented in-place as a **pin rather than a proof** — while `SCHEMA_VERSION`
+  is 1 the old and new defaults agree, so it cannot discriminate until M14 moves
+  the constant.
+- **`g_schema_max`** — the load ceiling as a settable `var` seeded from
+  `SCHEMA_VERSION`, so the suite can drive a schema-2 world against a schema-1
+  build. `SCHEMA_VERSION` is a compile-time enum member and the suite compiles
+  the same source, so there was no other seam.
+- **`wire-hygiene` test group** — 14 assertions including a 256-value fuzz sweep
+  over every byte at every position: no lone IAC survives, no control byte
+  reaches the wire, output never exceeds 2× input, and an escape pair is never
+  split at the buffer boundary. Mutation-verified — removing the escaping fails
+  5 assertions, allowing a split pair fails 1, dropping the control filter
+  fails 2.
+
+Suite: **298 → 333 assertions.** `cyrius audit` exits 0; host and `--agnos`
+both build warning-free.
+
 ## [1.2.0] — 2026-07-28
 
 **Toolchain 6.3.32 → 6.4.83, libro 2.7.10 → 2.8.2, and a full `cyrius audit` sweep.**

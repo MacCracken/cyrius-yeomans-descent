@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-28 (v1.2.0 — toolchain 6.4.83 + libro 2.8.2, first clean `cyrius audit`)
+> **Last Updated**: 2026-07-28 (v1.3.0 — M10 wire-safe prose + M11 migration-gate repair)
 >
 > Milestone plan through v1.0 (shipped) and on to v2.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
@@ -41,7 +41,7 @@ MUD rather than a well-built room-crawler.
 
 | Tag | Theme | Status |
 |---|---|---|
-| **1.3.0** | M10 — wire-safe prose · M11 — migration-gate repair | planned |
+| **1.3.0** | M10 — wire-safe prose · M11 — migration-gate repair | ✅ 2026-07-28 |
 | **1.4.0** | M12 — instance lifecycle: free the leaks, decay the corpses | planned |
 | **1.5.0** | M13 — the actor tick: mobs get agency | planned |
 | **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
@@ -60,7 +60,9 @@ embarrassing the release.
 
 **No active cycle.** 1.2.0 closed — a toolchain (6.3.32 → 6.4.83) and dependency (libro 2.7.10 → 2.8.2) upgrade plus the first clean `cyrius audit` run. It repaired a `main` that no longer compiled, a bench that no longer compiled, a `version` verb two releases behind, and three latent symbol-collision hazards; see [CHANGELOG 1.2.0](../../CHANGELOG.md). The public surface remains frozen ([ADR 0007](../adr/0007-frozen-1.0-surface.md)): command verbs + `@`-namespace, save-record schema v1 (stamped + version-gated), Telnet/wire behaviour, zone-file format, env knobs. The `@`-admin namespace is gated behind `YD_ADMIN` (default off).
 
-**Next is the 1.3.0 pair — M10 (wire-safe prose) and M11 (migration-gate repair).** Both are 1.x work: they touch no frozen surface, and M11 is the prerequisite for the 2.0 schema bump. M8 (Joshua) moved to the backlog below — it was blocked on an upstream port and specced against a dependency that turned out to be something else. Pickup pointer in [`state.md`](state.md).
+**1.3.0 shipped** — M10 (wire-safe prose) and M11 (migration-gate repair), 333 assertions (was 298). M10 fixed a live cross-player defect: a bare Telnet IAC in a `say` reached every listener's protocol stream unescaped, verified end-to-end with two real clients before and after. M11 repaired the four latent defects in the save migration gate that would otherwise have shipped *with* the 2.0 schema bump they protect.
+
+**Next is 1.4.0 — M12 (instance lifecycle).** Nothing the world creates is ever reclaimed: mob and object instances come from `alloc` and are only unlinked, and corpses are never removed from a room at all. It blocks M13, M15, M17 and M20, and it carries a trap — `mob_died` clears only the killing session's `SS_TARGET`, so the first free turns a second attacker's stale pointer into a use-after-free. Pickup pointer in [`state.md`](state.md).
 
 ---
 
@@ -378,9 +380,9 @@ ignored-if-unknown, so equipment and currency do not each earn a bump.
 evenings; the 2.0 gate (M14–M16) another five or six; the full set through 2.4
 is comfortably past two years. Plan the 2.0 gate, not the tail.
 
-### M10 — Wire-safe prose (v1.3.0)
+### M10 — Wire-safe prose (v1.3.0) ✅
 
-**Line:** 1.x
+**Line:** 1.x · **Status:** shipped
 
 Player-authored bytes reach every other player's socket by raw `memcpy`.
 `telnet_feed` *decodes* `IAC IAC` into a literal 0xFF data byte — that is correct
@@ -403,9 +405,16 @@ for 2.0 ever persisting player prose.
 
 **Gate:** a session sending `IAC IAC` inside `say`/`emote`/`tell` produces no lone 0xFF in any other session's tx buffer, including at the truncation boundary; the sanitizer fuzzes clean across all 256 byte values.
 
-### M11 — Migration-gate repair (v1.3.0)
+### M11 — Migration-gate repair (v1.3.0) ✅
 
 **Line:** 1.x · **Blocks:** M14 and every milestone that adds a save field
+**Status:** shipped — all five sub-bites landed, 319 assertions (was 298),
+`cyrius audit` exits 0 on both host and `--agnos`. One thing learned in the
+doing: **M11-A cannot be proven while `SCHEMA_VERSION == 1`** — the old and new
+defaults agree, so its regression test is a pin that only discriminates once M14
+moves the constant. The test says so in place. M11-C and M11-D likewise guard
+surfaces v1 cannot reach; both are unit-tested directly rather than end-to-end,
+because an end-to-end test passes against the unfixed code and proves nothing.
 
 Three defects in the migration hook, all latent at `SCHEMA_VERSION == 1` and all
 load-bearing the moment it moves. The schema default (above). The same gate

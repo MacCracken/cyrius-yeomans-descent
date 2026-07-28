@@ -386,7 +386,7 @@ fn render_who(s): i64 {
         var room = load64(p + SS_ROOM);
         if (room >= 0) {
             session_appendtx_cstr(s, "  ");
-            session_appendtx(s, load64(p + SS_NAME_BUF), load64(p + SS_NAME_LEN));
+            session_appendtx_prose(s, load64(p + SS_NAME_BUF), load64(p + SS_NAME_LEN));   # M10-C name
             session_appendtx_cstr(s, " — ");
             session_appendtx(s, room_title_ptr(room_at(room)), room_title_len(room_at(room)));
             session_appendtx_cstr(s, "\r\n");
@@ -452,7 +452,7 @@ fn room_append_present(viewer, room_idx): i64 {
                         session_appendtx_cstr(viewer, ", ");
                     }
                     session_appendtx_cstr(viewer, ansi_actor());
-                    session_appendtx(viewer, load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN));
+                    session_appendtx_prose(viewer, load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN));   # M10-C name
                     session_appendtx_cstr(viewer, ansi_reset());
                 }
             }
@@ -524,7 +524,7 @@ fn room_broadcast(room_idx, except_s, mover_s, a, b, c): i64 {
             if (load64(t + SS_PHASE) == PHASE_CMD) {
                 if (load64(t + SS_ROOM) == room_idx) {
                     session_appendtx_cstr(t, "\r\n");
-                    session_appendtx(t, name_buf, name_len);
+                    session_appendtx_prose(t, name_buf, name_len);   # M10-C name
                     session_appendtx_cstr(t, a);
                     session_appendtx_cstr(t, b);
                     session_appendtx_cstr(t, c);
@@ -576,9 +576,9 @@ fn room_say_broadcast(room_idx, except_s, speaker_s, lead, body, body_len, tail)
             if (load64(t + SS_PHASE) == PHASE_CMD) {
                 if (load64(t + SS_ROOM) == room_idx) {
                     session_appendtx_cstr(t, "\r\n");
-                    session_appendtx(t, name_buf, name_len);
+                    session_appendtx_prose(t, name_buf, name_len);   # M10-C name
                     session_appendtx_cstr(t, lead);
-                    session_appendtx(t, body, body_len);
+                    session_appendtx_prose(t, body, body_len);   # M10-B
                     session_appendtx_cstr(t, tail);
                     flush_session(g_epfd, t);   # non-dropping (see deliver_to)
                 }
@@ -613,7 +613,7 @@ fn cmd_who(s): i64 {
         if (load64(t + SS_PHASE) == PHASE_CMD) {
             session_appendtx_cstr(s, "  ");
             session_appendtx_cstr(s, ansi_actor());
-            session_appendtx(s, load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN));
+            session_appendtx_prose(s, load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN));   # M10-C name
             session_appendtx_cstr(s, ansi_reset());
             var rm = load64(t + SS_ROOM);
             if (rm >= 0) {

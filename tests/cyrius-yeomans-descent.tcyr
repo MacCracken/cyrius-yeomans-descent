@@ -966,6 +966,133 @@ fn _contains(buf, n, needle): i64 {
     return 0;
 }
 
+# Build a bare session with a tx buffer, for driving the emit path directly.
+fn _tx_sess(): i64 {
+    var s = fl_alloc(SS_SIZE);
+    memset(s, 0, SS_SIZE);
+    store64(s + SS_TX_BUF, fl_alloc(TX_CAP));
+    store64(s + SS_TX_LEN, 0);
+    return s;
+}
+
+# Count lone (unpaired) 0xFF bytes in a buffer — the defect M10 exists to
+# prevent. A doubled IAC consumes both bytes and is not lone; an odd-length run
+# leaves exactly one.
+fn _lone_iac_count(buf, n): i64 {
+    var i = 0;
+    var lone = 0;
+    while (i < n) {
+        if ((load8(buf + i) & 0xFF) == 255) {
+            if (i + 1 < n) {
+                if ((load8(buf + i + 1) & 0xFF) == 255) { i = i + 2; continue; }
+            }
+            lone = lone + 1;
+        }
+        i = i + 1;
+    }
+    return lone;
+}
+
+# === M10 — wire hygiene: player-authored bytes never break the Telnet stream ===
+fn test_wire_hygiene(): i64 {
+    test_group("wire-hygiene");
+
+    # --- The core defect. telnet_feed decodes `IAC IAC` to a literal 0xFF data
+    # byte (asserted by telnet T2), session_push_line_byte keeps it (it drops
+    # only b < 32), and before M10 cmd_say handed it straight to every listener.
+    # RFC 854 requires re-sending it as `IAC IAC`.
+    var s = _tx_sess();
+    var one[1];
+    store8(&one, 255);
+    session_appendtx_prose(s, &one, 1);
+    var tx = load64(s + SS_TX_BUF);
+    assert_eq(load64(s + SS_TX_LEN), 2, "a lone IAC is escaped to two bytes");
+    assert_eq(load8(tx) & 0xFF, 255, "escaped[0] = IAC");
+    assert_eq(load8(tx + 1) & 0xFF, 255, "escaped[1] = IAC");
+    assert_eq(_lone_iac_count(tx, 2), 0, "no lone IAC survives");
+
+    # Plain text is untouched.
+    var s2 = _tx_sess();
+    session_appendtx_prose(s2, "hello", 5);
+    assert_eq(load64(s2 + SS_TX_LEN), 5, "plain text passes through unchanged");
+
+    # --- C0 and DEL are dropped. ESC matters most: without it, player text could
+    # forge the SGR runs ansi_title()/ansi_actor() emit and repaint another
+    # player's screen. ESC cannot reach here through `say` today (the input
+    # filter drops < 32), but M21's persisted title is a hand-editable,
+    # validly-re-signed field, so the sanitizer must own the rule.
+    var s3 = _tx_sess();
+    var esc[4];
+    store8(&esc + 0, 65); store8(&esc + 1, 27); store8(&esc + 2, 127); store8(&esc + 3, 66);
+    session_appendtx_prose(s3, &esc, 4);
+    assert_eq(load64(s3 + SS_TX_LEN), 2, "ESC and DEL are dropped");
+    assert_eq(load8(load64(s3 + SS_TX_BUF)) & 0xFF, 65, "surrounding text survives");
+
+    # --- C1 (0x80-0x9F) is deliberately KEPT. As raw bytes those are UTF-8
+    # continuation bytes and the tokenizer passes UTF-8 through; dropping them
+    # would corrupt every non-ASCII name to fix nothing a Telnet client cares about.
+    var s4 = _tx_sess();
+    var utf[2];
+    store8(&utf + 0, 0xC3); store8(&utf + 1, 0xA9);   # "é"
+    session_appendtx_prose(s4, &utf, 2);
+    assert_eq(load64(s4 + SS_TX_LEN), 2, "UTF-8 continuation bytes are preserved");
+
+    # --- The boundary case, which is the subtle half of M10-A. LINE_CAP and
+    # TX_CAP are both 4096, so a full line of 0xFF escapes to 8192. A truncation
+    # landing BETWEEN the two bytes of a pair would emit the very lone IAC this
+    # function prevents. Fill the queue to an odd gap and require the pair to be
+    # dropped whole rather than split.
+    var s5 = _tx_sess();
+    store64(s5 + SS_TX_LEN, TX_CAP - 1);        # exactly one byte of room
+    var before = load64(s5 + SS_TX_LEN);
+    session_appendtx_prose(s5, &one, 1);        # one IAC needs two bytes
+    assert_eq(load64(s5 + SS_TX_LEN), before, "an escape pair is never split at the cap");
+
+    # And a full buffer of IACs truncates cleanly, with no lone IAC anywhere.
+    var s6 = _tx_sess();
+    var many = alloc(LINE_CAP);
+    var i = 0;
+    while (i < LINE_CAP) { store8(many + i, 255); i = i + 1; }
+    session_appendtx_prose(s6, many, LINE_CAP);
+    var n6 = load64(s6 + SS_TX_LEN);
+    assert(n6 <= TX_CAP, "prose append respects TX_CAP");
+    assert_eq(_lone_iac_count(load64(s6 + SS_TX_BUF), n6), 0,
+              "a full line of IAC truncates without splitting a pair");
+
+    # --- Fuzz: every byte value at every position in a short window. No lone
+    # IAC may survive, nothing below 32 may appear, and the write must stay in
+    # bounds. This is the invariant, swept rather than spot-checked.
+    var bad_lone = 0;
+    var bad_ctrl = 0;
+    var bad_len  = 0;
+    var b = 0;
+    while (b < 256) {
+        var sf = _tx_sess();
+        var probe[3];
+        store8(&probe + 0, 88);        # 'X'
+        store8(&probe + 1, b);
+        store8(&probe + 2, 89);        # 'Y'
+        session_appendtx_prose(sf, &probe, 3);
+        var nf = load64(sf + SS_TX_LEN);
+        var bf = load64(sf + SS_TX_BUF);
+        if (nf > 4) { bad_len = bad_len + 1; }
+        if (_lone_iac_count(bf, nf) != 0) { bad_lone = bad_lone + 1; }
+        var j = 0;
+        while (j < nf) {
+            var o = load8(bf + j) & 0xFF;
+            if (o < 32) { bad_ctrl = bad_ctrl + 1; }
+            if (o == 127) { bad_ctrl = bad_ctrl + 1; }
+            j = j + 1;
+        }
+        b = b + 1;
+    }
+    assert_eq(bad_lone, 0, "fuzz: no byte value produces a lone IAC");
+    assert_eq(bad_ctrl, 0, "fuzz: no control byte reaches the wire");
+    assert_eq(bad_len, 0, "fuzz: output never exceeds 2x input");
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -1004,7 +1131,145 @@ fn test_freeze(): i64 {
     o = _str_into(rec, o, "\"\n");
     file_write_all(g_persist_path, rec, o);
     var s3 = _mk_sess("FreezeHero", 10);
-    assert_eq(player_auth_load(s3, "freezepass", 10), 0 - 2, "schema = 2 record rejected (too new)");
+    # M11-B: a too-new record gets its OWN code, distinct from the
+    # unreadable/tampered code. It is intact and correctly signed — it just
+    # post-dates this server, which is what a rolled-back deploy looks like.
+    assert_eq(player_auth_load(s3, "freezepass", 10), PL_ERR_SCHEMA,
+              "schema = 2 rejected as too-new, not as tampered");
+
+    return 0;
+}
+
+# Build a validly-signed record for FreezeHero with an arbitrary body, sign it,
+# and write it to that player's save path. `body` is the field block that sits
+# between the [player] header and the signature; salt + pubkey are appended
+# automatically since every load path needs them. Returns nothing useful — the
+# caller re-reads via player_auth_load.
+fn _plant_record(blk, body): i64 {
+    var rec = alloc(2048);
+    var o = _str_into(rec, 0, "[player]\n");
+    o = _str_into(rec, o, body);
+    o = _str_into(rec, o, "salt = \"");
+    o = _str_into(rec, o, hex_encode(blk, SALT_LEN));
+    o = _str_into(rec, o, "\"\npubkey = \"");
+    o = _str_into(rec, o, hex_encode(blk + IDENT_PK, PK_LEN));
+    o = _str_into(rec, o, "\"\n");
+    var sig = alloc(SIG_LEN);
+    ed25519_sign(blk + IDENT_SK, rec, o, sig);
+    o = _str_into(rec, o, "sig = \"");
+    o = _str_into(rec, o, hex_encode(sig, SIG_LEN));
+    o = _str_into(rec, o, "\"\n");
+    _path_for("FreezeHero", 10, g_persist_path);
+    file_write_all(g_persist_path, rec, o);
+    return 0;
+}
+
+# Parse a record body into a toml pairs vec, the way player_auth_load does, so
+# _record_schema can be driven directly.
+fn _pairs_of(body): i64 {
+    var secs = toml_parse(str_from(body));
+    if (vec_len(secs) == 0) { return 0; }
+    return toml_section_pairs(vec_get(secs, 0));
+}
+
+# === M11 — save-record migration gate + writer bounds (1.3.0) ===
+fn test_migration(): i64 {
+    test_group("migration");
+    persist_init();
+
+    # --- M11-A: what version does a record DECLARE? ---
+    #
+    # This is the invariant the 2.0 bump rests on: a record with no `schema` key
+    # is v1 forever, independent of what this server's SCHEMA_VERSION is. The
+    # pre-1.3.0 code defaulted to SCHEMA_VERSION, so those records would have
+    # re-labelled themselves as v2 the moment the constant moved and skipped the
+    # v1 read path entirely.
+    #
+    # HONEST NOTE: while SCHEMA_VERSION == 1 the old and new defaults agree, so
+    # this next assertion cannot distinguish them and passes either way — it is a
+    # PIN, not a proof. It earns its keep at M14: the moment SCHEMA_VERSION
+    # becomes 2, reintroducing the SCHEMA_VERSION default makes it fail loudly.
+    # The assertions below it (clamp, non-integer) do discriminate today.
+    assert_eq(_record_schema(_pairs_of("[player]\nname = \"x\"\n")), 1,
+              "missing schema key reads as v1");
+    assert_eq(_record_schema(_pairs_of("[player]\nschema = 1\n")), 1, "schema = 1 reads as 1");
+    assert_eq(_record_schema(_pairs_of("[player]\nschema = 2\n")), 2, "schema = 2 reads as 2");
+    # Garbage clamps toward v1 rather than inventing a version. toml_int returns
+    # its default for a non-integer or negative; 0 clamps up so every caller can
+    # branch on `>= 2` without a third case.
+    assert_eq(_record_schema(_pairs_of("[player]\nschema = 0\n")), 1, "schema = 0 clamps to v1");
+    assert_eq(_record_schema(_pairs_of("[player]\nschema = \"abc\"\n")), 1,
+              "non-integer schema falls back to v1");
+
+    # --- M11-A seam + M11-B: the ceiling is the only thing that gates ---
+    var s = _mk_sess("FreezeHero", 10);
+    var blk = sess_ident(s);
+    random_bytes(blk, SALT_LEN);
+    ident_derive(blk, "freezepass", 10, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 1);
+
+    _plant_record(blk, "schema = 2\nname = \"FreezeHero\"\nroom = \"\"\ninv = \"\"\n");
+    assert_eq(player_auth_load(_mk_sess("FreezeHero", 10), "freezepass", 10), PL_ERR_SCHEMA,
+              "schema = 2 refused at a v1 ceiling");
+    # Raise the ceiling: the same record now loads. Proves the refusal is the
+    # ceiling talking, not a parse failure.
+    g_schema_max = 2;
+    assert_eq(player_auth_load(_mk_sess("FreezeHero", 10), "freezepass", 10), 1,
+              "schema = 2 loads once the ceiling allows it");
+    # A stamp-less record still loads under a raised ceiling — it is v1, and v1
+    # is below 2. This is the case a 0.7.0 save hits after the 2.0 bump.
+    _plant_record(blk, "name = \"FreezeHero\"\nroom = \"\"\ninv = \"\"\n");
+    assert_eq(player_auth_load(_mk_sess("FreezeHero", 10), "freezepass", 10), 1,
+              "stamp-less v1 record loads under a schema-2 ceiling");
+    g_schema_max = SCHEMA_VERSION;   # restore; later groups assume the default
+
+    # --- M11-C: the control-byte guard, tested directly ---
+    #
+    # _find_sig_offset ends the signed prefix at the first line beginning `sig `,
+    # so a newline inside a value could plant a forged signature line and move
+    # that boundary. No v1 field can carry a newline today — the CYML parser ends
+    # a value at the newline before _has_ctrl would ever see it — so a planted
+    # record is already refused by the signature check, for a different reason.
+    # That makes an end-to-end test prove nothing about this guard. Test the
+    # predicate itself; it is what 2.0's free-text fields will actually lean on.
+    assert_eq(_has_ctrl(str_from("plain")), 0, "clean value passes the control-byte guard");
+    assert_eq(_has_ctrl(str_from("a\nsig = ")), 1, "embedded newline is caught");
+    assert_eq(_has_ctrl(str_from("tab\there")), 1, "embedded tab is caught");
+    assert_eq(_has_ctrl(0), 0, "absent value is not suspicious");
+
+    # --- M11-D: the record writer refuses to overflow, tested directly ---
+    #
+    # Before 1.3.0 the appenders memcpy'd into the 4096-byte g_persist_save with
+    # no bound. The only guard was inside _build_record's inventory loop, so a
+    # huge inventory ALREADY failed cleanly — an end-to-end save test would pass
+    # against the old code too and prove nothing. What was unbounded was every
+    # other append: name, room, the hex fields, the signature line. None can
+    # overflow today given their caps, which is exactly why this is a guard for
+    # 2.0's variable-length fields rather than a fix for a live overflow. So
+    # drive the appenders at the boundary directly.
+    assert_eq(_sv_bad(0), 0, "offset 0 is healthy");
+    assert_eq(_sv_bad(SAVE_ERR), 1, "poisoned offset reads as bad");
+    # A write that exactly fills the buffer is allowed.
+    assert_eq(_ap(SAVE_CAP - 4, "abcd", 4), SAVE_CAP, "exact fit is accepted");
+    # One byte more is refused, and poisons rather than truncating.
+    assert_eq(_sv_bad(_ap(SAVE_CAP - 4, "abcde", 5)), 1, "over-long append is refused");
+    assert_eq(_sv_bad(_ac(SAVE_CAP - 2, "toolong")), 1, "over-long cstr append is refused");
+    assert_eq(_sv_bad(_ai(SAVE_CAP - 1, 123456)), 1, "over-long int append is refused");
+    # Poison is sticky: once bad, later appends must not resume writing.
+    assert_eq(_sv_bad(_ac(_ap(SAVE_CAP - 4, "abcde", 5), "x")), 1, "poison propagates");
+
+    # A normal-sized record still saves and round-trips — the bound must not have
+    # broken the ordinary path.
+    var ok = _mk_sess("FreezeHero", 10);
+    var oblk = sess_ident(ok);
+    random_bytes(oblk, SALT_LEN);
+    ident_derive(oblk, "freezepass", 10, oblk + IDENT_SK, oblk + IDENT_PK);
+    store64(oblk + IDENT_CREATED, 1);
+    store64(ok + SS_AUTHED, 1); store64(ok + SS_ROOM, 0 - 1);
+    store64(ok + SS_HP, 20); store64(ok + SS_MAXHP, 20); store64(ok + SS_CLASS, 0);
+    assert_eq(player_save(ok), 1, "normal record still saves after the bound");
+    assert_eq(player_auth_load(_mk_sess("FreezeHero", 10), "freezepass", 10), 1,
+              "normal record still loads after the bound");
 
     return 0;
 }
@@ -1033,6 +1298,8 @@ fn main() {
     test_login_polish();
     test_security();
     test_freeze();
+    test_migration();
+    test_wire_hygiene();
 
     return assert_summary();
 }

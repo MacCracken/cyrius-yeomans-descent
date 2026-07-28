@@ -37,7 +37,23 @@ enum PersistConst {
     # stamped newer than it understands. Records from 0.7.0-0.9.0 carry no
     # `schema` field and are treated as v1 (back-compatible).
     SCHEMA_VERSION = 1;
+    # The literal v1, for the missing-stamp default. Deliberately NOT spelled
+    # SCHEMA_VERSION at the read site: a stamp-less record IS v1 forever, no
+    # matter what version this server happens to be. See the gate in
+    # player_auth_load (M11-A).
+    SCHEMA_V1 = 1;
+    # Bytes _build_record reserves for the trailing `sig = "<128 hex>"` line:
+    # 6 for `sig = ` + 2 quotes + 128 hex + newline is 137, rounded up for room
+    # (M11-D). The inventory loop stops before eating into it.
+    SIG_TAIL = 192;
 }
+
+# player_auth_load return codes. Positive is success; 0 is a wrong passphrase
+# (re-promptable); negatives are terminal and each carries its own player-facing
+# message in login_on_pass. Named at M11-B, when the schema case had to stop
+# masquerading as tampering.
+var PL_ERR_UNREADABLE = 0 - 2;   # malformed, truncated, or signature mismatch
+var PL_ERR_SCHEMA     = 0 - 3;   # intact + signed, but written by a newer server
 
 # rename(2) is not wrapped in the x86_64 stdlib (only sys_mkdir is); the
 # syscall number is 82 — rename(const char *old, const char *new).
@@ -54,6 +70,12 @@ var g_fmt_scratch   = 0;   # fmt_int_buf temp
 var g_audit_chain   = 0;
 var g_audit_store   = 0;
 var g_persist_ready = 0;
+# Highest save-record schema this server will load, seeded from SCHEMA_VERSION.
+# A `var` rather than the enum constant so the test suite can raise the ceiling
+# and drive a schema-2 world against a schema-1 build — `SCHEMA_VERSION` is a
+# compile-time enum member and the suite compiles this same file, so there is no
+# other seam. Production never writes to it (M11-A).
+var g_schema_max = SCHEMA_VERSION;
 # 0.8.1 — prior last_login captured at load, for the "last seen …"
 # returning-player greeting.
 var g_loaded_last_login = 0;
@@ -117,6 +139,42 @@ fn _slen(p): i64 {
     var i = 0;
     while ((load8(p + i) & 0xFF) != 0) { i = i + 1; }
     return i;
+}
+
+# The schema version a parsed record declares (M11-A).
+#
+# A MISSING `schema` key means the literal v1 — 0.7.0-0.9.0 records predate the
+# stamp and *are* v1 forever, regardless of what version this server is. Reading
+# the default as SCHEMA_VERSION (the pre-1.3.0 behaviour) meant those records
+# would silently re-label themselves as whatever the current version happened to
+# be, skipping every migration path the instant SCHEMA_VERSION moved off 1.
+#
+# `toml_int` returns its default for a non-integer or negative value, so
+# `schema = "abc"` and `schema = -1` both land on v1. A nonsense `schema = 0`
+# clamps up to v1 as well, so callers can branch on `>= 2` without a third case.
+#
+# Split out from the gate so it is testable while SCHEMA_VERSION is still 1 —
+# the load path cannot yet branch on the answer (that arrives with M14), so the
+# invariant "a stamp-less record reads as exactly 1" is otherwise unobservable.
+fn _record_schema(pairs): i64 {
+    var v = toml_int(pairs, "schema", SCHEMA_V1);
+    if (v < SCHEMA_V1) { return SCHEMA_V1; }
+    return v;
+}
+
+# Does a loaded str hold any control byte (< 0x20)? A 0 str is absent, not
+# suspicious — callers treat that as "no value", so it reports clean. Used by
+# the M11-C signed-prefix guard in player_auth_load.
+fn _has_ctrl(v): i64 {
+    if (v == 0) { return 0; }
+    var p = str_data(v);
+    var n = str_len(v);
+    var i = 0;
+    while (i < n) {
+        if ((load8(p + i) & 0xFF) < 32) { return 1; }
+        i = i + 1;
+    }
+    return 0;
 }
 
 fn _bytes_eq(a, b, n): i64 {
@@ -209,12 +267,39 @@ fn player_exists(name, len): i64 {
 # === serialization =========================================================
 # Appenders over g_persist_save at a running offset.
 
-fn _ap(off, ptr, n): i64 { memcpy(g_persist_save + off, ptr, n); return off + n; }
-fn _ac(off, cstr): i64 { var n = _slen(cstr); memcpy(g_persist_save + off, cstr, n); return off + n; }
+# M11-D — bounded appenders.
+#
+# These write into g_persist_save, a fixed SAVE_CAP (4096) allocation. Until
+# M11-D none of them checked anything: the only guard in _build_record was inside
+# the inventory loop, and the record only fit because `name` caps at 16 and room
+# ids are short. That is a WRITE-side heap overflow, which no amount of load-side
+# clamping prevents — and every variable-length field 2.0 wants to add (an
+# equipment list, a title, a guild roster) would have landed straight on it.
+#
+# The rule: once an append would exceed SAVE_CAP, every appender becomes a no-op
+# and propagates the poisoned offset. _build_record checks ONCE at the end, so
+# the callers stay readable and no partial record can ever be signed or written.
+# SAVE_ERR is deliberately far above any real offset so it survives the
+# arithmetic in the chained `off = _f...(off, ...)` calls without wrapping.
+var SAVE_ERR = 0x40000000;
+
+# Has the running offset already overflowed?
+fn _sv_bad(off): i64 { if (off >= SAVE_ERR) { return 1; } return 0; }
+
+# Append n bytes, or poison the offset if they would not fit.
+fn _ap(off, ptr, n): i64 {
+    if (_sv_bad(off) == 1) { return off; }
+    if (off + n > SAVE_CAP) { return SAVE_ERR; }
+    memcpy(g_persist_save + off, ptr, n);
+    return off + n;
+}
+# Append a NUL-terminated literal.
+fn _ac(off, cstr): i64 { return _ap(off, cstr, _slen(cstr)); }
+# Append a decimal integer via the shared fmt scratch.
 fn _ai(off, n): i64 {
+    if (_sv_bad(off) == 1) { return off; }
     var l = fmt_int_buf(n, g_fmt_scratch);
-    memcpy(g_persist_save + off, g_fmt_scratch, l);
-    return off + l;
+    return _ap(off, g_fmt_scratch, l);
 }
 fn _fstr(off, key, valptr, vallen): i64 {
     off = _ac(off, key);
@@ -270,7 +355,11 @@ fn _build_record(s): i64 {
     var first = 1;
     while (it != 0) {
         if (oi_tpl_id_len(it) > 0) {
-            if (off > SAVE_CAP - 256) { return 0 - 1; }   # leave room for sig
+            # Stop short of the tail the signature line still needs. The
+            # appenders below would refuse to overflow anyway, but bailing here
+            # keeps the inventory from being truncated mid-id.
+            if (off > SAVE_CAP - SIG_TAIL) { off = SAVE_ERR; }
+            if (_sv_bad(off) == 1) { it = 0; continue; }
             if (first == 0) { off = _ac(off, ","); }
             off = _ap(off, oi_tpl_id_ptr(it), oi_tpl_id_len(it));
             first = 0;
@@ -278,10 +367,16 @@ fn _build_record(s): i64 {
         it = oi_next(it);
     }
     off = _ac(off, "\"\n");
+    # M11-D — one check, here. If any append overflowed, the record is refused
+    # whole: nothing is signed, nothing is written, and player_save reports the
+    # I/O failure. A partially-built record must never reach the signer, or we
+    # would hand the player a validly-signed truncation of their own character.
+    if (_sv_bad(off) == 1) { return 0 - 1; }
     # sign the prefix [0, off) with the session's (re-derived) secret key
     var sig = g_persist_dec;
     ed25519_sign(blk + IDENT_SK, g_persist_save, off, sig);
     off = _fstr(off, "sig", hex_encode(sig, SIG_LEN), SIG_LEN * 2);
+    if (_sv_bad(off) == 1) { return 0 - 1; }
     return off;
 }
 
@@ -354,9 +449,12 @@ fn _restore_inv(s, ids, len): i64 {
 # Verify the passphrase against the stored record and, on success, restore
 # the full session. Returns:
 #    1  authenticated + loaded
-#    0  wrong passphrase
-#   -1  no/unreadable record
-#   -2  signature invalid (corrupt or tampered)
+#    0  wrong passphrase (re-promptable — the only non-terminal failure)
+#   -1  no record on disk
+#   -2  PL_ERR_UNREADABLE — malformed, truncated, or signature mismatch
+#   -3  PL_ERR_SCHEMA — intact and correctly signed, but stamped newer than
+#       g_schema_max. Distinct from -2 since 1.3.0 (M11-B): this is a rolled-back
+#       deploy, not an attack, and must not be reported to the player as one.
 fn player_auth_load(s, pass, passlen): i64 {
     persist_init();
     var nm = load64(s + SS_NAME_BUF);
@@ -393,6 +491,20 @@ fn player_auth_load(s, pass, passlen): i64 {
     if (hex_decode_into(str_data(pkv), str_len(pkv), filepk) == 0) { return 0 - 2; }
     if (hex_decode_into(str_data(sigv), str_len(sigv), filesig) == 0) { return 0 - 2; }
 
+    # M11-C — refuse a record whose string values could split the signed prefix.
+    #
+    # _find_sig_offset ends the signed region at the FIRST line beginning `sig `,
+    # so a value containing a newline followed by a forged `sig = "..."` line
+    # would move that boundary: everything after the planted line falls outside
+    # the signature, and the real trailing `sig` is never reached. No v1 field
+    # can carry a newline today (names are alnum-validated, room ids and template
+    # ids come from authored CYML), which is why this has never been reachable —
+    # but the check has to exist BEFORE 2.0 adds a free-text field, not after.
+    # Cheap and unconditional: no legitimate value holds a control byte.
+    if (_has_ctrl(toml_get(pairs, "name")) == 1) { return 0 - 2; }
+    if (_has_ctrl(toml_get(pairs, "room")) == 1) { return 0 - 2; }
+    if (_has_ctrl(toml_get(pairs, "inv")) == 1)  { return 0 - 2; }
+
     # Integrity: the record must be self-consistent under its own pubkey.
     var prefix = _find_sig_offset(g_persist_slurp, n);
     if (prefix < 0) { return 0 - 2; }
@@ -402,10 +514,22 @@ fn player_auth_load(s, pass, passlen): i64 {
     }
 
     # 0.9.1 — reject a record stamped with a newer schema than this server
-    # understands (post-1.0 migration hook). A missing `schema` field
-    # (0.7.0-0.9.0 records) defaults to the current version, so they load.
-    if (toml_int(pairs, "schema", SCHEMA_VERSION) > SCHEMA_VERSION) {
-        return 0 - 2;
+    # understands (the post-1.0 migration hook).
+    #
+    # M11-A: the version comes from _record_schema, which pins a missing stamp
+    # to the literal v1 rather than to SCHEMA_VERSION. See that function for why
+    # the difference only bites once SCHEMA_VERSION moves off 1 — and why the fix
+    # therefore had to land before the bump rather than inside it.
+    #
+    # M11-B: this returns its OWN code, not the tamper code. A record from a
+    # newer server is intact and honestly signed — it just post-dates us, which
+    # is the normal consequence of rolling a deploy back. Reporting it as
+    # "tampered with" told every returning player their character had been
+    # attacked, and wrote a SEV_SECURITY entry into the audit chain for what is
+    # an operator versioning event. It still refuses the session: a downgraded
+    # server must never half-load a record whose fields it does not understand.
+    if (_record_schema(pairs) > g_schema_max) {
+        return PL_ERR_SCHEMA;
     }
 
     # Authentication: derive the keypair from the typed passphrase + stored
@@ -534,8 +658,15 @@ fn login_on_pass(s, buf, len): i64 {
         return 0;
     }
     session_echo_on(s);
-    session_appendtx_cstr(s, "\r\nYour record is unreadable or has been tampered with.");
-    session_appendtx_cstr(s, " An operator must intervene.\r\n");
+    if (rc == PL_ERR_SCHEMA) {
+        # M11-B — intact, correctly signed, just newer than us. Almost always a
+        # rolled-back deploy, so say that rather than accusing anyone.
+        session_appendtx_cstr(s, "\r\nYour record was written by a newer server than this one.");
+        session_appendtx_cstr(s, " No changes have been made to it.\r\n");
+    } else {
+        session_appendtx_cstr(s, "\r\nYour record is unreadable or has been tampered with.");
+        session_appendtx_cstr(s, " An operator must intervene.\r\n");
+    }
     store64(s + SS_QUIT, 1);
     return 0;
 }

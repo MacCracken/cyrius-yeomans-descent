@@ -183,6 +183,66 @@ fn session_appendtx_cstr(s, cstr): i64 {
     return session_appendtx(s, cstr, strlen(cstr));
 }
 
+# === session_appendtx_prose — append PLAYER-AUTHORED bytes safely (M10-A). ===
+#
+# Use this for anything a player typed. Use session_appendtx for server literals
+# and authored zone prose.
+#
+# The bug it fixes: telnet_feed decodes `IAC IAC` into a literal 0xFF data byte —
+# correct RFC 854 behaviour, and the suite asserts it. session_push_line_byte then
+# drops only `b < 32`, so that 0xFF lands in the line buffer, and cmd_say handed
+# the buffer straight to every listener's socket. RFC 854 requires a data-stream
+# 0xFF be re-sent as `IAC IAC`; sending it bare means a conformant client reads
+# the start of a Telnet command. One player could inject IAC into another
+# player's protocol stream. (The comment on that filter claiming "telnet IAC is
+# already stripped upstream" was wrong: IAC is stripped as *framing*, and the
+# escaped literal is deliberately preserved as data.)
+#
+# Two rules:
+#   0xFF        -> doubled, per RFC 854.
+#   < 32, 127   -> dropped. C0 controls and DEL: ESC (0x1B) among them, so player
+#                  text cannot forge the SGR runs ansi_title()/ansi_actor() emit.
+#
+# C1 (0x80-0x9F) is deliberately NOT dropped, though it is nominally a control
+# range: as raw bytes those are UTF-8 continuation bytes, and the tokenizer
+# explicitly passes UTF-8 through. Dropping them would corrupt every non-ASCII
+# name and message to fix nothing — they are inert to a Telnet client.
+#
+# Bounded, and atomic per escape pair. It writes into the tx queue directly
+# rather than delegating, because session_appendtx truncates silently at TX_CAP:
+# a 4096-byte all-0xFF say escapes to 8192, and a truncation landing *between*
+# the two bytes of a pair would emit the exact lone 0xFF this exists to prevent.
+# Returns bytes written.
+fn session_appendtx_prose(s, buf, len): i64 {
+    var pos = load64(s + SS_TX_LEN);
+    var room = TX_CAP - pos;
+    if (room <= 0) { return 0; }
+    var dst = load64(s + SS_TX_BUF) + pos;
+    var i = 0;
+    var w = 0;
+    while (i < len) {
+        var b = load8(buf + i) & 0xFF;
+        if (b == 255) {
+            # Both bytes or neither — never split a pair at the boundary.
+            if (w + 2 > room) { i = len; continue; }
+            store8(dst + w, 255);
+            store8(dst + w + 1, 255);
+            w = w + 2;
+        } else {
+            if (b >= 32) {
+                if (b != 127) {
+                    if (w + 1 > room) { i = len; continue; }
+                    store8(dst + w, b);
+                    w = w + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    store64(s + SS_TX_LEN, pos + w);
+    return w;
+}
+
 # === Password echo suppression (0.8.1). ===
 # Telnet convention: the server announcing WILL ECHO makes a conformant
 # client stop local-echoing the user's keystrokes; the server then withholds
@@ -463,7 +523,7 @@ fn cmd_say(s, buf, len): i64 {
     var rs = cmd_rest_start(buf, len);
     if (rs >= len) { session_appendtx_cstr(s, "Say what?\r\n"); return 0; }
     session_appendtx_cstr(s, "You say, \"");
-    session_appendtx(s, buf + rs, len - rs);
+    session_appendtx_prose(s, buf + rs, len - rs);   # M10-B player-authored
     session_appendtx_cstr(s, "\"\r\n");
     room_say_broadcast(load64(s + SS_ROOM), s, s, " says, \"", buf + rs, len - rs, "\"\r\n");
     return 0;
@@ -474,9 +534,9 @@ fn cmd_say(s, buf, len): i64 {
 fn cmd_emote(s, buf, len): i64 {
     var rs = cmd_rest_start(buf, len);
     if (rs >= len) { session_appendtx_cstr(s, "Emote what?\r\n"); return 0; }
-    session_appendtx(s, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    session_appendtx_prose(s, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));   # M10-C name
     session_appendtx_cstr(s, " ");
-    session_appendtx(s, buf + rs, len - rs);
+    session_appendtx_prose(s, buf + rs, len - rs);   # M10-B player-authored
     session_appendtx_cstr(s, "\r\n");
     room_say_broadcast(load64(s + SS_ROOM), s, s, " ", buf + rs, len - rs, "\r\n");
     return 0;
@@ -505,16 +565,16 @@ fn cmd_tell(s, pa, buf, len): i64 {
     }
     # Recipient sees the incoming tell (flushed now — they may be idle).
     session_appendtx_cstr(target, "\r\n");
-    session_appendtx(target, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    session_appendtx_prose(target, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));   # M10-C name
     session_appendtx_cstr(target, " tells you, \"");
-    session_appendtx(target, buf + rs2, len - rs2);
+    session_appendtx_prose(target, buf + rs2, len - rs2);   # M10-B player-authored
     session_appendtx_cstr(target, "\"\r\n");
     deliver_to(target);
     # Sender's echo.
     session_appendtx_cstr(s, "You tell ");
-    session_appendtx(s, load64(target + SS_NAME_BUF), load64(target + SS_NAME_LEN));
+    session_appendtx_prose(s, load64(target + SS_NAME_BUF), load64(target + SS_NAME_LEN));   # M10-C name
     session_appendtx_cstr(s, ", \"");
-    session_appendtx(s, buf + rs2, len - rs2);
+    session_appendtx_prose(s, buf + rs2, len - rs2);   # M10-B player-authored
     session_appendtx_cstr(s, "\"\r\n");
     return 0;
 }
@@ -724,7 +784,7 @@ fn cmd_examine(s, pa): i64 {
     var other = room_find_player(s, load64(s + SS_ROOM), tok_ptr(pa, di), tok_len(pa, di));
     if (other != 0) {
         session_appendtx_cstr(s, ansi_actor());
-        session_appendtx(s, load64(other + SS_NAME_BUF), load64(other + SS_NAME_LEN));
+        session_appendtx_prose(s, load64(other + SS_NAME_BUF), load64(other + SS_NAME_LEN));   # M10-C name
         session_appendtx_cstr(s, ansi_reset());
         session_appendtx_cstr(s, " stands here, taking in the Under-Grid.\r\n");
         return 0;
@@ -775,7 +835,7 @@ fn cmd_examine(s, pa): i64 {
 fn examine_self(s): i64 {
     session_appendtx_cstr(s, "You are ");
     session_appendtx_cstr(s, ansi_actor());
-    session_appendtx(s, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    session_appendtx_prose(s, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));   # M10-C name
     session_appendtx_cstr(s, ansi_reset());
     var cls = load64(s + SS_CLASS);
     if (cls >= 0) {
