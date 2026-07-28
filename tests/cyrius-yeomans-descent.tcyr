@@ -1537,6 +1537,58 @@ fn test_preauth_meter(): i64 {
     return 0;
 }
 
+# === H6 (1.6.3) — accept-path limits + save rate limit ===
+fn test_accept_limits(): i64 {
+    test_group("accept-limits");
+
+    # --- The session cap. g_session_count was incremented, decremented and
+    # printed by @stats, but never COMPARED — there was no ceiling at all, so
+    # ordinary connections could walk the process into its fd limit.
+    assert(MAX_SESSIONS > 0, "a session ceiling exists");
+    assert(MAX_SESSIONS < 1024, "and sits below a default fd limit, leaving headroom");
+
+    # --- Listener arm/disarm. Disarming is what actually stops the busy spin:
+    # the listener is level-triggered, so suppressing the accept alone left
+    # epoll_wait returning instantly (measured: 99.9% of a core with the accept
+    # already suppressed). Idempotent in both directions — the tick calls
+    # listener_rearm unconditionally once the window passes.
+    var armed0 = g_listener_armed;
+    listener_disarm();
+    assert_eq(g_listener_armed, 0, "disarm clears the armed flag");
+    listener_disarm();
+    assert_eq(g_listener_armed, 0, "disarming twice is a no-op");
+    listener_rearm();
+    assert_eq(g_listener_armed, 1, "re-arm sets it back");
+    listener_rearm();
+    assert_eq(g_listener_armed, 1, "re-arming twice is a no-op");
+    g_listener_armed = armed0;
+
+    # --- The save rate limit. player_save is ~1.2 ms of ed25519_sign plus a
+    # write, a rename and an audit append; 4 KB of "save\r" was 819 of them.
+    var s = _mk_sess("Saver", 5);
+    var blk = sess_ident(s);
+    random_bytes(blk, SALT_LEN);
+    ident_derive(blk, "saverpass1", 10, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 1);
+    store64(s + SS_AUTHED, 1); store64(s + SS_ROOM, 0 - 1);
+    store64(s + SS_HP, 20); store64(s + SS_MAXHP, 20); store64(s + SS_CLASS, 0);
+    assert_eq(player_save(s), 1, "the first save lands");
+    var stamp = load64(s + SS_LAST_SAVE_MS);
+    assert(stamp > 0, "and records when it happened");
+
+    # The gate itself, tested directly rather than by driving cmd_dispatch —
+    # that needs a full session + parser + world and segfaults on a bare test
+    # session, which proves nothing about the rule.
+    assert_eq(save_rate_limited(s), 1, "a save moments after the last is rate-limited");
+    store64(s + SS_LAST_SAVE_MS, clock_now_ms() - SAVE_MIN_INTERVAL_MS - 1);
+    assert_eq(save_rate_limited(s), 0, "once the window passes it is allowed again");
+    # A session that has never saved must never be blocked.
+    var fresh = _mk_sess("Fresh", 5);
+    assert_eq(save_rate_limited(fresh), 0, "a session that never saved is not rate-limited");
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -1748,6 +1800,7 @@ fn main() {
     test_actor_tick();
     test_hardening();
     test_preauth_meter();
+    test_accept_limits();
 
     return assert_summary();
 }

@@ -4,6 +4,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.3] — 2026-07-28
+
+**The accept path, and the `save` verb.** Two more findings from the 1.6.0 sweep.
+
+### Fixed
+
+- **Fd exhaustion pinned a core and leaked 2.3 MB/s.** `handle_accept` treated
+  every non-`Ok` `sock_accept` as "backlog drained", so `EMFILE`/`ENFILE` were
+  indistinguishable from `EAGAIN`. The listener is level-triggered — nothing here
+  sets `EPOLLET` — so a pending-but-unacceptable connection made `epoll_wait`
+  return instantly, forever. And where the `EAGAIN` path hands back a shared
+  singleton (`lib/net.cyr`, added at 6.4.61 precisely to avoid this), a real
+  error boxes a **fresh `Err`** every pass from the allocator that never frees.
+
+  Measured at an fd limit of 48 with 60 idle sockets over 15 s:
+
+  | | before | after |
+  |---|---|---|
+  | CPU | **99.9% of one core** | **0.0%** |
+  | RSS drift | **+33,876 kB** | **+596 kB** |
+
+  Three changes: `handle_accept` now compares `err_code_of` against
+  `_NET_EAGAIN`; a real error **disarms the listener** in epoll and the tick
+  re-arms it after `ACCEPT_BACKOFF_TICKS`; and `MAX_SESSIONS` (256) caps
+  concurrent sessions, closing over-cap connections rather than leaving them
+  pending. `g_session_count` had been incremented, decremented and printed by
+  `@stats` since M1-H, but never **compared** to anything.
+
+  **Suppressing the accept alone was not enough** — that fixed the leak and left
+  the core at 99.9%, because a level-triggered listener stays readable whether or
+  not you accept it. Taking the interest off epoll is what stops the spin.
+- **The `save` verb had no rate limit.** `player_save` is ~1.2 ms, nearly all
+  `ed25519_sign`, plus a file write, a rename and an audit append — and
+  `SS_AUTHED` was the only gate, so 4 KB of `save\r` was 819 signed writes.
+  Now gated on `SS_LAST_SAVE_MS`, which `persist.cyr` has always written and
+  nothing ever read. Deliberately **not** on `SS_SAVE_DIRTY`: `cmd_on_line`
+  re-sets that flag *after* `cmd_dispatch` returns, so every line in a burst sees
+  it set and a dirty-gate would be a no-op against exactly this pattern.
+
+### Notes
+
+- Suite **399 → 410**. Mutation-verified: neutering the save gate fails 1,
+  stopping `listener_disarm` clearing its flag fails 2.
+- The rate-limit rule is a named predicate (`save_rate_limited`) rather than
+  inline in `cmd_dispatch`. The first version of its test drove `cmd_dispatch`
+  on a bare test session and **segfaulted** — it needs a full session, parser and
+  world. A test that cannot run proves nothing; the predicate is testable on its
+  own.
+- 1.6.2's dispatch cap already meters the *rate* of both attacks; 1.6.3 caps the
+  *work* each one can demand. They are complementary, not redundant.
+
 ## [1.6.2] — 2026-07-28
 
 **Pre-auth CPU exhaustion.** One 4 KB write from an unauthenticated connection

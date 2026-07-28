@@ -114,8 +114,22 @@ enum SessConst {
     # 65-87 s (measured). 8 is far past any human's typing burst, and the
     # remainder is retained rather than dropped.
     RX_MAX_LINES = 8;
+    # Minimum gap between two `save` verbs on one session (H6, 1.6.3).
+    SAVE_MIN_INTERVAL_MS = 1000;
     # Consecutive failed passphrase attempts before the session is closed.
     MAX_LOGIN_FAILS = 5;
+}
+
+# Has this session saved too recently for another `save` verb to do real work?
+# Split out from cmd_dispatch so the rule is testable without standing up a full
+# session + parser + world (H6, 1.6.3). A zero SS_LAST_SAVE_MS — a session that
+# has never saved — is never rate-limited: clock_now_ms() is large, so the
+# difference exceeds any interval.
+fn save_rate_limited(s): i64 {
+    var last = load64(s + SS_LAST_SAVE_MS);
+    if (last == 0) { return 0; }
+    if (clock_now_ms() - last < SAVE_MIN_INTERVAL_MS) { return 1; }
+    return 0;
 }
 
 enum Phase {
@@ -904,6 +918,22 @@ fn cmd_dispatch(s, pa, buf, len): i64 {
     if (verb == VERB_SAVE) {
         if (load64(s + SS_AUTHED) == 0) {
             session_appendtx_cstr(s, "You have no persistent record to save.\r\n");
+            return 0;
+        }
+        # H6 (1.6.3) — rate-limit the verb. player_save is ~1.2 ms, almost all of
+        # it ed25519_sign, plus a file write, a rename and an audit append. With
+        # SS_AUTHED as the only gate, 4 KB of "save\r" in one read was 819 signed
+        # writes back to back. H5's dispatch cap already meters the rate; this
+        # caps the work itself, and costs a legitimate player nothing — nobody
+        # types `save` twice inside a second on purpose.
+        #
+        # Gated on SS_LAST_SAVE_MS, which persist.cyr has always WRITTEN and
+        # nothing ever read. Deliberately NOT on SS_SAVE_DIRTY: cmd_on_line
+        # re-sets that flag after cmd_dispatch returns, so every line in a burst
+        # sees dirty == 1 and a dirty-gate would be a no-op against this exact
+        # pattern.
+        if (save_rate_limited(s) == 1) {
+            session_appendtx_cstr(s, "Your progress is etched into the grid.\r\n");
             return 0;
         }
         if (player_save(s) == 1) { session_appendtx_cstr(s, "Your progress is etched into the grid.\r\n"); }

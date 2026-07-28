@@ -16,6 +16,13 @@ enum ServerConst {
     LISTEN_BACKLOG   = 32;
     TICK_MS          = 2500;   # ADR 0001 — 2.5 s combat tick
     MAX_EPOLL_EVENTS = 64;
+    # H6 (1.6.3) — concurrent-session ceiling, and how many ticks the listener
+    # stands down after a real accept error. 256 sessions is far above anything
+    # this single-threaded loop serves comfortably and far below a default
+    # 1024-fd limit, leaving headroom for the listener, signalfd, epoll fd, save
+    # files and the audit store.
+    MAX_SESSIONS       = 256;
+    ACCEPT_BACKOFF_TICKS = 4;
     EPOLL_EVENT_SIZE = 12;     # kernel writes packed { u32 events; u64 data }
 }
 
@@ -225,6 +232,32 @@ fn drain_pending_rx(): i64 {
     return drained;
 }
 
+# H6 (1.6.3) — take the listener off / put it back on the epoll interest list.
+# Disarming is what actually stops the busy spin; suppressing the accept alone
+# leaves epoll_wait returning immediately on a level-triggered readable fd.
+fn listener_disarm(): i64 {
+    if (g_listener_armed == 0) { return 0; }
+    #ifndef CYRIUS_TARGET_AGNOS
+    var ev = epoll_event_new(0, TAG_LISTENER);
+    sys_epoll_ctl(g_epfd, EPOLL_CTL_MOD, g_listener_fd, ev);
+    #endif
+    g_listener_armed = 0;
+    return 0;
+}
+
+# Put the listener's EPOLLIN interest back once the backoff window has passed.
+# Called unconditionally from the tick, so it must be idempotent — if fd
+# pressure has not eased the next real accept error simply disarms it again.
+fn listener_rearm(): i64 {
+    if (g_listener_armed == 1) { return 0; }
+    #ifndef CYRIUS_TARGET_AGNOS
+    var ev = epoll_event_new(EPOLLIN, TAG_LISTENER);
+    sys_epoll_ctl(g_epfd, EPOLL_CTL_MOD, g_listener_fd, ev);
+    #endif
+    g_listener_armed = 1;
+    return 0;
+}
+
 # M7-B presence gate — is any in-world session standing in this zone? A
 # session with SS_ROOM in [0, room_count) is placed in the world (login
 # leaves it at -1). Single-writer (ADR 0003), so this snapshot can't race.
@@ -283,6 +316,10 @@ fn advance_tick(): i64 {
     if (g_save_interval_ticks > 0) {
         if (g_tick_count % g_save_interval_ticks == 0) { save_sweep(); }
     }
+    # H6 — put the listener back once the backoff window has passed. If the fd
+    # pressure has not eased, the next real error simply disarms it again; the
+    # cost is one wasted accept per window instead of a pinned core.
+    if (g_tick_count >= g_accept_backoff_until) { listener_rearm(); }
     drain_pending_rx();           # H5 — metered leftovers from a capped read
     mob_tick_all(g_tick_count);   # M13 — every living mob takes a turn
     corpse_decay_sweep();   # M12-A — age out corpses and reclaim them
@@ -292,6 +329,33 @@ fn advance_tick(): i64 {
 
 # Sessions-currently-connected counter (M1-H observability hook).
 var g_session_count = 0;
+
+# === H6 (1.6.3) — accept-path limits. ===
+#
+# MAX_SESSIONS bounds concurrent sessions so the process never reaches its fd
+# limit through ordinary connections. g_session_count was incremented,
+# decremented and printed by @stats, but never COMPARED to anything — there was
+# no cap at all.
+#
+# g_accept_backoff_until is the listener's re-arm tick. handle_accept used to
+# treat every non-Ok sock_accept as "backlog drained", so EMFILE/ENFILE were
+# indistinguishable from EAGAIN. The listener is level-triggered (nothing here
+# sets EPOLLET), so a pending-but-unacceptable connection made epoll_wait return
+# instantly, forever — and unlike the EAGAIN path, which hands back a shared
+# singleton, a real error boxes a FRESH Err from the bump allocator on every
+# pass. Measured at an rlimit of 48 with 60 idle sockets: 99.9% of one core and
+# +33.9 MB RSS in 15 s, climbing until alloc() returns 0 and the store faults.
+# On a real error we now stop accepting until a later tick, turning an unbounded
+# spin into one wasted accept per backoff window.
+var g_accept_backoff_until = 0;
+# The listener fd + whether it is currently armed in epoll. Backing off from
+# ACCEPTING is not enough on its own: the listener is level-triggered, so a
+# still-pending connection makes epoll_wait return instantly whether or not we
+# try to accept it — measured, the core stayed pinned at 99.9% with the accept
+# suppressed. The interest itself has to come off epoll, and go back on when the
+# backoff expires.
+var g_listener_fd = 0;
+var g_listener_armed = 1;
 
 # Intrusive head of the active-session list. Threaded through each
 # Session's SS_NEXT / SS_PREV so the tick sweep (M1-F) can walk every
@@ -728,11 +792,31 @@ fn cmd_who(s): i64 {
 
 # === Accept handler — drain every pending accept; alloc + register. ===
 fn handle_accept(epfd, listener_fd, now_ms): i64 {
+    # H6 — stood down after a real accept error; the tick re-arms us.
+    if (g_tick_count < g_accept_backoff_until) { return 0; }
     var done = 0;
     while (done == 0) {
         var ar = sock_accept(listener_fd);
-        if (is_ok(ar) == 0) { done = 1; continue; }
+        if (is_ok(ar) == 0) {
+            # EAGAIN is the steady state — the backlog is genuinely drained, and
+            # lib/net hands back a shared singleton for it. Anything else is a
+            # real error (EMFILE / ENFILE are the ones that matter) and boxes a
+            # fresh Err; spinning on it is what burned a core and 2.3 MB/s.
+            if (err_code_of(ar) != _NET_EAGAIN) {
+                g_accept_backoff_until = g_tick_count + ACCEPT_BACKOFF_TICKS;
+                listener_disarm();
+            }
+            done = 1;
+            continue;
+        }
         var cfd = result_unwrap(ar);
+        # H6 — at capacity, take the connection off the backlog and drop it
+        # rather than leaving it pending. Leaving it would re-arm the
+        # level-triggered listener immediately and reproduce the same spin.
+        if (g_session_count >= MAX_SESSIONS) {
+            sock_close(cfd);
+            continue;
+        }
         var nb = set_nonblock(cfd);
         if (nb < 0) { sock_close(cfd); continue; }
         var s = session_new(cfd, now_ms);
@@ -875,6 +959,7 @@ fn cmd_serve(port): i64 {
     print_num(port);
     println("");
     var lfd = open_listener(port);
+    g_listener_fd = lfd;   # H6 — listener_disarm/rearm need it from the tick
     if (lfd < 0) {
         println("server: failed to bind listener (errno below)");
         efmt_int(0 - lfd);
