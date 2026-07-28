@@ -4,6 +4,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-07-28
+
+**Bounds the audit chain, via an upstream libro fix.** `[deps.libro]` `2.8.3` →
+**`2.8.4`**.
+
+### Fixed
+
+- **The in-memory audit chain no longer grows without bound.** `audit_event`
+  appended on every login / save / security event, and `g_audit_chain` is
+  **never read** — nothing in this tree calls `chain_verify` / `chain_len` /
+  `chain_by_*` on it; durability is `filestore_append`. It was also not fixable
+  from here: `chain_new()` leaves `max_capacity` at 0 so `_chain_auto_rotate`
+  never fires, there was no capacity constructor, `chain_apply_retention`
+  redistributes into fresh vecs while archived entries stay referenced, and
+  libro had one `fl_free` in ~4,400 lines, none of it on the entry path.
+
+  libro **2.8.4** adds `chain_new_streaming()` — a chain that links every entry
+  exactly as before (each records its predecessor's hash, so the durable chain
+  in `data/audit.libro` verifies identically) but retains none of them, keeping
+  only the head hash in the `prev_hash` carry-over slot `_chain_prev_link`
+  already falls back to. descent now uses it, and `entry_free`s each entry once
+  the store has it.
+
+### Notes — measured honestly
+
+- **RSS does not move, and is the wrong instrument.** A 260 s / 42-login soak
+  reads +624 kB against a +636 kB baseline. Two reasons, both structural: the
+  `Str`s each entry carries (timestamp, hash, algorithm, plus descent's own
+  source / action / details) come from the **bump allocator**, which has no
+  `free` at this layer; and freelist memory is never returned to the OS. What
+  1.6.1 removes is the **unbounded term** — one vec slot and one 88-byte entry
+  struct per event, forever. A smaller per-event `Str` residue remains and needs
+  an allocator-level fix, recorded in libro 2.8.4's CHANGELOG.
+- `chain_len` is the honest instrument, and the new assertions use it: 50 audit
+  events must retain nothing.
+- **`entry_free` is gated on `chain_streaming`.** Freeing is correct only
+  because the chain retains nothing; on a retaining chain the entries vec still
+  references the entry and the next `_chain_prev_link` reads freed memory —
+  verified, it segfaults (exit 139). Rather than trust two lines to stay in
+  step, the free is conditional. Mutation-reverting the constructor now fails
+  three assertions cleanly instead of crashing.
+
+### Changed
+
+- Hardening fixes retagged **M14-A/B/C → H1/H2/H3**. `M14` already belongs to
+  the 2.0 contract (ADR 0008 + save schema v2) in the roadmap, and
+  `roadmap.md:225` already referenced an **M14-C** for the signed reader — two
+  different M14-Cs existed in one tree. Caught by the 1.6.0 sweep.
+
+Suite **385 → 388**.
+
 ## [1.6.0] — 2026-07-28
 
 **Hardening sweep, closing the 1.x line.** Toolchain `6.4.83` → **`6.4.86`**,

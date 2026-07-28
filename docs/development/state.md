@@ -3,7 +3,7 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-28 (v1.6.0 — 1.x closed)
+> **Last refresh**: 2026-07-28 (v1.6.1 — 1.x closed)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
@@ -11,6 +11,25 @@
 > tests, boot guide) describes the **current** 1.6.0 tree.
 
 ## Version
+
+**1.6.1** — audit-chain bound, via upstream libro 2.8.4, 2026-07-28. **388
+assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
+
+descent's in-memory audit chain grew forever and could not be bounded from here.
+libro 2.8.4 adds `chain_new_streaming()`: entries link exactly as before — the
+durable chain verifies identically — but none are retained, only the head hash.
+descent is a pure write-through consumer (it never reads the chain), so this is
+the right shape.
+
+**Measurement note, worth keeping:** RSS does **not** move (+624 kB vs a +636 kB
+baseline) and is the wrong instrument. Entry `Str`s come from the bump allocator,
+which has no free, and freelist memory is never returned to the OS. What was
+removed is the *unbounded* term — a vec slot and an 88-byte struct per event.
+`chain_len` is the honest instrument. The `Str` residue needs an allocator-level
+fix and is recorded upstream.
+
+Also: the 1.6.0 hardening fixes were retagged **M14-A/B/C → H1/H2/H3** — `M14`
+already belongs to the 2.0 contract, and two different M14-Cs existed in one tree.
 
 **1.6.0** — hardening sweep, closing the 1.x line, 2026-07-28. Toolchain
 `6.4.83` → **`6.4.86`**, libro `2.8.2` → **`2.8.3`**. **385 assertions**;
@@ -343,7 +362,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **385** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **388** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,

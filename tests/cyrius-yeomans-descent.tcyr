@@ -1436,6 +1436,24 @@ fn test_hardening(): i64 {
     assert_eq(player_auth_load(s5, "inflate99", 9), 1, "a normal record loads");
     assert_eq(load64(s5 + SS_HP), 12, "hp below maxhp is preserved");
 
+    # --- H4 (1.6.1): the audit chain must not accumulate.
+    #
+    # descent is a write-through consumer — audit_event hands each entry to the
+    # FileStore and never reads the chain back — so libro 2.8.4's streaming mode
+    # keeps only the head hash. Before it, every login/save/security event was
+    # retained for the process lifetime with no way to bound it.
+    #
+    # This asserts the term that actually changed. RSS does NOT move: the Strs
+    # each entry carries come from the bump allocator, which has no free, and
+    # freelist memory is never returned to the OS — so a soak reads the same
+    # drift before and after. chain_len is the honest instrument.
+    assert_eq(chain_streaming(g_audit_chain), 1, "the audit chain is in streaming mode");
+    var before = chain_len(g_audit_chain);
+    var a = 0;
+    while (a < 50) { audit_event(SEV_INFO, "soak.probe", "Prober", 6); a = a + 1; }
+    assert_eq(chain_len(g_audit_chain), before, "50 audit events retain nothing");
+    assert_eq(chain_len(g_audit_chain), 0, "the streaming chain stays empty");
+
     return 0;
 }
 

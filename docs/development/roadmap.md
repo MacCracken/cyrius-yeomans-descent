@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-28 (v1.6.0 — hardening sweep; the 1.x line is closed)
+> **Last Updated**: 2026-07-28 (v1.6.1 — audit-chain bound; the 1.x line is closed)
 >
 > Milestone plan through v1.0 (shipped) and on to v2.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
@@ -45,6 +45,7 @@ MUD rather than a well-built room-crawler.
 | **1.4.0** | M12 — instance lifecycle: free the leaks, decay the corpses | ✅ 2026-07-28 |
 | **1.5.0** | M13 — the actor tick: mobs get agency | ✅ 2026-07-28 |
 | **1.6.0** | Hardening sweep — toolchain 6.4.86 + libro 2.8.3; UAF, inventory leak, hp clamp | ✅ 2026-07-28 |
+| **1.6.1** | Audit-chain bound via upstream libro 2.8.4 (`chain_new_streaming`) | ✅ 2026-07-28 |
 | **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
 | **2.1.0** | M17 — equipment slots + item modifiers · M18 — operator identity + control channel | planned |
 | **2.2.0** | M19 — threat, aggression, resistance · M20 — currency and shops | planned |

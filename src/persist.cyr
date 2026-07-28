@@ -118,7 +118,18 @@ fn persist_init(): i64 {
     g_fmt_scratch   = alloc(32);
     sys_mkdir(DP_DATADIR, 0x1ED);        # 0755 — ignore EEXIST
     sys_mkdir(DP_PLAYERS, 0x1ED);
-    g_audit_chain = chain_new();
+    # H4 (1.6.1) — a STREAMING chain, not a retaining one. descent is a
+    # write-through consumer: audit_event appends an event, hands it straight to
+    # the FileStore, and never reads g_audit_chain back — nothing in this tree
+    # calls chain_verify / chain_len / chain_by_* on it. A retaining chain
+    # therefore accumulated every login / save / security event for the process
+    # lifetime with no way to bound it (chain_new leaves max_capacity 0 so
+    # auto-rotate never fires; chain_apply_retention redistributes without
+    # releasing). libro 2.8.4 adds this mode: entries are linked exactly as
+    # before — each records its predecessor's hash — but only the head hash is
+    # kept, so the in-memory cost is O(1) instead of O(events). The durable
+    # chain in data/audit.libro is unchanged and verifies the same.
+    g_audit_chain = chain_new_streaming();
     g_audit_store = filestore_open(str_from(DP_AUDIT));
     g_persist_ready = 1;
     return 0;
@@ -130,6 +141,13 @@ fn audit_event(sev, action, who, wholen): i64 {
     if (g_audit_chain == 0) { return 0; }
     var e = chain_append(g_audit_chain, sev, str_from("persist"), str_from(action), str_new(who, wholen));
     if (g_audit_store != 0) { filestore_append(g_audit_store, e); }
+    # The streaming chain retains nothing, so this entry is ours to release once
+    # the store has it — but ONLY because it is streaming. On a retaining chain
+    # the entries vec still references it, and freeing here makes the next
+    # _chain_prev_link read freed memory (verified: it segfaults, exit 139).
+    # Gate on the mode rather than trusting the two lines to stay in step; one
+    # comparison per audit event is nothing next to a latent use-after-free.
+    if (chain_streaming(g_audit_chain) == 1) { entry_free(e); }
     return 0;
 }
 
