@@ -223,6 +223,50 @@ fn mob_died(s, m): i64 {
     return 0;
 }
 
+# === H7 (1.6.4) — one mob swing at a session it has latched onto. ===
+#
+# The M13 assist set MI_TARGET and printed "…joins the fight!" and that was the
+# whole of it: the only line in the tree that subtracts player HP is inside
+# combat_round, whose attacker is the PLAYER's own SS_TARGET, and
+# combat_tick_all walks sessions, never mobs. So an assisting mob was prose.
+# Worse, it never took damage, so it never dropped below MORALE_FLEE_PCT, never
+# cleared its target, and never wandered again — the assist froze it for good.
+#
+# This is the mob half of combat_round, minus the player's own attack. The
+# caller (mob_tick_all) must skip a mob the player is already fighting, or that
+# mob swings twice a tick.
+fn mob_swing(s, m): i64 {
+    if (mi_stun(m) > 0) {
+        mi_set_stun(m, mi_stun(m) - 1);
+        return 0;
+    }
+    var tpl = mi_tpl(m);
+    if (combat_try_hit(mt_hit(tpl), player_eff_ac(s)) == 1) {
+        var dmg = roll(mt_ndice(tpl), mt_dsize(tpl), mt_dmod(tpl));
+        store64(s + SS_HP, load64(s + SS_HP) - dmg);
+        session_appendtx_cstr(s, ansi_hit());
+        session_appendtx_cstr(s, mi_name_ptr(m));
+        session_appendtx_cstr(s, " hits you for ");
+        session_appendtx_num(s, dmg);
+        session_appendtx_cstr(s, " damage!");
+        session_appendtx_cstr(s, ansi_reset());
+        session_appendtx_cstr(s, "\r\n");
+        cb_mob_act(s, m, " hits ", "!\r\n");
+        if (load64(s + SS_HP) <= 0) { player_died(s); combat_flush(s); return 1; }
+    } else {
+        session_appendtx_cstr(s, ansi_miss());
+        session_appendtx_cstr(s, mi_name_ptr(m));
+        session_appendtx_cstr(s, " lunges at you and misses.");
+        session_appendtx_cstr(s, ansi_reset());
+        session_appendtx_cstr(s, "\r\n");
+        cb_mob_act(s, m, " lunges at ", " and misses.\r\n");
+    }
+    session_append_condition(s);
+    session_send_cmd_prompt(s);
+    combat_flush(s);
+    return 1;
+}
+
 # === player death — drop loot, respawn at the Hub start (M4-E). ===
 fn player_died(s): i64 {
     session_appendtx_cstr(s, ansi_hit());

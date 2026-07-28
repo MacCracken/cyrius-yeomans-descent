@@ -1589,6 +1589,151 @@ fn test_accept_limits(): i64 {
     return 0;
 }
 
+# === H7 (1.6.4) — the assist actually works ===
+fn test_assist_real(): i64 {
+    test_group("assist-real");
+    if (g_room_count < 2) { assert(0, "assist-real: need a multi-room world"); return 0; }
+    var tpl = mt_at(0);
+
+    # --- H7-a: a latch whose target has left the room must be reaped.
+    # Before this, the engaged arm offered only _mob_flee, which returns above
+    # MORALE_FLEE_PCT — and an assisting mob is never attacked, so its HP never
+    # falls. It kept the stale target forever and never wandered again.
+    var m = mob_spawn(tpl, 0);
+    var s = _mk_sess("Leaver", 6);
+    store64(s + SS_ROOM, 0);
+    store64(s + SS_PHASE, PHASE_CMD);
+    mi_set_target(m, s);
+    store64(s + SS_ROOM, 1);              # the player walks out
+    mob_tick_all(7100);
+    assert_eq(mi_target(m), 0, "a target who left the room is reaped");
+
+    # And the mob is free to move again — the freeze is gone.
+    var moved = 0;
+    var k = 0;
+    while (k < 300) {
+        mob_tick_all(7200 + k);
+        if (mi_room(m) != load64(m + MI_HOME)) { moved = 1; k = 300; }
+        k = k + 1;
+    }
+    assert_eq(moved, 1, "a reaped mob wanders again");
+    mob_remove(m);
+
+    # --- H7-b: an assisting mob actually swings. M13 set MI_TARGET and printed
+    # "joins the fight!", but the only line that subtracts player HP lives in
+    # combat_round, driven by the PLAYER's target — so the assist was prose.
+    var s2 = _mk_sess("Punchbag", 8);
+    store64(s2 + SS_ROOM, 0);
+    store64(s2 + SS_PHASE, PHASE_CMD);
+    store64(s2 + SS_MAXHP, 200); store64(s2 + SS_HP, 200);
+    store64(s2 + SS_AC, 30);              # easy to hit, so the test is not flaky
+    store64(s2 + SS_TARGET, 0);           # NOT fighting this mob
+    var m2 = mob_spawn(tpl, 0);
+    mi_set_target(m2, s2);
+    var hp0 = load64(s2 + SS_HP);
+    var n = 0;
+    while (n < 40) { mob_tick_all(7600 + n); n = n + 1; }
+    assert(load64(s2 + SS_HP) < hp0, "a mob that latched onto you actually hits you");
+    mob_remove(m2);
+
+    # --- The double-swing guard: if the player is already fighting THIS mob,
+    # combat_round handles it and mob_tick_all must not swing it again.
+    var s3 = _mk_sess("Duellist", 8);
+    store64(s3 + SS_ROOM, 0);
+    store64(s3 + SS_PHASE, PHASE_CMD);
+    store64(s3 + SS_MAXHP, 500); store64(s3 + SS_HP, 500);
+    store64(s3 + SS_AC, 30);
+    var m3 = mob_spawn(tpl, 0);
+    mi_set_target(m3, s3);
+    store64(s3 + SS_TARGET, m3);          # mutual engagement
+    var before3 = load64(s3 + SS_HP);
+    mob_tick_all(7900);
+    assert_eq(load64(s3 + SS_HP), before3,
+              "the player's own target is left to combat_round, not swung twice");
+    mob_remove(m3);
+
+    return 0;
+}
+
+# === H8 (1.6.4) — the `passwd` candidate survives interleaved persistence ===
+fn test_chpass_isolation(): i64 {
+    test_group("chpass-isolation");
+    persist_init();
+
+    # A player mid-`passwd` has typed the new passphrase and is at the confirm
+    # prompt — a full network round trip away. The candidate used to sit in the
+    # global g_persist_dec, byte-for-byte where player_auth_load decodes
+    # salt|pubkey|sig and where _build_record writes its signature. Anything that
+    # persisted or authenticated in between destroyed it.
+    #
+    # The pre-existing test called the two halves back to back, which is the one
+    # ordering that cannot fail. These interleave.
+
+    # (a) An interleaved SAVE by another session must not disturb the candidate.
+    var s = _mk_sess("Rekeyer", 7);
+    var blk = sess_ident(s);
+    random_bytes(blk, SALT_LEN);
+    ident_derive(blk, "oldpass123", 10, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 1);
+    store64(s + SS_AUTHED, 1); store64(s + SS_ROOM, 0 - 1); store64(s + SS_CLASS, 0);
+    store64(s + SS_PHASE, PHASE_CHPASS_NEW);
+    chpass_on_new(s, "brandnewpass", 12);
+    assert_eq(load64(s + SS_PHASE), PHASE_CHPASS_CONFIRM, "candidate staged");
+
+    var other = _mk_sess("Bystander", 9);
+    var ob = sess_ident(other);
+    random_bytes(ob, SALT_LEN);
+    ident_derive(ob, "bypass1234", 10, ob + IDENT_SK, ob + IDENT_PK);
+    store64(ob + IDENT_CREATED, 1);
+    store64(other + SS_AUTHED, 1); store64(other + SS_ROOM, 0 - 1); store64(other + SS_CLASS, 0);
+    player_save(other);                       # <-- the interleave
+
+    chpass_on_confirm(s, "brandnewpass", 12);
+    assert_eq(load64(s + SS_PHASE), PHASE_CMD, "confirm survives an interleaved save");
+
+    # (b) An interleaved FAILED login must not disturb it either. hex_decode_into
+    # writes into the decode scratch BEFORE the signature verify, so even a wrong
+    # passphrase probe against any account used to clobber the candidate.
+    var s2 = _mk_sess("Rekeyer2", 8);
+    var b2 = sess_ident(s2);
+    random_bytes(b2, SALT_LEN);
+    ident_derive(b2, "oldpass456", 10, b2 + IDENT_SK, b2 + IDENT_PK);
+    store64(b2 + IDENT_CREATED, 1);
+    store64(s2 + SS_AUTHED, 1); store64(s2 + SS_ROOM, 0 - 1); store64(s2 + SS_CLASS, 0);
+    store64(s2 + SS_PHASE, PHASE_CHPASS_NEW);
+    chpass_on_new(s2, "secondnewpass", 13);
+    player_auth_load(_mk_sess("Bystander", 9), "wrongpass", 9);   # <-- the interleave
+    chpass_on_confirm(s2, "secondnewpass", 13);
+    assert_eq(load64(s2 + SS_PHASE), PHASE_CMD, "confirm survives a failed login probe");
+
+    # (c) Two sessions mid-`passwd` at once each commit their OWN candidate — a
+    # single shared global, even a dedicated one, cannot do this.
+    var a = _mk_sess("PairA", 5);
+    var ba = sess_ident(a);
+    random_bytes(ba, SALT_LEN);
+    ident_derive(ba, "apass12345", 10, ba + IDENT_SK, ba + IDENT_PK);
+    store64(ba + IDENT_CREATED, 1);
+    store64(a + SS_AUTHED, 1); store64(a + SS_ROOM, 0 - 1); store64(a + SS_CLASS, 0);
+    var b = _mk_sess("PairB", 5);
+    var bb = sess_ident(b);
+    random_bytes(bb, SALT_LEN);
+    ident_derive(bb, "bpass12345", 10, bb + IDENT_SK, bb + IDENT_PK);
+    store64(bb + IDENT_CREATED, 1);
+    store64(b + SS_AUTHED, 1); store64(b + SS_ROOM, 0 - 1); store64(b + SS_CLASS, 0);
+    chpass_on_new(a, "aaanewpass", 10);
+    chpass_on_new(b, "bbbnewpass", 10);       # interleaved staging
+    chpass_on_confirm(a, "aaanewpass", 10);
+    chpass_on_confirm(b, "bbbnewpass", 10);
+    assert_eq(load64(a + SS_PHASE), PHASE_CMD, "session A committed its own candidate");
+    assert_eq(load64(b + SS_PHASE), PHASE_CMD, "session B committed its own candidate");
+
+    # The candidate block is released once committed — a derived secret key must
+    # not linger in a reusable freelist block.
+    assert_eq(load64(a + SS_IDENT_CAND), 0, "the candidate block is freed on commit");
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -1801,6 +1946,8 @@ fn main() {
     test_hardening();
     test_preauth_meter();
     test_accept_limits();
+    test_assist_real();
+    test_chpass_isolation();
 
     return assert_summary();
 }

@@ -72,7 +72,14 @@ enum SS {
     SS_AUTHED       = 336; # 1 once the passphrase verified / char created
     SS_SAVE_DIRTY   = 344; # 1 if state changed since the last save (debounce)
     SS_LAST_SAVE_MS = 352; # monotonic ms of the last successful save
-    SS_SIZE         = 360;
+    # H8 (1.6.4) — in-flight `passwd` candidate, PER SESSION. The candidate used
+    # to live in the global g_persist_dec across a network round trip, which is
+    # byte-for-byte the region player_auth_load decodes salt|pubkey|sig into and
+    # overlaps _build_record's signature buffer. Any interleaved save or login —
+    # including a FAILED login against any account, since hex_decode_into writes
+    # before the verify — destroyed it.
+    SS_IDENT_CAND   = 360; # 0 or fl_alloc(CAND_LEN): salt|pk|sk | pk2 | sk2
+    SS_SIZE         = 368;
 }
 
 # The published epoll fd, used by room broadcasts (M3-C) and combat
@@ -182,6 +189,8 @@ fn session_free(s): i64 {
     fl_free(load64(s + SS_LINE_BUF));
     fl_free(load64(s + SS_NAME_BUF));
     if (load64(s + SS_IDENT) != 0) { fl_free(load64(s + SS_IDENT)); }
+    # H8 — a session dropped mid-`passwd` must not leak its candidate key.
+    if (load64(s + SS_IDENT_CAND) != 0) { fl_free(load64(s + SS_IDENT_CAND)); }
     fl_free(s);
     return 0;
 }

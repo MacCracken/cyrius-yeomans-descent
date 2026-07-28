@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-28 (v1.6.3 — accept-path DoS fixed; the 1.x line is closed)
+> **Last Updated**: 2026-07-28 (v1.6.4 — passwd isolation + assist repair; the 1.x line is closed)
 >
 > Milestone plan through v1.0 (shipped) and on to v2.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
@@ -48,6 +48,7 @@ MUD rather than a well-built room-crawler.
 | **1.6.1** | Audit-chain bound via upstream libro 2.8.4 (`chain_new_streaming`) | ✅ 2026-07-28 |
 | **1.6.2** | Pre-auth CPU exhaustion — dispatch cap, bare-CR guard, passlen hoist, attempt cap | ✅ 2026-07-28 |
 | **1.6.3** | Accept-path fd-exhaustion spin + session cap + `save` rate limit | ✅ 2026-07-28 |
+| **1.6.4** | `passwd` candidate isolation + the M13 assist made real | ✅ 2026-07-28 |
 | **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
 | **2.1.0** | M17 — equipment slots + item modifiers · M18 — operator identity + control channel | planned |
 | **2.2.0** | M19 — threat, aggression, resistance · M20 — currency and shops | planned |
@@ -71,6 +72,10 @@ embarrassing the release.
 **1.5.0 shipped** — M13 (the actor tick), 373 assertions. Mobs wander, assist and flee; wander is leashed to within one room of home after the first live run walked the boss into the newbie start room. The zone reset now counts by `MI_HOME`, which it had to before wander could ship. p99 1338 µs — the actor tick is not measurable at Hub scale.
 
 **1.6.0 shipped — the 1.x line is closed.** Toolchain 6.4.86, libro 2.8.3, and an eight-lens hardening sweep with every finding adversarially refuted. Three fixes landed, all mutation-verified: a use-after-free that 1.5.0's actor tick had activated (a mob dereferencing a disconnected player's freed Session), a remotely-driven unbounded inventory leak at disconnect, and `hp` never being clamped against `maxhp` on load. 385 assertions.
+
+**1.6.1–1.6.4 shipped** on top: the audit chain bounded via upstream libro 2.8.4; pre-auth CPU exhaustion closed (one 4 KB write froze the loop for 5–27 s); the accept-path fd-exhaustion spin closed (60 idle sockets pinned a core and leaked 2.3 MB/s); and the `passwd` candidate moved off a global that persistence overwrites — a data-loss bug that could install signature bytes as a secret key. 1.6.4 also repaired the M13 assist, which 1.5.0 shipped as prose: the mob never swung, and the latch froze it out of wander permanently. **420 assertions.**
+
+**Fourteen lower-severity sweep findings remain open** — see the 1.6.4 CHANGELOG entry for the list. None is DoS-class or memory-unsafe.
 
 **Next is 2.0.0**, starting with **M14 — ADR 0008 + save schema v2**, the gate everything else routes through. Read the critical path above first: saves are signed with a key derived from the player's passphrase, which the server never holds, so **migration is lazy-at-login and additive only**. Pickup pointer in [`state.md`](state.md).
 

@@ -636,7 +636,25 @@ fn mob_tick_all(tick): i64 {
                 took_turn = took_turn + 1;
                 if (_mob_can_act(m) == 1) {
                     if (mi_target(m) != 0) {
-                        _mob_flee(m);        # engaged: break off?
+                        # H7-a (1.6.4) — reap a stale latch FIRST. A mob whose
+                        # target has left the room used to keep it forever: the
+                        # engaged arm only ever offered _mob_flee, which returns
+                        # above MORALE_FLEE_PCT, and an assisting mob is never
+                        # attacked so its HP never falls. It therefore never
+                        # cleared, never wandered and never assisted again —
+                        # M13's wander decayed to zero in exactly the rooms
+                        # players use. Also fixes the same latch leaking from a
+                        # cmd_kill retarget.
+                        var tgt = mi_target(m);
+                        if (load64(tgt + SS_ROOM) != mi_room(m)) {
+                            mi_set_target(m, 0);
+                        } else {
+                            # H7-b — and it actually swings now. Skipped when the
+                            # player is already fighting THIS mob, or
+                            # combat_round would swing it a second time.
+                            if (load64(tgt + SS_TARGET) != m) { mob_swing(tgt, m); }
+                            _mob_flee(m);    # engaged: break off?
+                        }
                     } else {
                         _mob_assist(m);      # idle: join in?
                         if (mi_target(m) == 0) { _mob_wander(m); }

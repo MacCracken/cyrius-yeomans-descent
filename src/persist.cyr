@@ -46,6 +46,12 @@ enum PersistConst {
     # 6 for `sig = ` + 2 quotes + 128 hex + newline is 137, rounded up for room
     # (M11-D). The inventory loop stops before eating into it.
     SIG_TAIL = 192;
+    # H8 — per-session `passwd` candidate: the 120-byte ident block, then the
+    # confirm-side pk2/sk2 scratch. Sized here so nothing about the re-key
+    # touches the shared g_persist_dec any more.
+    CAND_LEN = 216;
+    CAND_PK2 = 120;
+    CAND_SK2 = 152;
 }
 
 # player_auth_load return codes. Positive is success; 0 is a wrong passphrase
@@ -785,13 +791,45 @@ fn passwd_begin(s): i64 {
     return 0;
 }
 
-# Stash the candidate identity in a scratch block (not SS_IDENT — that still
-# holds the live key until confirm commits). g_persist_dec[0..120) is the
-# candidate ident block: salt|pk|sk.
+# Lazily allocate this session's `passwd` candidate block, zeroed (H8, 1.6.4).
+fn sess_cand(s): i64 {
+    var c = load64(s + SS_IDENT_CAND);
+    if (c == 0) {
+        c = fl_alloc(CAND_LEN);
+        memset(c, 0, CAND_LEN);
+        store64(s + SS_IDENT_CAND, c);
+    }
+    return c;
+}
+
+# Wipe and release the candidate. Called on commit and on every rewind — a
+# half-finished re-key must not leave a derived secret key sitting in a reusable
+# freelist block.
+fn sess_cand_clear(s): i64 {
+    var c = load64(s + SS_IDENT_CAND);
+    if (c == 0) { return 0; }
+    memset(c, 0, CAND_LEN);
+    fl_free(c);
+    store64(s + SS_IDENT_CAND, 0);
+    return 0;
+}
+
+# Stash the candidate identity in a PER-SESSION block (not SS_IDENT — that still
+# holds the live key until confirm commits). The block is salt|pk|sk, 112 bytes
+# of the 120-byte ident layout.
+#
+# H8: this used to be g_persist_dec, a global, held across a network round trip.
+# player_auth_load decodes salt[0,16) / pubkey[16,48) / sig[48,112) into exactly
+# those bytes, and _build_record signs into [0,64) — so one interleaved save or
+# login between the two prompts refused the correct passphrase. On a passphrase
+# collision it was worse than a refusal: _bytes_eq passed against clobbered
+# bytes and 64 SIGNATURE bytes were installed as the secret key, producing a
+# record that cannot verify under its own pubkey — permanent character loss plus
+# a false SEV_SECURITY "load.tamper" entry on the next login.
 fn chpass_on_new(s, buf, len): i64 {
     if (len < PASS_MIN) { session_appendtx_cstr(s, "Too short. New passphrase (4-64 chars): "); return 0; }
     if (len > PASS_MAX) { session_appendtx_cstr(s, "Too long. New passphrase (4-64 chars): "); return 0; }
-    var cand = g_persist_dec;            # candidate salt|pk|sk
+    var cand = sess_cand(s);             # candidate salt|pk|sk (per session)
     random_bytes(cand, SALT_LEN);
     ident_derive(cand, buf, len, cand + IDENT_SK, cand + IDENT_PK);
     store64(s + SS_PHASE, PHASE_CHPASS_CONFIRM);
@@ -804,16 +842,18 @@ fn chpass_on_new(s, buf, len): i64 {
 # ident block, deliberately sparing IDENT_CREATED, then player_save re-signs
 # the record under the new key — the old signature no longer verifies.
 fn chpass_on_confirm(s, buf, len): i64 {
-    var cand = g_persist_dec;
-    var pk2 = g_persist_dec + 128;
-    var sk2 = g_persist_dec + 192;
+    var cand = sess_cand(s);
+    var pk2 = cand + CAND_PK2;
+    var sk2 = cand + CAND_SK2;
     if (len > PASS_MAX) {   # over-long → cannot match the (<=PASS_MAX) candidate
+        sess_cand_clear(s);
         store64(s + SS_PHASE, PHASE_CHPASS_NEW);
         session_appendtx_cstr(s, "\r\nThose don't match. New passphrase (4-64 chars): ");
         return 0;
     }
     ident_derive(cand, buf, len, sk2, pk2);
     if (_bytes_eq(pk2, cand + IDENT_PK, PK_LEN) == 0) {
+        sess_cand_clear(s);
         store64(s + SS_PHASE, PHASE_CHPASS_NEW);
         session_appendtx_cstr(s, "\r\nThose don't match. New passphrase (4-64 chars): ");
         return 0;
@@ -822,6 +862,7 @@ fn chpass_on_confirm(s, buf, len): i64 {
     # the original creation timestamp), re-sign + save under the new key.
     var blk = sess_ident(s);
     memcpy(blk, cand, IDENT_SK + SK_LEN);   # salt(16)|pk(32)|sk(64) = 112 bytes
+    sess_cand_clear(s);                     # H8 — wipe the derived key, then free
     store64(s + SS_PHASE, PHASE_CMD);
     session_echo_on(s);
     player_save(s);

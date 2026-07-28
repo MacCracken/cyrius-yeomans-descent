@@ -4,6 +4,84 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.4] — 2026-07-28
+
+**Two more sweep findings — one of them a data-loss bug, one of them mine.**
+
+### Fixed
+
+- **The `passwd` candidate lived in a global that persistence overwrites.**
+  `chpass_on_new` parked the candidate `salt|pk|sk` in `g_persist_dec[0,112)`
+  and returned to the event loop across a network round trip. That is
+  byte-for-byte where `player_auth_load` decodes `salt` / `pubkey` / `sig`, and
+  it overlaps `_build_record`'s signature buffer. **Any interleaved save or
+  login destroyed it** — including a *failed* login against any account, since
+  `hex_decode_into` writes before the signature verify. It needed no second
+  player: `cmd_on_line` dirties the session on `passwd` itself, so the ~5-minute
+  `save_sweep` broke it on an idle single-player server.
+
+  The rare tail was worse than a refusal. If the interloper's passphrase
+  happened to equal the one being confirmed, `_bytes_eq` passed against
+  clobbered bytes and 64 **signature** bytes were installed as the secret key.
+  `player_save` then wrote a record that cannot verify under its own pubkey — so
+  the next login reported `PL_ERR_UNREADABLE`, told the player their record had
+  been tampered with, and wrote a false `SEV_SECURITY "load.tamper"` entry into
+  the audit chain. Permanent character loss plus a poisoned trail, and `PASS_MIN`
+  is 4, so a collision is realistic rather than theoretical.
+
+  Moved to a per-session `SS_IDENT_CAND` block, mirroring what the *creation*
+  flow already does correctly. A dedicated global would fix the save/login
+  interleave but not two concurrent `passwd`s; per-session fixes both. The block
+  is wiped and freed on commit, on both rewinds, and in `session_free` — a
+  derived secret key must not linger in a reusable freelist block. The comment
+  claiming `[0..120)` while the copy is 112 bytes is corrected.
+- **The M13 assist did nothing, and froze the mob that performed it.** Shipped
+  in 1.5.0 and claimed in that changelog as mobs joining a room-mate's fight. It
+  set `MI_TARGET` and printed *"…snaps round and joins the fight!"* and that was
+  all: the only line in the tree that subtracts player HP is inside
+  `combat_round`, whose attacker is the **player's** own `SS_TARGET`, and
+  `combat_tick_all` walks sessions, never mobs.
+
+  Worse, `mob_tick_all`'s engaged arm routed any mob with a target to
+  `_mob_flee` **only** — which returns above `MORALE_FLEE_PCT`. An assisting mob
+  is never attacked, so its HP never falls, so it never fled, never cleared its
+  target, and never wandered or assisted again. At `ASSIST_CHANCE` 1-in-3 per
+  tick, essentially every idle mob in a room where any fight happens latched
+  within a few ticks: **M13's wander decayed to zero in exactly the rooms
+  players use.** `cmd_kill` leaked the same latch on any retarget.
+
+  Two parts. **H7-a** reaps a latch whose target has left the room, restoring
+  wander and fixing the retarget leak. **H7-b** factors `combat_round`'s mob half
+  into `mob_swing` and calls it for a latched, present, live session — skipped
+  when the player is already fighting that mob, or it would swing twice a tick.
+  H7-b is a balance change as well as a fix: a two-mob room now has two
+  attackers. Only `market.stalls` ships two co-located mobs today.
+
+### Notes
+
+- Suite **410 → 420**. Mutation-verified: putting the candidate back on the
+  shared global fails all 3 interleave assertions; removing the reap fails 2;
+  removing the swing fails 1; removing the double-swing guard fails 1.
+- The pre-existing `passwd` test called `chpass_on_new` and `chpass_on_confirm`
+  back to back — the one ordering that **cannot** fail. The new assertions
+  interleave a save, a failed login probe, and a second concurrent `passwd`.
+- `SS_SIZE` 360 → 368 for the candidate slot.
+
+### Deferred from the sweep
+
+Fourteen lower-severity findings remain, unaddressed and listed here rather than
+silently dropped: single-session login guard (duplicate inventory on double
+login), `player_save` return values discarded at four of five call sites
+(including the `passwd` commit, which tells the player it worked either way),
+four content loaders publishing global state before validating it, audit chain
+re-linking to genesis on restart, `toml_int` substituting defaults silently,
+`OI_TPL_ID` one byte shorter than `OT_ID`, `reset_secs` unchecked `× 1000`,
+per-save bump-arena leak, the `N.X` qualifier parsed everywhere and honoured
+nowhere, five item verbs still answering the M2-era placeholder, tick
+snap-forward against a stale clock sample, `bash`/`emp` prose after a killing
+blow, benchmark blind spots, and a documentation sweep. None is DoS-class or
+memory-unsafe.
+
 ## [1.6.3] — 2026-07-28
 
 **The accept path, and the `save` verb.** Two more findings from the 1.6.0 sweep.

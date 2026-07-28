@@ -3,14 +3,31 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-28 (v1.6.1 — 1.x closed)
+> **Last refresh**: 2026-07-28 (v1.6.4 — 1.x closed)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.6.0 tree.
+> tests, boot guide) describes the **current** 1.6.4 tree.
 
 ## Version
+
+**1.6.4** — `passwd` isolation + the assist made real, 2026-07-28. **420
+assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
+
+- **The `passwd` candidate lived in `g_persist_dec`**, a global that
+  `player_auth_load` decodes into and `_build_record` signs into — held across a
+  network round trip. Any interleaved save or login destroyed it, including a
+  *failed* login against any account. On a passphrase collision it installed 64
+  signature bytes as the secret key: permanent character loss plus a false
+  `SEV_SECURITY "load.tamper"` entry. Now a per-session `SS_IDENT_CAND` block,
+  wiped and freed on commit, both rewinds, and `session_free`.
+- **The M13 assist was prose.** It set `MI_TARGET` and printed a line; nothing
+  swung, because the only HP-subtracting line is driven by the *player's*
+  target. And the latch froze the mob out of wander permanently, since it was
+  never attacked and so never fell below the flee threshold. Reaping stale
+  latches restores wander; `mob_swing` makes the feature real. The 1.5.0
+  changelog claim is now true.
 
 **1.6.1** — audit-chain bound, via upstream libro 2.8.4, 2026-07-28. **388
 assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
@@ -362,7 +379,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **388** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **420** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
