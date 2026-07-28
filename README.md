@@ -17,7 +17,7 @@ Full design: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
 ## Status
 
-**v1.0.0 — feature-complete.** The full game loop is implemented and playable:
+**v1.2.0 — feature-complete, maintained.** The full game loop is implemented and playable:
 the Telnet wire (RFC 854 / 1143), the verb-noun parser, a hand-authored 21-room
 Hub zone, the 2.5 s combat tick with THAC0 hit/damage math, four playable
 classes with abilities, crash-safe player persistence (reconnect restores your

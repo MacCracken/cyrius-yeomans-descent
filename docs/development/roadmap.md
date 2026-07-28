@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-06-21 (v1.1.1 — added the Post-1.0 bug backlog; 1.1.x added the AGNOS build target + telnet echo fix)
+> **Last Updated**: 2026-07-28 (v1.2.0 — toolchain 6.4.83 + libro 2.8.2, first clean `cyrius audit`)
 >
 > Milestone plan through v1.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
@@ -29,14 +29,16 @@
 | **0.8.3** | Operator read-only verbs — `@who` / `@reset` | ✅ 2026-06-10 |
 | **0.9.0** | Security sweep & audit — CVE-class review + memory-safety fixes | ✅ 2026-06-10 |
 | **0.9.1** | Surface freeze — public surface locked ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) + save `schema` stamp + `@`-admin gated | ✅ 2026-06-10 |
-| **1.0.0** | Clean release — final hardening + playtest sign-off | next |
-| _future_ | M8 — Joshua operator interface (deferred post-1.0) | |
+| **1.0.0** | Clean release — final hardening + playtest sign-off | ✅ 2026-06-10 |
+| **1.1.x** | AGNOS build target, telnet echo fix, dep-sidecar migration | ✅ 2026-07-02 |
+| **1.2.0** | Toolchain 6.4.83 + libro 2.8.2; first clean `cyrius audit` | ✅ 2026-07-28 |
+| _next_ | M8 — Joshua operator interface (the first post-1.0 milestone) | |
 
 ---
 
 ## In progress
 
-**No active cycle.** 0.9.1 closed — the public surface is frozen for 1.0 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)): command verbs + `@`-namespace, save-record schema v1 (now stamped + version-gated), Telnet/wire behaviour, zone-file format, env knobs. The `@`-admin namespace is gated behind `YD_ADMIN` (default off). Next slot is **1.0.0 — clean release**: a stabilisation-only release — final adversarial/security pass, a full playtest sign-off, no observable changes to the frozen surface. **M8 (Joshua) is deferred to post-1.0.** Pickup pointer in [`state.md`](state.md).
+**No active cycle.** 1.2.0 closed — a toolchain (6.3.32 → 6.4.83) and dependency (libro 2.7.10 → 2.8.2) upgrade plus the first clean `cyrius audit` run. It repaired a `main` that no longer compiled, a bench that no longer compiled, a `version` verb two releases behind, and three latent symbol-collision hazards; see [CHANGELOG 1.2.0](../../CHANGELOG.md). The public surface remains frozen ([ADR 0007](../adr/0007-frozen-1.0-surface.md)): command verbs + `@`-namespace, save-record schema v1 (stamped + version-gated), Telnet/wire behaviour, zone-file format, env knobs. The `@`-admin namespace is gated behind `YD_ADMIN` (default off). **M8 (Joshua) is the next milestone** and is the work that earns the right to extend the frozen surface. Pickup pointer in [`state.md`](state.md).
 
 ---
 

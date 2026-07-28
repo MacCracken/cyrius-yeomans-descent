@@ -2,10 +2,12 @@
 # Stdlib auto-included via cyrius.cyml; project modules included explicitly.
 
 # M6 persistence chain — opt-in libs before the modules that use them.
-include "lib/thread.cyr"        # sigil 3.7 cbank() → thread_local_get; MUST be
+# sigil is NOT included: [deps.libro] resolves the thin capability sub-bundles
+# (sigil-mldsa / sigil_sha256 / sigil_sha_ni / sigil_hex) and cyrius auto-includes
+# them. Adding the monolithic lib/sigil.cyr redefined all of it — see src/main.cyr.
+include "lib/thread.cyr"        # sigil cbank() → thread_local_get; MUST be
 include "lib/thread_local.cyr"  # explicit or sha256 SIGILLs (see src/main.cyr)
 include "lib/sakshi.cyr"
-include "lib/sigil.cyr"
 include "lib/libro.cyr"
 
 include "src/telnet.cyr"
@@ -17,6 +19,11 @@ include "src/item.cyr"
 include "src/combat.cyr"
 include "src/classes.cyr"
 include "src/persist.cyr"
+# session.cyr forward-references 12 server.cyr symbols (flush_session,
+# room_broadcast, render_*, …). They were unreachable from the suite so it
+# built anyway, but every run printed 12 "undefined function" warnings —
+# noise that would hide a real one.
+include "src/server.cyr"
 
 # Feed a byte and assert the returned TelEvent.
 fn feed_is(ts, b, want_ev, name): i64 {

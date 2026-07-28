@@ -78,6 +78,11 @@ cyrius test                          # run [build].test + tests/*.tcyr
 2. **Build check** — `cyrius build`
 3. **Test + benchmark additions** for new code
 4. **Internal review** — performance, memory, correctness, edge cases
-5. **Documentation** — update CHANGELOG, `docs/development/state.md`, any ADR the change earned
-6. **Version sync** — `VERSION`, `cyrius.cyml`, CHANGELOG header
+5. **Audit gate** — `cyrius audit` must exit 0 (fmt / lint / docs / tests / bench).
+   Note `cyrius audit --internal` is a *different* thing: the cyrius-internal
+   self-host gate, not this project's sweep. Don't run it here.
+6. **Documentation** — update CHANGELOG, `docs/development/state.md`, any ADR the change earned
+7. **Version sync** — `VERSION`, `cyrius.cyml`, CHANGELOG header, **and
+   `VERSION_STRING` in `src/main.cyr`** (the `version` verb's output — it has no
+   `${file:VERSION}` equivalent and silently drifted two releases behind at 1.1.5)
 

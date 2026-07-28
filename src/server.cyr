@@ -40,42 +40,45 @@ enum AgnosEpollCompat {
 
 # === fcntl helper — set O_NONBLOCK on an fd ===
 fn set_nonblock(fd): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     # agnos sockets are inherently non-blocking — sock_accept#57 / sock_recv#49
     # never park, and there is no fcntl in the frozen 0–59 syscall surface. No-op.
     return 0;
-#else
+    #else
     var flags = syscall(SYS_FCNTL, fd, 3, 0);                # F_GETFL
     if (flags < 0) { return flags; }
     return syscall(SYS_FCNTL, fd, 4, flags | O_NONBLOCK);    # F_SETFL
-#endif
+    #endif
 }
 
 # === Block SIGINT / SIGTERM and return a signalfd watching them ===
 fn install_signal_fd(): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     # agnos has no sigset / signalfd in the frozen surface. The agnos serve loop
     # (cmd_serve) never installs one — shutdown is process-kill / in-band. The
     # Linux-only sigset_new/sigset_add/SIG_BLOCK/sys_signalfd symbols would be
     # undefined for CYRIUS_TARGET_AGNOS, so the body must be gated out entirely.
     return 0 - 1;
-#else
+    #else
     var mask = sigset_new();
     sigset_add(mask, SIGINT);
     sigset_add(mask, SIGTERM);
     var pr = sys_sigprocmask(SIG_BLOCK, mask, 0);
     if (pr < 0) { return pr; }
     return sys_signalfd(0 - 1, mask, 0);
-#endif
+    #endif
 }
 
 # === Epoll registration helpers ===
 
+# Register `fd` for EPOLLIN, tagging its events with `data_tag` — a literal
+# FdTag for the listener / signalfd, or the Session pointer for a client.
+# Read-arming only; EPOLLOUT is added later on demand by session_set_out.
 fn epoll_add_in(epfd, fd, data_tag): i64 {
-#ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_AGNOS
     var ev = epoll_event_new(EPOLLIN, data_tag);
     return sys_epoll_ctl(epfd, EPOLL_CTL_ADD, fd, ev);
-#endif
+    #endif
     # agnos: never called (the poll loop sweeps g_session_head); epoll_event_new
     # + 4-arg sys_epoll_ctl are Linux-only. Stub so the file compiles --agnos.
     return 0;
@@ -86,12 +89,12 @@ fn epoll_add_in(epfd, fd, data_tag): i64 {
 # requested state.
 fn session_set_out(epfd, s, armed): i64 {
     if (load64(s + SS_OUT_ARMED) == armed) { return 0; }
-#ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_AGNOS
     var ev_mask = EPOLLIN;
     if (armed == 1) { ev_mask = EPOLLIN | EPOLLOUT; }
     var ev = epoll_event_new(ev_mask, s);
     sys_epoll_ctl(epfd, EPOLL_CTL_MOD, load64(s + SS_FD), ev);
-#endif
+    #endif
     # agnos: no epoll; the poll loop flushes every session each sweep, so tx
     # backpressure needs no EPOLLOUT arming — we just track the intended state.
     store64(s + SS_OUT_ARMED, armed);
@@ -188,6 +191,10 @@ fn maybe_zone_reset(): i64 {
     return 1;
 }
 
+# One server tick (ADR 0001's 2.5 s, or g_tick_ms): a combat round for every
+# engaged session, the debounced save sweep on its interval, then the zone
+# reset check. Both loops (epoll + the agnos poll loop) drive it, and both
+# call it at most once per pass — drift is absorbed by next_tick, not here.
 fn advance_tick(): i64 {
     g_tick_count = g_tick_count + 1;
     combat_tick_all();   # resolve a combat round for every engaged session
@@ -244,9 +251,9 @@ fn drop_session(epfd, s): i64 {
     # M6-D: flush state on the way out — covers `quit`, idle reap, and
     # client-side disconnects alike. A no-op for unauthenticated sessions.
     if (load64(s + SS_AUTHED) == 1) { player_save(s); }
-#ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_AGNOS
     sys_epoll_ctl(epfd, EPOLL_CTL_DEL, load64(s + SS_FD), 0);
-#endif
+    #endif
     session_list_remove(s);
     session_free(s);
     g_session_count = g_session_count - 1;
@@ -364,8 +371,11 @@ fn render_stats(s): i64 {
 }
 
 # === 0.8.3 — operator read-only verbs (@who, @reset). ====================
-# Groundwork for the M8 Joshua interface. Unguarded for now (like @stats);
-# M8 lands operator authentication in front of the @-namespace.
+# Groundwork for the M8 Joshua interface. Since 0.9.1 the whole @-namespace
+# (@stats/@who/@reset) is gated behind the YD_ADMIN env knob, default off —
+# see `apply_idle_env` below and session.cyr's `g_admin_enabled`. Replacing
+# that env gate with real operator authentication is tracked as
+# [roadmap M8](../docs/development/roadmap.md#m8--joshua-management-interface-deferred--post-10).
 
 # @who — every in-world session (name + the room it's standing in).
 fn render_who(s): i64 {
@@ -634,9 +644,9 @@ fn handle_accept(epfd, listener_fd, now_ms): i64 {
         var nb = set_nonblock(cfd);
         if (nb < 0) { sock_close(cfd); continue; }
         var s = session_new(cfd, now_ms);
-#ifndef CYRIUS_TARGET_AGNOS
+        #ifndef CYRIUS_TARGET_AGNOS
         epoll_add_in(epfd, cfd, s);
-#endif
+        #endif
         # agnos: sockets can't be epoll-watched; session_list_push alone enrolls
         # the conn — the poll loop's per-session recv sweep services it.
         session_list_push(s);
@@ -706,6 +716,25 @@ fn apply_idle_env(): i64 {
 
 # === cmd_serve — open listener, run the loop until SIGINT/SIGTERM. ===
 fn cmd_serve(port): i64 {
+    # HARDENING — ignore SIGPIPE before anything can touch a client socket.
+    # session_drain writes with a raw flagsless `sys_write`, and the DEFAULT
+    # SIGPIPE disposition is *terminate the process*: a write landing on a peer
+    # that already sent RST would kill the whole server and drop every other
+    # player with it. dispatch_session calls flush_session BEFORE its
+    # EPOLLHUP/EPOLLERR check, so that write genuinely can precede the teardown.
+    #
+    # Honesty note: this window was NOT reproducible at 1.2.0 — 200 abrupt
+    # RST disconnects, and 60 stalled peers RST while holding unsent tx, both
+    # left the server serving. The epoll HUP path appears to reap sessions
+    # first in practice. So this is defence in depth against a latent hazard,
+    # not a fix for a demonstrated DoS.
+    #
+    # With SIG_IGN the write returns -EPIPE instead, which session_drain
+    # already routes down its existing "real error → disconnect" path, so
+    # single-session teardown is unchanged. `signal_ignore` is portable
+    # (rt_sigaction on Linux, BSD sigaction on macOS, no-op on agnos/Windows),
+    # so this needs no target gate.
+    signal_ignore(SIGPIPE);
     apply_idle_env();
     obs_init();
     # Load the starter zone. A failure is non-fatal — the server still
@@ -722,7 +751,9 @@ fn cmd_serve(port): i64 {
         if (mc >= 0) {
             var sp = world_spawn_all();
             var so = zone_reset_objs();   # M7-D: place authored room objects
-            print_num(mc); print(" mob templates, ", 16); print_num(sp); print(" mobs, ", 7); print_num(so); println(" objs spawned");
+            print_num(mc); print(" mob templates, ", 16);
+            print_num(sp); print(" mobs, ", 7);
+            print_num(so); println(" objs spawned");
         } else {
             println("world: no mobs loaded (code below)");
             print_num(mc); println("");
@@ -758,7 +789,7 @@ fn cmd_serve(port): i64 {
         println("");
         return 1;
     }
-#ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_AGNOS
     var sigfd = install_signal_fd();
     if (sigfd < 0) {
         println("server: failed to install signalfd (errno below)");
@@ -819,8 +850,8 @@ fn cmd_serve(port): i64 {
     }
     sys_close(epfd);
     sys_close(sigfd);
-#endif
-#ifdef CYRIUS_TARGET_AGNOS
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
     # agnos: epoll watches only signalfd/timerfd (never sockets) and epoll_wait
     # is 3-arg (no timeout) — so the epoll socket-multiplexer can't be used.
     # Instead, a sleep_ms-paced poll loop: each pass drains pending accepts
@@ -852,7 +883,7 @@ fn cmd_serve(port): i64 {
         }
         sys_sleep_ms(20);
     }
-#endif
+    #endif
     println("server: shutdown signal received; closing listener.");
     sock_close(lfd);
     return 0;

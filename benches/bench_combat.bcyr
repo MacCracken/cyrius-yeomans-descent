@@ -12,6 +12,16 @@
 # 120 ticks ≈ a 5-minute fight. HP is restored between ticks so every tick
 # carries the full 32-round load.
 
+# src/server.cyr reaches into persist.cyr (boot world-load uses DP_ROOMS, the
+# save sweep uses persist_*), so the bench needs the same M6 prelude the server
+# binary does — thread/thread_local before the crypto, then sakshi + libro.
+# Without it this bench failed to compile at `undefined variable 'DP_ROOMS'`.
+# sigil is auto-included from [deps.libro]'s thin sub-bundles (see src/main.cyr).
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "lib/sakshi.cyr"
+include "lib/libro.cyr"
+
 include "src/telnet.cyr"
 include "src/parser.cyr"
 include "src/world.cyr"
@@ -20,6 +30,7 @@ include "src/session.cyr"
 include "src/item.cyr"
 include "src/combat.cyr"
 include "src/classes.cyr"
+include "src/persist.cyr"
 include "src/server.cyr"
 
 enum LoadConst {

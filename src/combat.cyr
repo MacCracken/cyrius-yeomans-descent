@@ -22,11 +22,18 @@
 # === RNG — xorshift64, seeded once at boot (combat_seed). ===
 var g_rng = 0x2545F4914F6CDD1D;
 
+# Seed the hidden-roll RNG, once at boot from wall-clock ms (server.cyr).
+# Zero is xorshift's fixed point: a 0 seed would freeze every subsequent
+# roll at 0, so it is remapped to 1 rather than rejected.
 fn combat_seed(x): i64 {
     if (x == 0) { x = 1; }
     g_rng = x;
     return 0;
 }
+# One xorshift64 step, advancing g_rng. Cyrius `>>` is a logical shift on
+# i64 (zero-fill), so the `& 0x01FFFFFFFFFFFFFF` on the `>> 7` is a no-op
+# that pins the intended unsigned shift, not a sign-extension fix. Result
+# spans the full signed range, negatives included, so callers fold it below.
 fn rng_u64(): i64 {
     var x = g_rng;
     x = x ^ (x << 13);
@@ -81,16 +88,19 @@ fn combat_flush(s): i64 {
 # raises hit + damage while SS_STIM is up.
 enum BuffAmt { GUARD_AC = 3; STIM_HIT = 2; STIM_DMG = 2; }
 
+# AC once a brace is up. Lower AC is harder to hit, so the buff subtracts.
 fn player_eff_ac(s): i64 {
     var ac = load64(s + SS_AC);
     if (load64(s + SS_GUARD) > 0) { ac = ac - GUARD_AC; }
     return ac;
 }
+# To-hit with a live stim. Buff fields are tick counters, decayed by upkeep.
 fn player_eff_hit(s): i64 {
     var h = load64(s + SS_HIT);
     if (load64(s + SS_STIM) > 0) { h = h + STIM_HIT; }
     return h;
 }
+# Flat stim rider, added on top of the weapon roll — it is not a die bonus.
 fn player_dmg_bonus(s): i64 {
     if (load64(s + SS_STIM) > 0) { return STIM_DMG; }
     return 0;
@@ -113,6 +123,7 @@ fn session_append_condition(s): i64 {
 
 # ANSI for combat lines (red for harm to the player, dim for misses).
 fn ansi_hit(): i64  { return "\x1b[1;31m"; }   # bold red
+# Dim SGR for whiffs and stun lines, so misses read quieter than hits.
 fn ansi_miss(): i64 { return "\x1b[2m"; }      # dim
 
 # Onlooker broadcasts (0.6.1): a player acting on a mob, and a mob acting
@@ -123,6 +134,9 @@ fn cb_player_act(s, m, mid, tail): i64 {
     mid, mi_name_ptr(m), mi_name_len(m), tail);
     return 0;
 }
+# cb_player_act with the roles swapped: mob as subject, player as object.
+# `s` still supplies the room and the player's name, and doubles as the
+# broadcast exclude — the combatant already got the first-person line.
 fn cb_mob_act(s, m, mid, tail): i64 {
     room_combat_line(load64(s + SS_ROOM), s, mi_name_ptr(m), mi_name_len(m),
     mid, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), tail);

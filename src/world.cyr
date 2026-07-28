@@ -79,25 +79,43 @@ var g_zone_last_reset_ms = 0;
 
 # Room at index i (no bounds check — callers hold valid indices).
 fn room_at(i): i64 { return g_rooms + i * RM_SIZE; }
+# Rooms loaded; 0 until world_load_rooms succeeds — look / move / fight all
+# gate on this rather than assuming a zone exists.
 fn world_room_count(): i64 { return g_room_count; }
+# Index new players spawn (and the dead respawn) into: the header's `start`
+# id when it resolved, else room 0 — also the fallback for a stale save.
 fn world_start_room(): i64 { return g_start_room; }
 
+# Inline id bytes of `r` — not NUL-terminated; saves record the id, not
+# the index, so re-authoring a zone cannot teleport a returning player.
 fn room_id_ptr(r): i64    { return r + RM_ID; }
+# Id byte count, already clamped to RM_ID_CAP by the loader's capped copy.
 fn room_id_len(r): i64    { return load64(r + RM_ID_LEN); }
 # Resolve a room id → index: see `room_index_by_id` below (M3-B), used by
 # M6-E load to place a player back into their recorded room.
 fn room_title_ptr(r): i64 { return r + RM_TITLE; }
+# Title byte count; 0 when the entry authored no `title` key at all.
 fn room_title_len(r): i64 { return load64(r + RM_TITLE_LEN); }
+# Prose lives in the CYML file buffer, not the room — valid only while that
+# buffer is held, which it is for the run (the loader never frees it).
 fn room_prose_ptr(r): i64 { return load64(r + RM_PROSE_PTR); }
+# Prose byte count; the body is emitted to the client verbatim, unescaped.
 fn room_prose_len(r): i64 { return load64(r + RM_PROSE_LEN); }
 
 # Room contents list heads (mob.cyr owns the instance structs + list ops;
 # world.cyr just holds the head pointers in the Room struct).
 fn room_mob_head(r): i64      { return load64(r + RM_MOB_HEAD); }
+# Overwrite the head only; mob_spawn / mob_remove own the MI_NEXT relinking.
 fn room_set_mob_head(r, v): i64 { store64(r + RM_MOB_HEAD, v); return 0; }
+# Head of the room's object-instance list (item.cyr OI_NEXT chain), or 0.
 fn room_obj_head(r): i64      { return load64(r + RM_OBJ_HEAD); }
+# Overwrite the head only; item.cyr's ilist_* take the field address instead.
 fn room_set_obj_head(r, v): i64 { store64(r + RM_OBJ_HEAD, v); return 0; }
+# str: the authored `mobs` id list (space-separated), or 0. Kept after boot
+# because zone reset re-reads it to top the room back up to its population.
 fn room_mobspawn(r): i64      { return load64(r + RM_MOBSPAWN); }
+# str: the authored `objects` id list, or 0. Reset respawns only ids absent
+# from the room, so player-dropped loot and corpses are left alone.
 fn room_objspawn(r): i64      { return load64(r + RM_OBJSPAWN); }
 
 # Exit room index in direction `dir` (0..NDIR), or -1 if no exit / OOB.

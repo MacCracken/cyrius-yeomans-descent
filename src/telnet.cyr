@@ -157,9 +157,13 @@ fn telnet_state_free(ts): i64 {
 
 # === Accessors the caller uses after telnet_feed() ===
 fn telnet_data_byte(ts): i64 { return load64(ts + TS_DATA_OUT); }
+# Base of the queued negotiation replies; readable for telnet_tx_len() bytes.
 fn telnet_tx_buf(ts): i64    { return load64(ts + TS_TX_BUF); }
+# Pending reply bytes. Nonzero after a feed means the caller still owes the wire a drain.
 fn telnet_tx_len(ts): i64    { return load64(ts + TS_TX_LEN); }
+# Base of the subneg accumulator; only meaningful on the feed that returned EV_SB.
 fn telnet_sb_buf(ts): i64    { return load64(ts + TS_SB_BUF); }
+# Payload bytes held. Saturates at SB_BUF_CAP, so an overlong subneg reads short, never overruns.
 fn telnet_sb_len(ts): i64    { return load64(ts + TS_SB_LEN); }
 
 # Clear the tx buffer after the caller has copied it onto the wire.
@@ -190,6 +194,8 @@ fn ts_sb_push(ts, b): i64 {
     return 1;
 }
 
+# Drop whatever is accumulated. Run both at IAC SB and on a malformed
+# subneg abort, so a partial payload can never bleed into the next one.
 fn ts_sb_reset(ts): i64 {
     store64(ts + TS_SB_LEN, 0);
     return 0;
@@ -207,13 +213,16 @@ fn ts_emit_iac3(ts, verb, opt): i64 {
 fn opt_us(ts, opt): i64 {
     return load8(load64(ts + TS_OPT_US) + (opt & 0xFF)) & 0xFF;
 }
+# Peer-side Q-state for <opt> (the WILL/WONT axis). Never-negotiated codes read Q_NO.
 fn opt_him(ts, opt): i64 {
     return load8(load64(ts + TS_OPT_HIM) + (opt & 0xFF)) & 0xFF;
 }
+# Write our Q-state. opt is masked to 0xFF so a wire byte can't index past the 256-byte array.
 fn opt_set_us(ts, opt, st): i64 {
     store8(load64(ts + TS_OPT_US) + (opt & 0xFF), st & 0xFF);
     return 0;
 }
+# Write the peer's Q-state. Same 0xFF masking, same reason, as opt_set_us.
 fn opt_set_him(ts, opt, st): i64 {
     store8(load64(ts + TS_OPT_HIM) + (opt & 0xFF), st & 0xFF);
     return 0;
@@ -236,6 +245,8 @@ fn opt_pref_us(opt): i64 {
     if (opt == OPT_SUPPRESS_GO_AHEAD) { return 1; }
     return 0;
 }
+# Him-side counterpart: SGA is the only option we will answer WILL with DO.
+# Anything else stays at Q_NO, so an unsolicited WILL can never flip him to YES.
 fn opt_pref_him(opt): i64 {
     if (opt == OPT_SUPPRESS_GO_AHEAD) { return 1; }
     return 0;

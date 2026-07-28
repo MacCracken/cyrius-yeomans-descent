@@ -46,13 +46,22 @@ jobs:
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
       - name: Test
-        # Cyrius 6.0.1: bare `cyrius test` is unreliable in CI — the
-        # released-tarball toolchain exits with "No .tcyr files found
-        # in tests/tcyr/ or tests/" even when tests/*.tcyr is present
-        # (different code path from the locally-installed cyrius).
-        # Agora 1.0.0's CI hit the same issue at the same version
-        # (`docs/development/roadmap.md` notes the explicit form is
-        # known-good at 6.0.1). Pass the [build].test entry explicitly;
-        # tests/cyrius-yeomans-descent.tcyr stays as the auto-discovered
-        # secondary suite when bare `cyrius test` is invoked locally.
-        run: cyrius test src/test.cyr
+        # MUST be bare `cyrius test`. The old step was `cyrius test src/test.cyr`,
+        # and `src/test.cyr` is a deliberate no-op stub (`fn main() { return 0; }`)
+        # that exists only to satisfy `[build].test` — so CI compiled a stub, exited
+        # 0, and **the 298-assertion suite never ran here at all**. Every green run
+        # before 1.2.0 said nothing about the tests.
+        #
+        # The workaround it came from was real but is long stale: at cyrius 6.0.1
+        # the released-tarball toolchain couldn't find tests/*.tcyr ("No .tcyr files
+        # found in tests/tcyr/ or tests/"). 6.4.72's corpus walker recurses tests/,
+        # and bare `cyrius test` at the pinned 6.4.83 runs BOTH the .tcyr corpus and
+        # [build].test — verified locally: "298 passed, 0 failed" + "1 passed, 0 failed".
+        run: cyrius test
+
+      - name: Audit
+        # Project sweep — fmt / lint / docs / tests / bench over src + programs.
+        # Green as of 1.2.0 and listed as a release gate in CLAUDE.md. NOTE: this
+        # is `cyrius audit`, NOT `cyrius audit --internal` (the cyrius-compiler
+        # self-host gate, which does not apply to this repo).
+        run: cyrius audit

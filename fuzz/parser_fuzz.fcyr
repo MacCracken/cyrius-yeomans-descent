@@ -5,7 +5,7 @@
 # gate: 100k random byte sequences, every byte value (incl. embedded NUL
 # and 0xFF), every length from empty to over-long. Invariants checked
 # every iteration:
-#   - the token count never exceeds MAX_TOKENS
+#   - the token count never exceeds PA_MAX_TOKENS
 #   - the norm buffer never exceeds NORM_CAP
 #   - every token's [off, off+len) stays inside the norm buffer
 #   - every parse-result token index is in range (or the -1 sentinel)
@@ -59,7 +59,7 @@ var scope_n = 4;
 
 var pa = parser_new();
 var inbuf = alloc(512);
-var out = alloc(MAX_TOKENS * 8);
+var out = alloc(PA_MAX_TOKENS * 8);
 
 # --- Directed adversarial cases first (each must survive) ---
 parser_parse(pa, "", 0);
@@ -71,7 +71,7 @@ parser_parse(pa, ".....", 5);                    # only dots
 parser_parse(pa, "get . in .", 10);              # dots as nouns
 parser_parse(pa, "put a in b on c with d", 22);  # many prepositions
 
-# An over-long all-letters line: more tokens than MAX_TOKENS can hold.
+# An over-long all-letters line: more tokens than PA_MAX_TOKENS can hold.
 var li = 0;
 while (li < 500) {
     var c = 97;
@@ -80,7 +80,7 @@ while (li < 500) {
     li = li + 1;
 }
 parser_parse(pa, inbuf, 500);
-if (parser_count(pa) > MAX_TOKENS) { syscall(60, 10); }
+if (parser_count(pa) > PA_MAX_TOKENS) { syscall(60, 10); }
 
 # --- 100k random iterations ---
 var iter = 0;
@@ -97,7 +97,7 @@ while (iter < 100000) {
     # Invariant 1: token count bounded.
     var count = parser_count(pa);
     if (count < 0)          { syscall(60, 20); }
-    if (count > MAX_TOKENS) { syscall(60, 21); }
+    if (count > PA_MAX_TOKENS) { syscall(60, 21); }
 
     # Invariant 2: norm buffer bounded.
     var norm_len = load64(pa + PA_NORM_LEN);
@@ -132,9 +132,9 @@ while (iter < 100000) {
         qual_parse(pa, di, &kind, &num, &bp, &bl);
         var k = load64(&kind);
         if (k == QUAL_ALL) {
-            var w = resolve_all(load64(&bp), load64(&bl), &names, scope_n, out, MAX_TOKENS);
+            var w = resolve_all(load64(&bp), load64(&bl), &names, scope_n, out, PA_MAX_TOKENS);
             # Invariant 5: never write past the cap.
-            if (w > MAX_TOKENS) { syscall(60, 40); }
+            if (w > PA_MAX_TOKENS) { syscall(60, 40); }
             if (w < 0)          { syscall(60, 41); }
         }
         if (k == QUAL_NTH) {

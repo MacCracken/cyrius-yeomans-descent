@@ -6,17 +6,23 @@
 # need explicit `include` per first-party convention.
 
 # M6 persistence chain (opt-in, never auto-resolved — see cyrius.cyml).
-# Order: thread/thread_local → sakshi → sigil → libro (libro calls sigil +
-# sakshi). thread/thread_local MUST be included explicitly: sigil 3.7's crypto
-# banks the SHA message-schedule per-thread via `cbank()` → `thread_local_get`,
-# and the [deps]-stdlib auto-prepend does NOT pull them (unlike ct/keccak/random)
-# — leaving thread_local_* as `ud2`/SIGILL trap stubs that crash `sha256` the
-# instant ident derivation runs (regression surfaced 1.1.x; pre-1.1 sigil didn't
-# bank per-thread). ct/keccak/random still auto-prepend ahead of sigil.
+# Order: thread/thread_local → sakshi → libro. thread/thread_local MUST be
+# included explicitly: sigil's crypto banks the SHA message-schedule per-thread
+# via `cbank()` → `thread_local_get`, and the [deps]-stdlib auto-prepend does
+# NOT pull them (unlike ct/keccak/random) — leaving thread_local_* as
+# `ud2`/SIGILL trap stubs that crash `sha256` the instant ident derivation runs
+# (regression surfaced 1.1.x). ct/keccak/random still auto-prepend ahead of sigil.
+#
+# sigil is NOT included here. libro 2.8.0 thinned its sigil surface to capability
+# sub-bundles, so [deps.libro] now resolves sigil-mldsa (ed25519) + sigil_sha256
+# + sigil_sha_ni + sigil_hex into lib/ and cyrius auto-includes them. Adding the
+# MONOLITHIC lib/sigil.cyr on top defined every one of those symbols twice
+# ("last definition wins") and dragged the unused x509/RSA bignum tables in —
+# ~13 MB of .bss for a server that only calls ed25519_{keypair,sign,verify},
+# sha256 and hex_{encode,decode_into}. All six live in the thin bundles.
 include "lib/thread.cyr"
 include "lib/thread_local.cyr"
 include "lib/sakshi.cyr"
-include "lib/sigil.cyr"
 include "lib/libro.cyr"
 
 include "src/telnet.cyr"
@@ -30,13 +36,23 @@ include "src/classes.cyr"
 include "src/persist.cyr"   # uses sigil/libro + session/item/world/classes enums
 include "src/server.cyr"
 
-var VERSION_STRING = "1.1.3";
+# Keep in lockstep with the VERSION file — `cyrius.cyml` interpolates that file
+# via ${file:VERSION}, but Cyrius has no source-level equivalent, so this literal
+# is a hand-synced copy. It silently drifted to 1.1.3 across the 1.1.4 and 1.1.5
+# releases (the `version` verb reported a build two releases old); the release
+# checklist in CLAUDE.md now names this line explicitly.
+var VERSION_STRING = "1.2.0";
 
+# Identity line for the CLI, stdout only. What a connecting player sees is
+# session_send_motd's banner instead — operator-facing and wire-facing stay apart.
 fn print_banner(): i64 {
     println("yeoman's descent — a cyrius-native text MUD");
     return 0;
 }
 
+# Usage text, also the fallback for a bare invocation. The EXIT CODES block is
+# contract, not decoration: a supervisor must be able to tell bad usage (2) from
+# a command that ran and failed (1), so keep it in step with the returns below.
 fn print_help(): i64 {
     print_banner();
     println("");
@@ -54,6 +70,8 @@ fn print_help(): i64 {
     return 0;
 }
 
+# Bare version line — no banner, nothing else on stdout, so release tooling can
+# capture it whole. Prints VERSION_STRING, which is the hand-synced copy above.
 fn cmd_version(): i64 {
     println(VERSION_STRING);
     return 0;
@@ -70,6 +88,12 @@ fn parse_port(): i64 {
     return p;
 }
 
+# argv dispatch; the return value is the process exit code (see print_help).
+# alloc_init + args_init run before any verb is read: argv()/argc() return 0
+# until args_init slurps /proc/self/cmdline, and args_init allocates that
+# buffer itself, so alloc_init must come first.
+# Unrecognized verb, missing verb and a rejected port all exit 2, not 1: they
+# never reached a command, so nothing ran that could have failed.
 fn main(): i64 {
     alloc_init();
     args_init();

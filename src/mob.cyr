@@ -53,31 +53,55 @@ var g_mob_tpl_count = 0;
 
 # === Template accessors ===
 fn mt_at(i): i64          { return g_mob_tpls + i * MT_SIZE; }
+# Inline name bytes. The loader caps at CAP-1 into zeroed space, so it is also a cstr.
 fn mt_name_ptr(t): i64    { return t + MT_NAME; }
+# Bytes stored, not authored: a name over MT_NAME_CAP-1 was truncated at load time.
 fn mt_name_len(t): i64    { return load64(t + MT_NAME_LEN); }
+# Keyword blob as a cstr — kw_matches scans to the NUL, no length travels with it.
 fn mt_kw_ptr(t): i64      { return t + MT_KW; }         # NUL-terminated
+# Authored level, default 1. Flavour only so far — combat reads ac/hit/dice, not this.
 fn mt_level(t): i64       { return load64(t + MT_LEVEL); }
+# Max HP. mob_spawn seeds instance HP from it; mob_condition scales its prose by it.
 fn mt_hp(t): i64          { return load64(t + MT_HP); }
+# Armour class the player's to-hit roll is checked against — lower is harder to hit.
 fn mt_ac(t): i64          { return load64(t + MT_AC); }
+# Flat to-hit bonus on the mob's own swing, rolled against the player's effective AC.
 fn mt_hit(t): i64         { return load64(t + MT_HIT); }
+# Dice count of the NdM+K profile; parse_dice falls back to 1d4+0 on a malformed value.
 fn mt_ndice(t): i64       { return load64(t + MT_NDICE); }
+# Die size of the damage profile — fed to roll() together with ndice and dmod.
 fn mt_dsize(t): i64       { return load64(t + MT_DSIZE); }
+# Flat +K of the damage profile, 0 when the authored value omits it.
 fn mt_dmod(t): i64        { return load64(t + MT_DMOD); }
+# Prose body, zero-copy into the CYML file buffer — not NUL-terminated, pair with len.
 fn mt_desc_ptr(t): i64    { return load64(t + MT_DESC_PTR); }
+# Body length. 0 for a bodyless entry, which examine renders as name plus condition only.
 fn mt_desc_len(t): i64    { return load64(t + MT_DESC_LEN); }
+# str of space-separated object ids, or 0. corpse_of resolves them into the corpse.
 fn mt_loot(t): i64        { return load64(t + MT_LOOT); }   # str or 0
 
 # === Instance accessors ===
 fn mi_tpl(m): i64         { return load64(m + MI_TPL); }
+# Live HP. Death is hp <= 0, checked after every swing — there is no alive flag.
 fn mi_hp(m): i64          { return load64(m + MI_HP); }
+# Post-spawn HP mutator — mob_spawn seeds MI_HP directly. Damage can drive it negative,
+# so callers test <= 0, never == 0.
 fn mi_set_hp(m, v): i64   { store64(m + MI_HP, v); return 0; }
+# Room index. combat_round compares it to the player's to spot a target that left.
 fn mi_room(m): i64        { return load64(m + MI_ROOM); }
+# Session it fights, 0 = idle. Bookkeeping — the tick drives combat from the session.
 fn mi_target(m): i64      { return load64(m + MI_TARGET); }
+# Set by cmd_kill so the mob is marked as fighting back; cleared by combat_disengage.
 fn mi_set_target(m, v): i64 { store64(m + MI_TARGET, v); return 0; }
+# Next occupant in the room's intrusive list; the head lives in the Room struct.
 fn mi_next(m): i64        { return load64(m + MI_NEXT); }
+# Remaining stunned ticks (bash / EMP). Non-zero means the mob forfeits its swing.
 fn mi_stun(m): i64        { return load64(m + MI_STUN); }
+# Abilities set the tick count; combat_round spends one as it burns the mob's turn.
 fn mi_set_stun(m, v): i64 { store64(m + MI_STUN, v); return 0; }
+# Instances carry no name of their own — hop to the template; cstr-safe, see mt_name_ptr.
 fn mi_name_ptr(m): i64    { return mt_name_ptr(mi_tpl(m)); }
+# Template name length, for the (ptr, len) appends in room listings and combat prose.
 fn mi_name_len(m): i64    { return mt_name_len(mi_tpl(m)); }
 
 # Read an int field from a TOML pairs vec, or `def` if absent / non-numeric.

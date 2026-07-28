@@ -54,8 +54,9 @@ var g_fmt_scratch   = 0;   # fmt_int_buf temp
 var g_audit_chain   = 0;
 var g_audit_store   = 0;
 var g_persist_ready = 0;
-var g_loaded_last_login = 0;   # 0.8.1 — prior last_login captured at load,
-                               # for the "last seen …" returning-player greeting
+# 0.8.1 — prior last_login captured at load, for the "last seen …"
+# returning-player greeting.
+var g_loaded_last_login = 0;
 
 # Data paths. agnos's VFS requires ABSOLUTE paths (kernel `vfs.cyr`: a path that
 # doesn't lead with '/' returns FS_NONE), and the world content is staged at the
@@ -184,11 +185,25 @@ fn sess_ident(s): i64 {
 }
 
 # Does a saved record exist for this name?
+#
+# `sys_stat` is one of the few stdlib calls whose ARITY differs by target:
+# agnos is `sys_stat(path, pathlen, statbuf)` (its VFS takes counted paths)
+# while Linux/macOS are `sys_stat(path, buf)`. Calling the 2-arg form on agnos
+# put `g_persist_stat` in the `pathlen` slot and left `statbuf` garbage, so
+# this returned a meaningless answer — and it is the branch that decides
+# whether a connecting name is a RETURNING player (passphrase prompt) or a NEW
+# one (character creation). `cyrius build --agnos` warned; the host build
+# could not see it. `_path_for` already returns the length we need.
 fn player_exists(name, len): i64 {
     persist_init();
-    _path_for(name, len, g_persist_path);
+    var plen = _path_for(name, len, g_persist_path);
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (sys_stat(g_persist_path, plen, g_persist_stat) == 0) { return 1; }
+    return 0;
+    #else
     if (sys_stat(g_persist_path, g_persist_stat) == 0) { return 1; }
     return 0;
+    #endif
 }
 
 # === serialization =========================================================
@@ -452,16 +467,21 @@ fn _plural_s(s, n): i64 {
     if (n != 1) { session_appendtx_cstr(s, "s"); }
     return 0;
 }
+# Coarse relative time into `s`'s tx: minutes, hours or days, never exact.
+# Only the returning-player greeting uses it, so bucket precision is enough
+# and sub-minute reconnects read as "moments ago".
 fn session_append_ago(s, secs): i64 {
     if (secs < 60)    { session_appendtx_cstr(s, "moments ago"); return 0; }
     if (secs < 3600)  {
         var m = secs / 60;
-        session_appendtx_num(s, m); session_appendtx_cstr(s, " minute"); _plural_s(s, m); session_appendtx_cstr(s, " ago");
+        session_appendtx_num(s, m); session_appendtx_cstr(s, " minute");
+        _plural_s(s, m); session_appendtx_cstr(s, " ago");
         return 0;
     }
     if (secs < 86400) {
         var h = secs / 3600;
-        session_appendtx_num(s, h); session_appendtx_cstr(s, " hour"); _plural_s(s, h); session_appendtx_cstr(s, " ago");
+        session_appendtx_num(s, h); session_appendtx_cstr(s, " hour");
+        _plural_s(s, h); session_appendtx_cstr(s, " ago");
         return 0;
     }
     var d = secs / 86400;
@@ -472,12 +492,18 @@ fn session_append_ago(s, secs): i64 {
 # === login phase handlers (M6-B/E) =========================================
 # Forward-referenced from session.cyr's phase router.
 
+# Prompt a known name for its passphrase. Echo goes off BEFORE the prompt is
+# queued so the secret never round-trips to the terminal; login_on_pass owns
+# turning it back on. Also the re-prompt on a wrong passphrase.
 fn login_begin_pass(s): i64 {
     store64(s + SS_PHASE, PHASE_PASS);
     session_echo_off(s);   # 0.8.1 — don't echo the passphrase
     session_appendtx_cstr(s, "Passphrase: ");
     return 0;
 }
+# Prompt an unknown name to choose a passphrase. Doubles as the restart point
+# for every creation failure (too short/long, confirm mismatch), so it must
+# re-assert both the phase and echo-off rather than assume them.
 fn login_begin_newpass(s): i64 {
     store64(s + SS_PHASE, PHASE_NEWPASS);
     session_echo_off(s);   # 0.8.1
@@ -508,7 +534,8 @@ fn login_on_pass(s, buf, len): i64 {
         return 0;
     }
     session_echo_on(s);
-    session_appendtx_cstr(s, "\r\nYour record is unreadable or has been tampered with. An operator must intervene.\r\n");
+    session_appendtx_cstr(s, "\r\nYour record is unreadable or has been tampered with.");
+    session_appendtx_cstr(s, " An operator must intervene.\r\n");
     store64(s + SS_QUIT, 1);
     return 0;
 }
@@ -525,6 +552,10 @@ fn login_on_newpass(s, buf, len): i64 {
     return 0;
 }
 
+# Second half of creation: re-derive from the confirm line and require the
+# same public key — the passphrase is never stored, so equality of derived
+# pubkeys IS the comparison. On match the identity is sealed (created stamp,
+# SS_AUTHED) and class selection follows; classes.cyr writes the first record.
 fn login_on_confirm(s, buf, len): i64 {
     var blk = sess_ident(s);
     # A valid passphrase is <= PASS_MAX (the new-pass step enforced it), so an
@@ -557,6 +588,9 @@ fn login_on_confirm(s, buf, len): i64 {
 # confirm) with echo suppressed, mirroring character creation but returning
 # to the command prompt. Phases PHASE_CHPASS_NEW / PHASE_CHPASS_CONFIRM.
 
+# Entry point for the in-world `passwd` verb. An unauthed session owns no
+# record and no salt, so re-keying it would be meaningless — refuse rather
+# than mint an identity outside the login flow.
 fn passwd_begin(s): i64 {
     if (load64(s + SS_AUTHED) == 0) {
         session_appendtx_cstr(s, "You have no persistent record to re-key.\r\n");
@@ -582,6 +616,10 @@ fn chpass_on_new(s, buf, len): i64 {
     return 0;
 }
 
+# Commit half of the re-key. A mismatch rewinds to PHASE_CHPASS_NEW with the
+# live key untouched. On match only 112 bytes (salt|pk|sk) are copied over the
+# ident block, deliberately sparing IDENT_CREATED, then player_save re-signs
+# the record under the new key — the old signature no longer verifies.
 fn chpass_on_confirm(s, buf, len): i64 {
     var cand = g_persist_dec;
     var pk2 = g_persist_dec + 128;

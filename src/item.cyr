@@ -49,12 +49,19 @@ fn ot_at(i): i64        { return g_obj_tpls + i * OT_SIZE; }
 
 # === Instance accessors ===
 fn oi_next(o): i64       { return load64(o + OI_NEXT); }
+# Head of the contained-item list — nonzero only for containers / corpses.
 fn oi_contents(o): i64   { return load64(o + OI_CONTENTS); }
+# 1 for a synthesized corpse. get/take consult this to refuse hauling bodies.
 fn oi_is_corpse(o): i64  { return load64(o + OI_IS_CORPSE); }
+# Display name, copied inline at mint — corpses have no template to borrow one.
 fn oi_name_ptr(o): i64   { return o + OI_NAME; }
+# Name length; capped to OI_NAME_CAP-1 on copy, so the inline tail stays NUL.
 fn oi_name_len(o): i64   { return load64(o + OI_NAME_LEN); }
+# Keyword blob fed to kw_matches — one item answers to several parser nouns.
 fn oi_kw_ptr(o): i64     { return o + OI_KW; }       # NUL-terminated
+# Borrowed pointer into the parsed CYML body; the instance does not own it.
 fn oi_desc_ptr(o): i64   { return load64(o + OI_DESC_PTR); }
+# Length of that borrowed body. 0 for corpses, which carry no authored prose.
 fn oi_desc_len(o): i64   { return load64(o + OI_DESC_LEN); }
 
 # === Intrusive list ops. `slot` is the ADDRESS of the head pointer
@@ -64,6 +71,10 @@ fn ilist_push(slot, o): i64 {
     store64(slot, o);
     return 0;
 }
+# Unlink `o` from the list at `slot` and clear its OI_NEXT, so a single-item
+# move (remove-then-push) leaves no stale link into the old list. Bulk moves
+# that zero the whole head afterward — player_drop_all — skip this.
+# A no-op if `o` isn't on that list — callers move items they just found.
 fn ilist_remove(slot, o): i64 {
     var head = load64(slot);
     if (head == o) { store64(slot, oi_next(o)); store64(o + OI_NEXT, 0); return 0; }
@@ -128,6 +139,9 @@ fn world_load_objs(path): i64 {
     return n;
 }
 
+# Template whose id is the `len` bytes at `buf`, or 0. `buf` is a slice of a
+# space-separated id list (loot / room spawns), not a NUL-terminated string,
+# so the length is compared first and the bytes never read past `len`.
 fn obj_tpl_by_id(buf, len): i64 {
     var i = 0;
     while (i < g_obj_tpl_count) {
@@ -154,11 +168,15 @@ fn item_new(tpl): i64 {
     store64(o + OI_KW_LEN,   copy_bytes_capped(o + OI_KW,   OI_KW_CAP - 1,   tpl + OT_KW,   load64(tpl + OT_KW_LEN)));
     store64(o + OI_DESC_PTR, load64(tpl + OT_DESC_PTR));
     store64(o + OI_DESC_LEN, load64(tpl + OT_DESC_LEN));
-    store64(o + OI_TPL_ID_LEN, copy_bytes_capped(o + OI_TPL_ID, OI_TPL_ID_CAP - 1, tpl + OT_ID, load64(tpl + OT_ID_LEN)));
+    var idn = copy_bytes_capped(o + OI_TPL_ID, OI_TPL_ID_CAP - 1,
+    tpl + OT_ID, load64(tpl + OT_ID_LEN));
+    store64(o + OI_TPL_ID_LEN, idn);
     return o;
 }
 
+# Id of the template this instance was minted from; inline for M6 save/load.
 fn oi_tpl_id_ptr(o): i64 { return o + OI_TPL_ID; }
+# 0 for corpses / template-less items, which is what keeps them out of respawn.
 fn oi_tpl_id_len(o): i64 { return load64(o + OI_TPL_ID_LEN); }
 
 # Copy up to `cap` raw bytes; return bytes copied. (str-free variant of
@@ -412,6 +430,11 @@ fn _obj_id_present(ri, idptr, idlen): i64 {
     return 0;
 }
 
+# Respawn one room's authored `objects` ids, skipping any already present, and
+# return how many were spawned. Boot and reset share this path: an empty room
+# spawns the full set, a picked-over one only refills the gaps.
+# The space-separated id list is walked in place off the room's str — no split
+# buffer — though every spawn still allocates one OI_SIZE instance.
 fn zone_reset_room_objs(ri): i64 {
     var s = room_objspawn(room_at(ri));
     if (s == 0) { return 0; }

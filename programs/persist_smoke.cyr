@@ -7,8 +7,11 @@
 #
 # Scratch validation — not wired into [build].
 
+# sigil is NOT included — [deps.libro] resolves the thin sub-bundles and cyrius
+# auto-includes them (see src/main.cyr). thread/thread_local must precede them.
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
 include "lib/sakshi.cyr"
-include "lib/sigil.cyr"
 include "lib/libro.cyr"
 
 include "src/telnet.cyr"
@@ -20,7 +23,16 @@ include "src/item.cyr"
 include "src/combat.cyr"
 include "src/classes.cyr"
 include "src/persist.cyr"
+# session.cyr forward-references 12 symbols that live in server.cyr
+# (flush_session, room_broadcast, render_*, …). Without this the smoke
+# built anyway — they were unreachable — but every run printed 12
+# "undefined function" warnings, which buries any real one.
+include "src/server.cyr"
 
+# Session shim for the smoke run: the SS_SIZE block plus a name buffer,
+# both fl_alloc'd the way session_new does. The rx/tx/line buffers stay
+# null — the save and auth paths read name/ident/attrs and never write to
+# the wire, so a session that could never talk to a socket is enough.
 fn mk_session(nm, nl): i64 {
     var s = fl_alloc(SS_SIZE);
     memset(s, 0, SS_SIZE);
@@ -31,6 +43,13 @@ fn mk_session(nm, nl): i64 {
     return s;
 }
 
+# Stages run in dependency order: save, then a fresh session that must
+# authenticate and restore from disk alone, then the two rejections. Exit
+# codes are stage-specific (1..7) so a failure names the broken invariant
+# without parsing stdout.
+# The tamper case flips a bit at offset 18 — the `schema` digit, inside the
+# signed prefix — so it has to be caught by ed25519_verify (-2), not by the
+# newer-schema check, which only runs once the record already verifies.
 fn main(): i64 {
     alloc_init();
     persist_init();

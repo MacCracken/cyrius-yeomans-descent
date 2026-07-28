@@ -3,6 +3,9 @@
 
 include "lib/syscalls.cyr"
 
+# Stub entry: [build].test only has to compile and exit 0 for `cyrius test`
+# to pass. Cases belong in tests/cyrius-yeomans-descent.tcyr — one added
+# here runs outside the .tcyr harness and reports as a bare exit code.
 fn main() {
     return 0;
 }

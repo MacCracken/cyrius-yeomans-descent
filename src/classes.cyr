@@ -41,23 +41,38 @@ enum ClCap { CL_ID_CAP = 32; CL_NAME_CAP = 32; CL_ROLE_CAP = 32; }
 var g_classes     = 0;
 var g_class_count = 0;
 
+# Base address of class record `i` in the flat table — unchecked; callers gate idx.
 fn cl_at(i): i64        { return g_classes + i * CL_SIZE; }
+# Name bytes sit inline in the record, so this is an offset, not a stored pointer.
 fn cl_name_ptr(c): i64  { return c + CL_NAME; }
+# Name length as written by copy_str_capped on load — never exceeds CL_NAME_CAP - 1.
 fn cl_name_len(c): i64  { return load64(c + CL_NAME_LEN); }
+# Role tag ("Tank / Melee") — inline like the name; shown beside it in the M5-A menu.
 fn cl_role_ptr(c): i64  { return c + CL_ROLE; }
+# Role tag length, likewise capped at CL_ROLE_CAP - 1 by the loader.
 fn cl_role_len(c): i64  { return load64(c + CL_ROLE_LEN); }
+# Starting HP; apply_class stamps it into both SS_MAXHP and SS_HP at selection.
 fn cl_hp(c): i64        { return load64(c + CL_HP); }
+# Armour class — lower is harder to hit, per the hidden roll in combat.cyr.
 fn cl_ac(c): i64        { return load64(c + CL_AC); }
+# Flat to-hit bonus folded into that roll.
 fn cl_hit(c): i64       { return load64(c + CL_HIT); }
+# Max energy pool — the cap classes_upkeep regenerates toward, ENERGY_REGEN a tick.
 fn cl_energy(c): i64    { return load64(c + CL_ENERGY); }
+# Starting STR — display/persist only today; damage comes from the dice profile.
 fn cl_str(c): i64       { return load64(c + CL_STR); }
+# Starting DEX — scales Courier backstab; the to-hit math does not read it.
 fn cl_dex(c): i64       { return load64(c + CL_DEX); }
+# Starting CON — the one attribute in the tick loop: out-of-combat regen, CON/5.
 fn cl_con(c): i64       { return load64(c + CL_CON); }
+# Starting TEC — ability power for Splicer damage and Chaplain heals.
 fn cl_tec(c): i64       { return load64(c + CL_TEC); }
 
 # Class id of a session (or -1), and its display name (for who / stats).
 fn session_class(s): i64 { return load64(s + SS_CLASS); }
+# Same bytes as cl_name_ptr, keyed by class index — for callers holding SS_CLASS.
 fn class_name_ptr(idx): i64 { return cl_at(idx) + CL_NAME; }
+# Length half of that pair; both feed session_appendtx, which takes ptr + len.
 fn class_name_len(idx): i64 { return load64(cl_at(idx) + CL_NAME_LEN); }
 
 # === world_load_classes — parse data/classes.cyml into the class table. ===
@@ -233,11 +248,12 @@ fn login_on_class(s, buf, len): i64 {
     return 0;
 }
 
-# ─────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────
 # M5-G — Ability framework: energy, tick-counted cooldowns, status.
 #
 # Abilities resolve the instant they're typed (between ticks), composing
-# with the 2.5 s auto-attack rather than replacing it ([ADR 0001](../docs/adr/0001-tick-based-combat-over-cooldowns.md)).
+# with the 2.5 s auto-attack rather than replacing it — see
+# [ADR 0001](../docs/adr/0001-tick-based-combat-over-cooldowns.md).
 # Each costs energy and locks its cooldown slot for N ticks; classes_upkeep
 # (run every tick from combat_tick_all) regenerates energy and decays
 # cooldowns + buffs.
@@ -324,7 +340,11 @@ fn off_prep(s, owner, slot, cost, cd, vname): i64 {
     }
     var m = load64(s + SS_TARGET);
     if (m == 0) { session_appendtx_cstr(s, "You aren't fighting anything.\r\n"); return 0; }
-    if (mi_hp(m) <= 0) { store64(s + SS_TARGET, 0); session_appendtx_cstr(s, "Your target is already down.\r\n"); return 0; }
+    if (mi_hp(m) <= 0) {
+        store64(s + SS_TARGET, 0);
+        session_appendtx_cstr(s, "Your target is already down.\r\n");
+        return 0;
+    }
     if (mi_room(m) != load64(s + SS_ROOM)) { session_appendtx_cstr(s, "Your target isn't here.\r\n"); return 0; }
     var cda = s + SS_CD0 + slot * 8;
     if (load64(cda) > 0) {
@@ -403,7 +423,9 @@ fn cmd_ability(s, pa, verb): i64 {
         var m = off_prep(s, "pikeman", 0, 6, 2, "bash");
         if (m != 0) {
             mi_set_stun(m, 1);
-            ability_strike(s, m, roll(load64(s + SS_NDICE), load64(s + SS_DSIZE), load64(s + SS_DMOD)) + 2, "You smash your shock-pike into ");
+            var dmg = roll(load64(s + SS_NDICE), load64(s + SS_DSIZE),
+            load64(s + SS_DMOD)) + 2;
+            ability_strike(s, m, dmg, "You smash your shock-pike into ");
             session_appendtx_cstr(s, "It reels, stunned.\r\n");
         }
         return ability_tail(s);

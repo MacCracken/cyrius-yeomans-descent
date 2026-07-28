@@ -4,6 +4,147 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-07-28
+
+**Toolchain 6.3.32 → 6.4.83, libro 2.7.10 → 2.8.2, and a full `cyrius audit` sweep.**
+A maintenance release with no observable game-surface change — the frozen 1.0 surface
+([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)) holds. `main` did not build at the
+1.1.5 tag; it does now, and every audit gate is green for the first time.
+
+### Fixed
+
+- **CI never ran the tests.** The `Test` step was `cyrius test src/test.cyr`, and
+  `src/test.cyr` is a deliberate no-op stub (`fn main() { return 0; }`) that exists
+  only to satisfy `[build].test`. CI compiled the stub, exited 0, and printed no
+  assertions — **the 298-assertion suite has never executed in CI.** Every green run
+  before this one said nothing about the tests. The workaround it grew from was real
+  but long stale (at cyrius 6.0.1 the released toolchain couldn't discover
+  `tests/*.tcyr`); 6.4.72's corpus walker recurses `tests/`, and bare `cyrius test`
+  at the pinned 6.4.83 runs both the `.tcyr` corpus and `[build].test`. CI now runs
+  bare `cyrius test`, plus a new `cyrius audit` step.
+- **`player_exists()` was wrong on agnos** — `sys_stat` is one of the few stdlib
+  calls whose *arity* differs by target: agnos takes `(path, pathlen, statbuf)`
+  (counted paths, per its VFS), Linux/macOS take `(path, buf)`. descent used the
+  2-arg form unconditionally, so on agnos the statbuf pointer landed in the
+  `pathlen` slot and `statbuf` was garbage — and this is the branch that decides
+  whether a connecting name is a **returning player** (passphrase prompt) or a
+  **new** one (character creation). `cyrius build --agnos` had been warning
+  (`'sys_stat' expects 3 arguments, got 2`); the host build could not see it.
+  Now `#ifdef`-gated, and `--agnos` builds warning-free.
+- **`main` did not compile** — `error: refusing to emit binary with 1 reachable
+  undefined function(s): 'thread_local_alloc'`. cyrius 6.4.65 replaced hardcoded
+  thread-local slot indices with an allocator (`thread_local_alloc`), and the sibling
+  sigil checkout (3.12.1, reached through `path = "../libro"`) calls it — but the
+  committed `lib/thread_local.cyr` was still the 6.3.32 vintage that predates it.
+  Re-vendoring the stdlib at the new pin resolves it. Note this was a *hard error*,
+  not the old warn-and-emit-`ud2` behaviour: 6.4.x refuses to emit rather than
+  shipping a binary that SIGILLs on first call.
+- **`benches/bench_combat.bcyr` had stopped compiling** (`undefined variable
+  'DP_ROOMS'`). It includes `src/server.cyr`, whose boot path reads the data-path
+  globals that live in `src/persist.cyr`, but never included persist or the M6
+  crypto prelude. `cyrius bench` reported 2 passed / 1 failed. Now 3 passed, and the
+  M4-H gate is measured again: **p99 1427 µs** against the 50 ms drift budget.
+- **`version` reported the wrong version.** `VERSION_STRING` in `src/main.cyr` was
+  still `1.1.3` — it missed both the 1.1.4 and 1.1.5 bumps, so a released binary
+  identified itself as two releases old. The release checklist in `CLAUDE.md` now
+  names that line explicitly, next to `VERSION` and `cyrius.cyml`.
+- **Stale comment in `src/server.cyr`** claimed the `@`-admin namespace was
+  "unguarded for now". It has been gated behind `YD_ADMIN` (default off) since
+  0.9.1. Corrected, and both admin-gate comments now cross-reference roadmap M8.
+
+### Changed
+
+- **Dropped the monolithic `lib/sigil.cyr` include** (`src/main.cyr`,
+  `tests/cyrius-yeomans-descent.tcyr`). libro 2.8.0 thinned its sigil surface to
+  capability sub-bundles, so `[deps.libro]` now resolves `sigil-mldsa` (Ed25519) +
+  `sigil_sha256` + `sigil_sha_ni` + `sigil_hex` into `lib/` and cyrius auto-includes
+  them. Including the 1 MB monolith *on top* defined all of it a second time and
+  dragged in the x509/RSA bignum tables descent never touches. All six symbols the
+  server actually calls — `ed25519_{keypair,sign,verify}`, `sha256`,
+  `hex_{encode,decode_into}` — live in the thin bundles.
+  **Static data 13,405,408 B → 83,336 B (.bss); duplicate-symbol warnings 267 → 40**
+  (the remaining 40 were the `cyml`/`toml` carve-out below, which took it to 0).
+- **`cyml` / `toml` are no longer stdlib leaves** — 6.4.83 carved them into **bayan**
+  (the same carve that took `json`/`bigint` at 6.1.25) and ships no `cyml.cyr` /
+  `toml.cyr` at all. Listing them in `[deps] stdlib` only ever resolved because the
+  committed `lib/` still held pre-carve copies, which then redefined every
+  `cyml_*`/`toml_*` symbol on top of bayan's (40 more duplicate-symbol warnings) —
+  and "last definition wins" meant the zone and class loaders ran on whichever copy
+  the include order happened to pick.
+  `bayan` is now a direct `[deps] stdlib` entry (descent's own `world.cyr` and
+  `classes.cyr` call `cyml_*`, so it is a first-party need, not a libro side effect).
+- **Renamed the parser's `MAX_TOKENS` → `PA_MAX_TOKENS`.** The bare name collided
+  with patra's `enum TokLim { MAX_TOKENS = 128; }` (patra arrives transitively via
+  `[deps.libro]`); Cyrius resolves enum constants into one flat namespace, so the two
+  raced under "last definition wins". Same value (64), unambiguous symbol.
+- **Pruned 12 dead leaves from the committed `lib/`** — `cyml`, `toml`, `json`,
+  `bigint`, `base64`, `csv`, `u128`, `linalg`, `matrix`, `agnosys` (all carved out of
+  the 6.4.83 stdlib), plus `niyama` and `yantra` (never referenced by descent, and
+  stale at 1.0.5/1.0.0 against the pinned 1.0.6/1.0.1). Verified `cyrius deps` +
+  `build` + `test` are unaffected and every leaf descent and libro's sidecar require
+  is present in the pinned toolchain lib.
+- `[package].cyrius` `6.3.32` → **`6.4.83`**; `[deps.libro]` `2.7.10` → **`2.8.2`**
+  (pulls sigil **3.12.1**, patra **1.12.12**, sakshi, bayan transitively).
+  `cyrius lib sync --full` re-vendored the stdlib snapshot at the new pin.
+
+- **`programs/*.cyr` and the `.tcyr` suite carried the same include debt.** Both
+  smoke harnesses pulled the monolithic `lib/sigil.cyr` (13.4 MB static each), and
+  both they and the test suite included `session.cyr` without `server.cyr`, so every
+  run printed 12 `undefined function` warnings — noise that would bury a real one.
+  All three are now warning-free.
+
+### Added
+
+- **Doc comments on all 111 previously undocumented public functions** across
+  `src/` and `programs/` — the `docs` gate of `cyrius audit`.
+- **`signal_ignore(SIGPIPE)` at server startup** (hardening). `session_drain`
+  writes with a raw flagsless `sys_write`, and the default SIGPIPE disposition is
+  *terminate the process*, so a write landing on a peer that already sent RST would
+  take the whole server down with every connected player. `dispatch_session` calls
+  `flush_session` **before** its `EPOLLHUP`/`EPOLLERR` check, so that ordering is
+  genuinely reachable on paper. `signal_ignore` arrived in the stdlib at 6.4.51 and
+  is a no-op on agnos/Windows, so the call needs no target gate; with `SIG_IGN` the
+  write returns `-EPIPE`, which `session_drain` already routes down its existing
+  "real error → disconnect" path.
+  **Honest scope:** the window was *not* reproducible — 200 abrupt RST disconnects,
+  and 60 stalled peers RST while holding unsent tx, both left the server serving
+  (the epoll HUP path appears to reap sessions first in practice). This is defence
+  in depth against a latent hazard, not a fix for a demonstrated DoS.
+
+### Quality
+
+`cyrius audit` (the project sweep — fmt / lint / docs / tests / bench) now **exits 0**.
+Previously it failed four of five gates. Full gate at the 1.2.0 cut:
+
+| gate | result |
+|---|---|
+| `cyrius deps --verify` | 102 verified, 0 failed |
+| `cyrius build` (host) | OK, 0 warnings |
+| `cyrius build --agnos` | OK, 0 warnings |
+| `cyrius test` (bare, as CI now runs it) | 298 passed, 0 failed (+ 1) |
+| `cyrius bench` | 3 passed, 0 failed |
+| `cyrius fuzz` | 1 passed, 0 failed |
+| `cyrius audit` | exit 0 |
+
+- **fmt** — `#ifdef`/`#else`/`#endif` inside function bodies now indent to block
+  level in `session.cyr` / `server.cyr`; one hanging comment in `persist.cyr`
+  restructured; two continuation lines rewrapped.
+- **lint** — 14 over-length lines and 3 untracked deferrals cleared. Note the gate
+  counts **bytes**: the `# ─────` section rules were 209 B each (`─` is 3 bytes), not
+  the 69 columns they look like.
+- **tests** — 298 assertions pass; `cyrius test src/test.cyr` exits 0.
+- **bench** — 3 passed, 0 failed (was 2/1).
+
+### Known / upstream
+
+- `cyrius build` still warns that `./lib/` shadows the pinned toolchain lib for
+  **sakshi 2.4.3 (pinned: 2.4.6)**. sigil 3.12.1 pins sakshi 2.4.3 in its own
+  manifest, so `cyrius deps` writes 2.4.3 over the synced 2.4.6. Not resolvable from
+  descent — it needs a sigil-side bump. No functional impact observed.
+- Two toolchain quirks worked around rather than fixed here: `cyrius fmt -w` does not
+  write (capture `cyrius fmt <file>` stdout instead), and `cyrius lib sync --full`
+  reports a full 99-file snapshot while skipping `niyama.cyr` / `yantra.cyr`.
+
 ## [1.1.5] — 2026-07-02
 
 **agnos server startup fixed — freelist agnos mmap (cyrius 6.3.32) + libro 2.7.10.** Re-synced the

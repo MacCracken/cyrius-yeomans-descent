@@ -3,9 +3,56 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-06-10 (v1.0.1)
+> **Last refresh**: 2026-07-28 (v1.2.0)
+>
+> Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
+> releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
+> below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
+> tests, boot guide) describes the **current** 1.2.0 tree.
 
 ## Version
+
+**1.2.0** — toolchain + dep upgrade and the first clean audit, 2026-07-28. Cyrius
+`6.3.32` → **`6.4.83`**, libro `2.7.10` → **`2.8.2`** (sigil **3.12.1**, patra
+**1.12.12**, sakshi, bayan transitively). No observable game-surface change — the
+frozen 1.0 surface ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) holds.
+
+`main` **did not build** at the 1.1.5 tag: cyrius 6.4.65 replaced hardcoded
+thread-local slot indices with a `thread_local_alloc()` allocator, sigil 3.12.1
+calls it, and the committed `lib/thread_local.cyr` predated it — and 6.4.x
+*refuses to emit* on a reachable undefined function rather than emitting `ud2`.
+Re-vendoring at the new pin fixed it.
+
+Three further defects the upgrade exposed, all now fixed:
+
+- descent included the **monolithic `lib/sigil.cyr`** on top of the thin
+  capability sub-bundles libro 2.8.0 resolves — redefining every symbol and
+  dragging in unused x509/RSA bignum tables. **Static data 13.4 MB → 83 KB
+  (.bss), duplicate-symbol warnings 267 → 0.**
+- `cyml`/`toml` **left the stdlib** (carved into bayan); the stale committed
+  copies shadowed bayan's, so the zone/class loaders ran on whichever
+  `cyml_parse` the include order picked. `bayan` is now a direct dep.
+- the parser's `MAX_TOKENS` **collided** with patra's `MAX_TOKENS = 128` in
+  Cyrius's flat enum namespace → renamed `PA_MAX_TOKENS`.
+
+Two more defects the audit turned up, both independent of the upgrade:
+
+- **CI never ran the tests.** The step was `cyrius test src/test.cyr`, and
+  `src/test.cyr` is a no-op stub — CI compiled it, exited 0, and the
+  298-assertion suite never executed. Fixed to bare `cyrius test` (+ an
+  `cyrius audit` step). Every green CI run before 1.2.0 was silent about tests.
+- **`player_exists()` was wrong on agnos** — `sys_stat`'s *arity* differs by
+  target (agnos `(path, pathlen, statbuf)` vs `(path, buf)`), so the statbuf
+  pointer landed in `pathlen`. That branch decides returning-player vs.
+  character-creation. `--agnos` had been warning; the host build could not see it.
+
+Also: `benches/bench_combat.bcyr` had stopped compiling (missing the persist
+prelude → `undefined variable 'DP_ROOMS'`); `VERSION_STRING` had silently drifted
+to `1.1.3`, two releases behind; `signal_ignore(SIGPIPE)` added as hardening (see
+the CHANGELOG for its honest, unreproduced scope); 12 dead leaves pruned from the
+committed `lib/`. **`cyrius audit` now exits 0** — 298 tests, 3/3 benches, fmt +
+lint + docs clean (111 public fns documented), host and agnos both building
+warning-free. See [CHANGELOG 1.2.0](../../CHANGELOG.md).
 
 **1.0.1** — gateway-verified maintenance, 2026-06-10. No observable change from
 1.0.0 — the frozen 1.0 surface ([ADR 0007](../adr/0007-frozen-1.0-surface.md))
@@ -109,7 +156,19 @@ persistence (M6) is next.**
 
 ## Toolchain
 
-- **Cyrius pin**: `6.1.23` (`cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.4.83` (`cyrius.cyml [package].cyrius`)
+
+Two toolchain quirks at 6.4.83, worked around rather than fixed here:
+
+- `cyrius fmt -w <file>` does **not** write. Capture `cyrius fmt <file>` on stdout
+  instead. Flag order also differs per tool: `cyrius fmt <file> --check`, but
+  `cyrius doc --check <file>` — and `doc` writes its findings to **stderr**.
+- `cyrius lib sync --full` reports a full 99-file snapshot while leaving
+  `niyama.cyr` / `yantra.cyr` untouched. Moot here (both pruned as unused).
+
+`cyrius audit` at 6.4.x is the **project sweep** (fmt / lint / docs / tests /
+bench over `src` + `programs`). `cyrius audit --internal` is the different,
+cyrius-internal self-host gate — do not run it in this repo.
 
 ## Source layout
 
@@ -182,7 +241,11 @@ benches/
                                p99 < 50 ms); `cyrius bench` runs benches/
 ```
 
-Binary at `build/cyrius-yeomans-descent` (~229 KB with `CYRIUS_DCE=1`).
+Binary at `build/cyrius-yeomans-descent` — 839,816 B at 1.2.0 (753,664 text /
+83,304 `.bss`). `CYRIUS_DCE=1` now makes no difference to the output size; with
+the monolithic sigil bundle gone there is nothing large left for it to strip.
+The `.bss` figure is the one to watch: it was **13,405,408 B** before 1.2.0
+dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Design
 
@@ -244,8 +307,12 @@ Benchmark: `cyrius bench` →
 - `bench_telnet` — telnet_feed ≈ 6 ns/byte (mixed), ≈ 5 ns/byte (pure
   data), 16 M iterations, stable since 0.2.0
 - `bench_combat` (M4-H) — 32 players × 64 mobs through 120 real ticks,
-  now including per-tick `classes_upkeep`; **p99 ≈ 57 µs** against the
-  50 ms drift budget. Combat is O(engaged combatants) per tick.
+  including per-tick `classes_upkeep`; **p99 ≈ 1427 µs** (max 1513 µs) against
+  the 50 ms drift budget. Combat is O(engaged combatants) per tick.
+  This bench had **stopped compiling** before 1.2.0 (it included `server.cyr`
+  without the persist prelude → `undefined variable 'DP_ROOMS'`), so the older
+  ≈57 µs figure in the 1.0.x notes is not comparable — it predates both the
+  persist-inclusive compilation unit and the 6.4.83 codegen.
 - (parser / world p99 baselines land at M9-C.)
 
 `cyrius test src/test.cyr` exits 0 (CI uses this explicit form — see
@@ -255,8 +322,37 @@ Benchmark: `cyrius bench` →
 
 Direct (declared in `cyrius.cyml`):
 
-- **stdlib** — string, fmt, alloc, io, vec, str, slice, syscalls, assert, bench, args, net, chrono, result, tagged, fnptr, freelist, cyml, toml, **fs, process, hashmap, json, bigint, ct, keccak, thread, thread_local, random** (M6 chain — see below)
-- **libro** `2.7.1` (git, `path = "../libro"`) — append-only SHA-256 hash-chain store (the crash-safe primitive behind "T.Ron" persistence). Pulls **sigil 3.6.0** (Ed25519, ADR 0004 identity) + **sakshi 2.2.4** + **patra 1.10.3** + **agnosys 1.3.2** transitively. Resolved by `cyrius deps` into `lib/` (+ `cyrius.lock`).
+- **stdlib** — `std` (the built-in default group: string, fmt, alloc, io, vec, str,
+  syscalls) + assert, bench, args, net, chrono, result, tagged, fnptr, freelist,
+  **bayan**. The M6 crypto/store leaves (fs, process, hashmap, slice, ct, keccak,
+  thread, thread_local, random, sakshi, chrono, tagged) are **not** hand-listed —
+  libro's `dist/libro.deps` sidecar declares them and `cyrius deps` auto-resolves
+  them in topological order, fail-loud on a missing one.
+- **libro** `2.8.2` (git, `path = "../libro"`) — append-only SHA-256 hash-chain
+  store (the crash-safe primitive behind "T.Ron" persistence). Pulls **sigil
+  3.12.1** (Ed25519, ADR 0004 identity) + **patra 1.12.12** + **sakshi** + **bayan**
+  transitively. Resolved by `cyrius deps` into `lib/` (+ `cyrius.lock`).
+
+**bayan is a direct dep as of 1.2.0.** 6.4.83 carved `cyml`/`toml` (and earlier
+`json`/`bigint`) out of the stdlib into bayan, and descent's own `world.cyr` /
+`classes.cyr` call `cyml_*` — so it is a first-party need, not a libro side effect.
+
+**sigil is included via libro's thin sub-bundles, never the monolith.** libro 2.8.0
+resolves `dist/sigil-mldsa.cyr` (Ed25519) + `src/sha256.cyr` + `src/sha_ni.cyr` +
+`src/hex.cyr` into `lib/`, and cyrius auto-includes them. descent's entire sigil
+surface is `ed25519_{keypair,sign,verify}`, `sha256`, `hex_{encode,decode_into}` —
+all six are in those bundles. Do **not** add `include "lib/sigil.cyr"` back: it
+redefines all of them and costs ~13 MB of `.bss` in x509/RSA tables nothing calls.
+
+`lib/` stays **committed** (the release tarball ships a minimal stdlib), but only
+the leaves descent actually resolves. 1.2.0 pruned 12 dead ones — `cyml`, `toml`,
+`json`, `bigint`, `base64`, `csv`, `u128`, `linalg`, `matrix`, `agnosys` (carved out
+of 6.4.83) plus `niyama`, `yantra` (never referenced).
+
+**Known upstream gap**: `cyrius build` warns that `./lib/` shadows the pinned
+toolchain lib for **sakshi 2.4.3 (pinned 2.4.6)** — sigil 3.12.1 pins 2.4.3 in its
+own manifest, so `cyrius deps` writes it over the synced 2.4.6. Needs a sigil-side
+bump; no functional impact observed.
 
 **M6 complete (0.7.0, 2026-06-09).** Full persistence shipped — see the Version
 section above and `src/persist.cyr`. The dep-landing (M6-A) lesson is preserved
@@ -267,9 +363,19 @@ including `dist/sigil.cyr` without listing the modules its crypto calls
 (`ct`/`keccak`/`thread`/`thread_local`/`random`) left those symbols
 undefined — cyrius 6.1.x only *warns* and emits a `ud2`, so it built then
 SIGILL'd (exit 132) the instant `sha256`/`ed25519` ran. Sigil 3.7.8's
-CHANGELOG diagnosed it against this repo; the fix is the opt-in list now in
-`cyrius.cyml [deps] stdlib`. (Joshua/M8 is now deferred to post-1.0 — see the
-boot guide below.)
+CHANGELOG diagnosed it against this repo. (Joshua/M8 is now deferred to
+post-1.0 — see the boot guide below.)
+
+**Two things about that lesson have since changed** (both landed by 1.2.0):
+
+1. The hand-maintained opt-in list is gone. libro's `dist/libro.deps` sidecar
+   declares the leaves its fold needs and `cyrius deps` resolves them
+   topologically, fail-loud. `[deps] stdlib` carries only descent's *own* direct
+   surface. Don't re-add the crypto/store leaves by hand.
+2. **The failure mode is no longer silent.** As of 6.4.x cyrius *refuses to emit
+   a binary* with a reachable undefined function instead of emitting `ud2` and
+   letting it SIGILL at runtime. The trap that cost M6 a milestone is now a
+   build error — which is exactly how 1.2.0 caught `thread_local_alloc`.
 
 ## Consumers
 
@@ -277,29 +383,51 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** 0.9.1 (surface freeze) closed. Next slot is **1.0.0 —
-clean release**. **M8 (Joshua) is deferred to post-1.0.** Pick up per the boot
-guide below.
+**No active cycle.** 1.2.0 (toolchain + dep upgrade, first clean audit) closed.
+The tree builds, `cyrius audit` exits 0, and 298 tests + 3 benches pass.
+**M8 (Joshua) remains the next feature milestone**, deferred to post-1.0.
+Pick up per the boot guide below.
+
+Carried forward from 1.2.0 (none block a release):
+
+- **sakshi shadow warning** — sigil 3.12.1 pins sakshi 2.4.3 while the 6.4.83
+  toolchain bundles 2.4.6. Fix is a sigil-side bump; nothing to do here. This is
+  the only warning `cyrius build` still emits.
+- **aarch64 epoll layout** — `src/server.cyr` hardcodes the x86 *packed*
+  `epoll_event` (`EPOLL_EVENT_SIZE = 12`, data at +4). aarch64 Linux uses the
+  unpacked 16-byte layout with data at +8. Not hit today (descent is built and run
+  x86_64/agnos), but it will corrupt the session pointer the first time someone
+  builds `--aarch64` and runs it. Worth an `#ifdef` before any ARM target lands.
+- **`cyrius audit` is now a CI step.** If it starts failing on a style gate rather
+  than a real defect, fix the code — don't drop the step; it is the only thing
+  gating fmt / lint / docs.
 
 ---
 
 ## Next-agent boot guide
 
-You are picking up at **1.0.0 — clean release**: a *stabilisation-only* release.
-No new verbs / save fields / zone fields / env knobs — the surface is frozen
-([ADR 0007](../adr/0007-frozen-1.0-surface.md)). The job is to prove the game is
-sound end-to-end and sign it off. Anything that changes observable behaviour
-belongs after 1.0.
+1.0.0 shipped, and 1.1.x / 1.2.0 have been maintenance releases on top of it. The
+surface is still frozen ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new
+verbs / save fields / zone fields / env knobs — so **M8 (Joshua) is the next real
+milestone**, and it is the thing that earns the right to extend the surface.
 
-### What 1.0.0 is (and isn't)
+### Before you touch anything
 
-- **Is**: a final adversarial/security pass, a full playtest, doc/CHANGELOG
-  polish, and the version bump. Allowed code changes are bug/security fixes that
-  don't change the frozen surface.
-- **Isn't**: features. M8 (Joshua operator interface) and any new content/verbs
-  are post-1.0.
+```sh
+cyrius deps && cyrius build src/main.cyr build/cyrius-yeomans-descent && cyrius audit
+```
 
-### 1.0.0 checklist
+`cyrius audit` exits 0 as of 1.2.0. If it doesn't, you have inherited a
+regression — fix that before starting new work. Two traps that bit 1.2.0 and will
+bite again:
+
+- **The dep chain is opt-in and order-sensitive.** A missing leaf used to build
+  fine and SIGILL at runtime; at 6.4.x it is a hard `refusing to emit binary`
+  error instead. Read libro's `DEPS-PATTERN.md` and its `dist/libro.deps` sidecar
+  before changing `[deps]`.
+- **Never re-add `include "lib/sigil.cyr"`.** See the Dependencies section.
+
+### The old 1.0.0 checklist (kept — it is still the release drill)
 
 1. **Adversarial pass** (extends the 0.9.0 sweep): long/binary inputs at every
    prompt; out-of-range / missing / duplicated save fields; truncated and

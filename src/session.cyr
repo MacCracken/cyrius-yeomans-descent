@@ -81,9 +81,10 @@ var g_epfd = 0;
 
 # 0.9.1 surface freeze — the @-admin namespace (@stats/@who/@reset) is gated
 # behind YD_ADMIN (default off): unguarded admin verbs are a production-surface
-# concern, and full operator auth is deferred to M8. cmd_serve sets this from
-# the env at startup. Declared here (ahead of server.cyr) so cmd_on_line /
-# cmd_help_text can read it.
+# concern. Full operator auth (which replaces this env gate) is tracked as
+# [roadmap M8](../docs/development/roadmap.md#m8--joshua-management-interface-deferred--post-10).
+# cmd_serve sets this from the env at startup. Declared here (ahead of
+# server.cyr) so cmd_on_line / cmd_help_text can read it.
 var g_admin_enabled = 0;
 
 # Starting combatant profile (a scavenged sidearm). Replaced by class +
@@ -199,6 +200,9 @@ fn session_echo_off(s): i64 {
     store8(&b + 0, IAC); store8(&b + 1, WILL); store8(&b + 2, OPT_ECHO);
     return session_appendtx(s, &b, 3);
 }
+# Hand echo back (WONT ECHO) once passphrase entry is over. Our option state is
+# forced to Q_NO before the salvo so a straggling DO ECHO can't be mistaken for
+# an ack of the WILL from session_echo_off. SS_TS == 0 in bare test sessions.
 fn session_echo_on(s): i64 {
     var ts = load64(s + SS_TS);
     if (ts != 0) { opt_set_us(ts, OPT_ECHO, Q_NO); }   # back to client-echo line mode
@@ -300,6 +304,9 @@ fn session_drain(s): i64 {
 # but NOT authenticated — real identity / auth lands at M6 (ADR 0004).
 # Reserved handles and ill-formed names are refused with a re-prompt.
 
+# ASCII-only case fold: 'A'-'Z' shift by 32, every other byte passes through
+# unchanged, so high-bit bytes survive a fold intact. No ctype table, no locale —
+# names and keywords are compared byte-wise on the wire.
 fn ascii_lower(c): i64 {
     if (c >= 65) { if (c <= 90) { return c + 32; } }
     return c;
@@ -318,11 +325,13 @@ fn name_eq_ci(buf, len, lit): i64 {
     return 1;
 }
 
+# ASCII letter test — the class login_name_ok demands of a name's first byte.
 fn is_alpha(c): i64 {
     if (c >= 65)  { if (c <= 90)  { return 1; } }
     if (c >= 97)  { if (c <= 122) { return 1; } }
     return 0;
 }
+# ASCII letter or digit — the whole alphabet a player name may draw from.
 fn is_alnum(c): i64 {
     if (is_alpha(c) == 1) { return 1; }
     if (c >= 48) { if (c <= 57) { return 1; } }
@@ -348,6 +357,10 @@ fn login_name_ok(buf, len): i64 {
     return 1;
 }
 
+# The pre-login banner, queued once per connection ahead of the name prompt.
+# Plain ASCII + CR LF on purpose: telnet_announce deliberately sends no option
+# salvo, so this lands on a stock cooked-line-mode client with nothing
+# negotiated — no SGA, no ECHO, and no reason to assume a capable terminal.
 fn session_send_motd(s): i64 {
     session_appendtx_cstr(s, "\r\n");
     session_appendtx_cstr(s, "  ============================================\r\n");
@@ -357,10 +370,15 @@ fn session_send_motd(s): i64 {
     session_appendtx_cstr(s, "\r\n");
     return 0;
 }
+# Name prompt. No trailing CR LF — the client types on the prompt line. Re-sent
+# verbatim by login_on_name after a refused name, so it must stay idempotent.
 fn session_send_name_prompt(s): i64 {
     session_appendtx_cstr(s, "By what name are you known? ");
     return 0;
 }
+# The in-world prompt. cmd_on_line re-sends it after each command, but only
+# while the phase is still PHASE_CMD — a verb that switches phase (passwd) has
+# already queued its own prompt, and a second one would double up.
 fn session_send_cmd_prompt(s): i64 {
     session_appendtx_cstr(s, "> ");
     return 0;
@@ -549,9 +567,13 @@ fn cmd_help_text(s): i64 {
 # the "Own the Stack" principle. `\x1b` is a one-byte ESC in Cyrius
 # strings, so the codes embed directly in cstr literals.
 fn ansi_reset(): i64 { return "\x1b[0m"; }      # clear all attributes
+# Room titles. Pair with ansi_reset() — a raw SGR run bleeds until cleared.
 fn ansi_title(): i64 { return "\x1b[1;33m"; }   # bold yellow — room title
+# The exits line; session_append_exits wraps label and dir words in one span.
 fn ansi_exits(): i64 { return "\x1b[36m"; }     # cyan — exits line
+# Player names — one colour for anything human, in room lists and examine.
 fn ansi_actor(): i64 { return "\x1b[1;32m"; }   # bold green — players
+# Hostile mobs; deliberately not ansi_actor so a mob never reads as a player.
 fn ansi_mob(): i64   { return "\x1b[31m"; }     # red — hostiles
 
 # List the mobs present in room `room` (one per line, red). The mob.cyr
@@ -746,6 +768,10 @@ fn cmd_examine(s, pa): i64 {
     return 0;
 }
 
+# `examine me` / `examine self` — identity, vitals, attributes. The AC printed
+# here is the base score: brace / bypass are applied at roll time by combat.cyr's
+# player_eff_ac, so an active guard moves the swing, not this number. (stim
+# rides on hit / damage instead, so it never shows up in this block at all.)
 fn examine_self(s): i64 {
     session_appendtx_cstr(s, "You are ");
     session_appendtx_cstr(s, ansi_actor());
@@ -1012,7 +1038,7 @@ fn session_on_readable(s, now_ms): i64 {
     var fd = load64(s + SS_FD);
     var done = 0;
     var alive = 1;
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     # agnos: sys_read on a socket fd is the BLOCKING recv adapter, which would
     # park the single-threaded poll loop on an idle session. Use the NON-BLOCKING
     # sock_recv #49 directly (tagged fd → conn_id). Return sense is INVERTED from
@@ -1026,13 +1052,13 @@ fn session_on_readable(s, now_ms): i64 {
         if (n < 0) { alive = 0; done = 1; continue; }   # EOF / error — drop
         len = len + n;
     }
-#else
+    #else
     while (done == 0) {
         var room = RX_CAP - len;
         if (room <= 0) { done = 1; continue; }
         var n = sys_read(fd, rx + len, room);
         if (n < 0) {
-            # EAGAIN → drained for now. Anything else → real error.
+            # EAGAIN → the socket is drained. Anything else → real error.
             if (n != 0 - 11) { alive = 0; }
             done = 1;
             continue;
@@ -1045,7 +1071,7 @@ fn session_on_readable(s, now_ms): i64 {
         }
         len = len + n;
     }
-#endif
+    #endif
     store64(s + SS_RX_LEN, len);
     if (len > 0) { store64(s + SS_LAST_MS, now_ms); }
     session_consume_rx(s);

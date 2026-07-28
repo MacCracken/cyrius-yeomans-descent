@@ -10,10 +10,23 @@
 #
 # Scratch validation — not wired into [build]. Delete once M6-A is signed off.
 
+# thread/thread_local before the crypto: sigil banks the SHA message schedule
+# per-thread via cbank(). sigil itself is NOT included — [deps.libro] resolves
+# the thin sub-bundles and cyrius auto-includes them; the monolith would
+# redefine every symbol and add ~13 MB of .bss (see src/main.cyr).
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
 include "lib/sakshi.cyr"   # tracing — sigil/libro both call sakshi_*
-include "lib/sigil.cyr"    # Ed25519 + SHA-256 (banking path, cbank/thread_local)
 include "lib/libro.cyr"    # hash-chain store (entry hashing uses sigil sha256)
 
+# Checks climb the stack — sha256, then ed25519 (an independent sigil
+# primitive: keygen and sign hash with sha512, not the sha256 above), then
+# a libro chain, whose entry hashing routes back down into sigil's sha256.
+# The unsigned chain_append/chain_verify path exercises that hash only, no
+# ed25519. Ordered so the first failure names the lowest layer that broke;
+# distinct exit codes (1/2/3) separate a wrong answer from a SIGILL, which
+# kills the process before its stage's println and is the signature of a
+# missing stdlib opt-in.
 fn main(): i64 {
     alloc_init();
 

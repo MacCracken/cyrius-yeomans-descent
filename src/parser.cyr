@@ -17,7 +17,7 @@
 #   M2-E — qualifiers (all.X / X.N)
 #   M2-F — fuzz harness
 #
-# ─────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────
 # M2-A — Tokenizer
 #
 # Splits the line on ASCII whitespace (space / tab) into a token vector.
@@ -34,8 +34,8 @@
 enum PA {
     PA_NORM_BUF = 0;     # ptr to packed lowercased token bytes (NORM_CAP)
     PA_NORM_LEN = 8;     # bytes used in norm buffer this parse
-    PA_OFF_BUF  = 16;    # ptr to MAX_TOKENS token offsets (into norm buf)
-    PA_LEN_BUF  = 24;    # ptr to MAX_TOKENS token lengths
+    PA_OFF_BUF  = 16;    # ptr to PA_MAX_TOKENS token offsets (into norm buf)
+    PA_LEN_BUF  = 24;    # ptr to PA_MAX_TOKENS token lengths
     PA_COUNT    = 32;    # number of tokens emitted this parse
 
     # Parse-result fields, filled by parser_parse (M2-D). Token indices
@@ -49,13 +49,19 @@ enum PA {
 }
 
 # Caps. NORM_CAP matches the session LINE_CAP (one full line in, at most
-# one full line of token bytes out). MAX_TOKENS bounds a pathological
+# one full line of token bytes out). PA_MAX_TOKENS bounds a pathological
 # all-single-char line — 64 tokens is far past any real command shape;
 # tokens past the cap are dropped (the trailing words of an absurd line
 # carry no command meaning).
+#
+# `PA_`-prefixed because the bare name `MAX_TOKENS` collides with patra's
+# `enum TokLim { MAX_TOKENS = 128; }` (patra arrives transitively through
+# [deps.libro]). Cyrius resolves enum constants into one flat namespace, so
+# the two definitions raced under "last definition wins" — the loser silently
+# got the other module's cap. Same value, unambiguous symbol.
 enum PaCap {
     NORM_CAP   = 4096;
-    MAX_TOKENS = 64;
+    PA_MAX_TOKENS = 64;
 }
 
 # ASCII bytes the tokenizer treats as token delimiters.
@@ -72,8 +78,8 @@ enum PaByte {
 fn parser_new(): i64 {
     var pa = fl_alloc(PA_SIZE);
     var nb = fl_alloc(NORM_CAP);
-    var ob = fl_alloc(MAX_TOKENS * 8);
-    var lb = fl_alloc(MAX_TOKENS * 8);
+    var ob = fl_alloc(PA_MAX_TOKENS * 8);
+    var lb = fl_alloc(PA_MAX_TOKENS * 8);
     memset(pa, 0, PA_SIZE);
     store64(pa + PA_NORM_BUF, nb);
     store64(pa + PA_OFF_BUF, ob);
@@ -169,7 +175,7 @@ fn parser_tokenize(pa, buf, len): i64 {
         var c = load8(buf + i) & 0xFF;
         # Skip any run of delimiters between tokens.
         if (pa_is_delim(c) == 1) { i = i + 1; continue; }
-        if (count >= MAX_TOKENS) { i = len; continue; }   # token cap reached
+        if (count >= PA_MAX_TOKENS) { i = len; continue; }   # token cap reached
 
         # Start a token. Record its offset = current norm-buffer cursor.
         var tok_start = load64(pa + PA_NORM_LEN);
@@ -202,7 +208,7 @@ fn parser_tokenize(pa, buf, len): i64 {
     return count;
 }
 
-# ─────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────
 # M2-B — Verb table + aliases
 #
 # The canonical v1.0 verb set. The first token of a command line resolves
@@ -391,7 +397,7 @@ fn verb_is_movement(v): i64 {
     return 0;
 }
 
-# ─────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────
 # M2-C — Direct-object resolution
 #
 # Resolve a typed noun against a *scope* — the set of entities currently
@@ -496,7 +502,7 @@ fn resolve_tok(pa, i, names, n): i64 {
     return resolve_noun(tok_ptr(pa, i), tok_len(pa, i), names, n);
 }
 
-# ─────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────
 # M2-D — Preposition / indirect-object resolution
 #
 # A two-object command is `verb <dobj> <prep> <iobj>`:
@@ -585,13 +591,18 @@ fn parser_parse(pa, buf, len): i64 {
 
 # === Parse-result accessors ===
 fn parsed_verb(pa): i64 { return load64(pa + PA_VERB); }
+# The first preposition after the verb — the one that split the phrase, not the last.
 fn parsed_prep(pa): i64 { return load64(pa + PA_PREP); }
+# Token index of the direct-object head noun — feed it to resolve_tok, not a scope index.
 fn parsed_dobj(pa): i64 { return load64(pa + PA_DOBJ_I); }   # token idx or -1
+# Token index of the indirect-object head noun; only ever set when a preposition parsed.
 fn parsed_iobj(pa): i64 { return load64(pa + PA_IOBJ_I); }   # token idx or -1
+# Sign test on the dobj slot, so callers branch on shape without knowing the -1 sentinel.
 fn parsed_has_dobj(pa): i64 { if (load64(pa + PA_DOBJ_I) >= 0) { return 1; } return 0; }
+# Same for iobj — still 0 for a trailing preposition ("put rations in"), which has no noun.
 fn parsed_has_iobj(pa): i64 { if (load64(pa + PA_IOBJ_I) >= 0) { return 1; } return 0; }
 
-# ─────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────
 # M2-E — Qualifiers (all.X / X.N)
 #
 # A noun token can carry a leading count qualifier separated by a dot:
