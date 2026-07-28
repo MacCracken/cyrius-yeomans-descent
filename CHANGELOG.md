@@ -4,6 +4,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-07-28
+
+**M12 — instance lifecycle.** Nothing the world created was ever reclaimed. Mob,
+object and corpse instances all came from `alloc()`, and **`alloc()` has no
+`free()`** — it is a bump allocator, so every kill and every zone reset leaked
+for the process lifetime. Corpses compounded it: they were never removed from a
+room at all, so rooms filled with the dead and their loot stayed live forever.
+On a long-lived server — descent's entire deployment shape — that is unbounded.
+
+The fix is not "add a free call": it is moving instances off the bump allocator
+onto the freelist, which is the only reclaiming allocator available
+(`fl_alloc`/`fl_free`).
+
+### Fixed
+
+- **Mob, object and corpse instances now come from `fl_alloc`** and are returned
+  with `fl_free`. `fl_alloc` **reuses freed blocks without zeroing**, unlike the
+  fresh pages the bump allocator handed out, so `mob_spawn` now `memset`s — the
+  old code leaned on that zeroing without saying so.
+- **Corpse decay** — a per-tick sweep ages corpses and reclaims them, along with
+  whatever loot is still inside. `CORPSE_TICKS = 120` is 5 minutes at the
+  standard 2.5 s cadence: long enough to walk back and loot, well inside the
+  15-minute zone reset. Hardcoded deliberately — [ADR 0007](docs/adr/0007-frozen-1.0-surface.md)
+  §6 freezes the `YD_*` knob names for all of 1.x, so a `YD_CORPSE_TICKS` would
+  be a frozen-surface change and belongs to 2.0.
+- **Every session reference to a dying mob is now cleared**, not just the
+  killer's. `mob_died` cleared only the killing session's `SS_TARGET`, so a
+  second attacker kept a pointer across ticks. That was inert *precisely
+  because* nothing was reclaimed — `combat_round`'s `mi_hp(m) <= 0` guard read
+  the dead instance and disengaged. The first free turns it into a
+  use-after-free, and `fl_free` returns the block to a size class the very next
+  `mob_spawn` re-issues, so the stale pointer would resolve to a **live,
+  different mob** rather than obviously-dead memory. This had to land before any
+  free, and did.
+
+**Behaviour change:** corpses now disappear after ~5 minutes, taking un-looted
+contents with them. Not a frozen-surface item (ADR 0007 enumerates no corpse
+lifetime), and the alternative is a server that grows without bound.
+
+### Added
+
+- **`g_mob_live` / `g_obj_live`** — live-instance counters, incremented at each
+  mint site and decremented at each free. `lib/freelist.cyr` exposes no
+  occupancy accessor and CLAUDE.md forbids modifying `lib/`, so there was no
+  other way to assert the invariant. `@stats` is the natural place to surface
+  them once the operator channel lands.
+- **`lifecycle` test group** — 13 assertions (333 → 346), including a
+  spawn/kill/decay soak that requires both counters to return to baseline.
+  Mutation-verified: restoring the mob leak fails 2, stopping `obj_free` from
+  recursing into contents fails 2, and reverting the reference sweep fails 2.
+  One of those asserts the rule explicitly — `ilist_remove` is the **move**
+  primitive (`cmd_get` is remove-then-push), so freeing there would destroy
+  every `get`.
+
+**Tick budget:** `bench_combat` p99 **1422 µs**, against 1427 µs before the
+sweep and a 50 ms budget — the per-tick cost is not measurable at Hub scale.
+Re-measure if the world grows past a few hundred objects.
+
 ## [1.3.0] — 2026-07-28
 
 ### Fixed — M10, wire-safe prose (1.3.0)

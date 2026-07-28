@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-28 (v1.3.0 — M10 wire-safe prose + M11 migration-gate repair)
+> **Last Updated**: 2026-07-28 (v1.4.0 — M12 instance lifecycle)
 >
 > Milestone plan through v1.0 (shipped) and on to v2.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
@@ -42,7 +42,7 @@ MUD rather than a well-built room-crawler.
 | Tag | Theme | Status |
 |---|---|---|
 | **1.3.0** | M10 — wire-safe prose · M11 — migration-gate repair | ✅ 2026-07-28 |
-| **1.4.0** | M12 — instance lifecycle: free the leaks, decay the corpses | planned |
+| **1.4.0** | M12 — instance lifecycle: free the leaks, decay the corpses | ✅ 2026-07-28 |
 | **1.5.0** | M13 — the actor tick: mobs get agency | planned |
 | **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
 | **2.1.0** | M17 — equipment slots + item modifiers · M18 — operator identity + control channel | planned |
@@ -62,7 +62,9 @@ embarrassing the release.
 
 **1.3.0 shipped** — M10 (wire-safe prose) and M11 (migration-gate repair), 333 assertions (was 298). M10 fixed a live cross-player defect: a bare Telnet IAC in a `say` reached every listener's protocol stream unescaped, verified end-to-end with two real clients before and after. M11 repaired the four latent defects in the save migration gate that would otherwise have shipped *with* the 2.0 schema bump they protect.
 
-**Next is 1.4.0 — M12 (instance lifecycle).** Nothing the world creates is ever reclaimed: mob and object instances come from `alloc` and are only unlinked, and corpses are never removed from a room at all. It blocks M13, M15, M17 and M20, and it carries a trap — `mob_died` clears only the killing session's `SS_TARGET`, so the first free turns a second attacker's stale pointer into a use-after-free. Pickup pointer in [`state.md`](state.md).
+**1.4.0 shipped** — M12 (instance lifecycle), 346 assertions. The milestone under-stated the problem: `alloc()` has no `free()` at all, so instances had to *move* to the freelist rather than simply gain a reclaim path. Corpses now decay after 120 ticks (~5 min), taking un-looted contents with them. The use-after-free trap was real and landed first: every session reference to a dying mob is cleared, not just the killer's. `bench_combat` p99 1422 µs, unmoved by the new per-tick sweep.
+
+**Next is 1.5.0 — M13 (the actor tick).** Mobs stand still until hit; give them wander, assist and flee-at-low-health. Thresholds stay hardcoded — an authored `morale` key would be a `kind = "mob"` field and therefore frozen surface, so that belongs to M19. Watch the interaction with `maybe_zone_reset`'s presence gate: wandering mobs change what "the zone is empty" means. Every sub-bite is paid out of the 50 ms tick budget — re-run `bench_combat` per bite. Pickup pointer in [`state.md`](state.md).
 
 ---
 
@@ -435,9 +437,14 @@ exactly why it must not be folded into the bump it protects.
 
 **Gate:** a record with no `schema` key loads through the v1 path under a schema-2 ceiling; a `schema = 3` record disconnects with the "newer server" message and writes no tamper audit entry; an over-long record fails the write instead of overflowing.
 
-### M12 — Instance lifecycle (v1.4.0)
+### M12 — Instance lifecycle (v1.4.0) ✅
 
-**Line:** 1.x · **Blocks:** M13, M15, M17, M20
+**Line:** 1.x · **Blocks:** M13, M15, M17, M20 · **Status:** shipped
+
+The milestone under-stated the problem: `alloc()` has no `free()` at all, so this
+was not "add a reclaim path" but "move instances onto the freelist", the only
+reclaiming allocator available. `fl_alloc` reuses blocks **without zeroing**,
+which the old bump-allocated code silently depended on — `mob_spawn` now memsets.
 
 Nothing the world creates is ever reclaimed. Mob instances come from
 `alloc(MI_SIZE)` and `mob_remove` only unlinks them; object and corpse instances

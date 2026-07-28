@@ -37,7 +37,8 @@ enum OI {
     OI_DESC_LEN  = 176;
     OI_TPL_ID    = 184;  # inline originating template id (M6 inventory persist)
     OI_TPL_ID_LEN = 216;
-    OI_SIZE      = 224;
+    OI_AGE       = 224;  # ticks since a corpse was created (M12-A); unused on items
+    OI_SIZE      = 232;
 }
 enum OiCap { OI_NAME_CAP = 64; OI_KW_CAP = 64; OI_TPL_ID_CAP = 32; }
 
@@ -66,6 +67,34 @@ fn oi_desc_len(o): i64   { return load64(o + OI_DESC_LEN); }
 
 # === Intrusive list ops. `slot` is the ADDRESS of the head pointer
 # (room+RM_OBJ_HEAD, session+SS_INV, or corpse+OI_CONTENTS). ===
+# === M12-A/B — returning objects to the freelist. ===
+#
+# The free rule: **free only where an instance leaves the object graph
+# entirely.** Not at ilist_remove — that is the *move* primitive (cmd_get does
+# remove-then-push), and freeing there would destroy every `get`. Until corpse
+# decay landed there was no exit at all: every object minted since boot was
+# still reachable from some room, inventory or corpse, and nothing was ever
+# reclaimed because alloc() has no free().
+#
+# obj_free takes the whole subtree — a corpse owns its loot through OI_CONTENTS,
+# so decaying one must free what is inside it or the contents become
+# unreachable *and* unfreed, which is the leak wearing a different hat.
+fn obj_free(o): i64 {
+    if (o == 0) { return 0; }
+    var c = load64(o + OI_CONTENTS);
+    while (c != 0) {
+        var nxt = oi_next(c);
+        obj_free(c);
+        c = nxt;
+    }
+    g_obj_live = g_obj_live - 1;
+    fl_free(o);
+    return 0;
+}
+
+# Push `o` onto the front of the intrusive list at `slot`. O(1) and
+# order-agnostic — nothing in the game depends on inventory or room-object
+# ordering, so the cheapest insertion wins.
 fn ilist_push(slot, o): i64 {
     store64(o + OI_NEXT, load64(slot));
     store64(slot, o);
@@ -162,7 +191,8 @@ fn obj_tpl_by_id(buf, len): i64 {
 
 # === item_new — a fresh instance of object template `tpl`. ===
 fn item_new(tpl): i64 {
-    var o = alloc(OI_SIZE);
+    var o = fl_alloc(OI_SIZE);   # M12-B: freelist, not the bump allocator
+    g_obj_live = g_obj_live + 1;   # M12-D
     memset(o, 0, OI_SIZE);
     store64(o + OI_NAME_LEN, copy_bytes_capped(o + OI_NAME, OI_NAME_CAP - 1, tpl + OT_NAME, load64(tpl + OT_NAME_LEN)));
     store64(o + OI_KW_LEN,   copy_bytes_capped(o + OI_KW,   OI_KW_CAP - 1,   tpl + OT_KW,   load64(tpl + OT_KW_LEN)));
@@ -191,7 +221,8 @@ fn copy_bytes_capped(dst, cap, src, len): i64 {
 
 # === corpse_new — a container instance "the corpse of <name>". ===
 fn corpse_new(name_ptr, name_len): i64 {
-    var o = alloc(OI_SIZE);
+    var o = fl_alloc(OI_SIZE);   # M12-B: freelist, not the bump allocator
+    g_obj_live = g_obj_live + 1;   # M12-D
     memset(o, 0, OI_SIZE);
     store64(o + OI_IS_CORPSE, 1);
     # name = "the corpse of " + mob name (bounded).
@@ -469,4 +500,54 @@ fn zone_reset_objs(): i64 {
         ri = ri + 1;
     }
     return spawned;
+}
+
+# === M12-A — corpse decay. ===
+#
+# Corpses were never removed from a room. Every kill left one on the floor for
+# the process lifetime: unbounded memory on a long-lived server, and rooms that
+# silently fill with the dead. This is the first place an object genuinely
+# leaves the graph, which makes it the first place obj_free is safe to call.
+#
+# CORPSE_TICKS is a hardcoded constant, deliberately NOT an env knob:
+# [ADR 0007](../docs/adr/0007-frozen-1.0-surface.md) §6 freezes the YD_* knob
+# names and semantics for all of 1.x, so adding YD_CORPSE_TICKS here would be a
+# frozen-surface change and belongs to 2.0. 120 ticks is 5 minutes at the
+# standard 2.5 s cadence — long enough to walk back and loot, well inside the
+# 15-minute zone reset.
+enum CorpseDecay { CORPSE_TICKS = 120; }
+
+# Age every corpse in `ri` by one tick and free those past the limit, along
+# with whatever loot is still inside them. Returns the number decayed.
+fn corpse_decay_room(ri): i64 {
+    var slot = room_at(ri) + RM_OBJ_HEAD;
+    var o = load64(slot);
+    var freed = 0;
+    while (o != 0) {
+        var nxt = oi_next(o);
+        if (oi_is_corpse(o) == 1) {
+            var age = load64(o + OI_AGE) + 1;
+            store64(o + OI_AGE, age);
+            if (age >= CORPSE_TICKS) {
+                ilist_remove(slot, o);   # off the graph first, then free
+                obj_free(o);
+                freed = freed + 1;
+            }
+        }
+        o = nxt;
+    }
+    return freed;
+}
+
+# Sweep every room. Driven once per tick from advance_tick; O(objects in the
+# world), which at Hub scale is tens — the 50 ms p99 drift budget is untroubled,
+# but re-measure with bench_combat if the world grows past a few hundred.
+fn corpse_decay_sweep(): i64 {
+    var freed = 0;
+    var ri = 0;
+    while (ri < g_room_count) {
+        freed = freed + corpse_decay_room(ri);
+        ri = ri + 1;
+    }
+    return freed;
 }

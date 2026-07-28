@@ -3,14 +3,35 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-28 (v1.3.0)
+> **Last refresh**: 2026-07-28 (v1.4.0)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.3.0 tree.
+> tests, boot guide) describes the **current** 1.4.0 tree.
 
 ## Version
+
+**1.4.0** — M12, instance lifecycle, 2026-07-28. **346 assertions**; `cyrius
+audit` exits 0; host and `--agnos` warning-free; `bench_combat` p99 1422 µs
+against 1427 µs before, so the new per-tick corpse sweep is not measurable.
+
+The milestone under-stated its own problem. `alloc()` has **no `free()`** — it is
+a bump allocator — so this was never "add a reclaim path": mob, object and corpse
+instances had to *move* onto `fl_alloc`/`fl_free`, the only reclaiming allocator
+descent has. `fl_alloc` reuses freed blocks **without zeroing**, which the old
+bump-allocated code silently depended on, so `mob_spawn` now memsets.
+
+Corpses were the worse half: never removed from a room at all. They now decay
+after `CORPSE_TICKS = 120` (~5 min), taking un-looted contents with them.
+Hardcoded on purpose — a `YD_CORPSE_TICKS` knob would be an ADR-0007 §6
+frozen-surface change and belongs to 2.0.
+
+The use-after-free trap was real and landed first: `mob_died` cleared only the
+*killing* session's `SS_TARGET`, so a second attacker kept a pointer. Inert
+precisely because nothing was reclaimed; the first free would have resolved it
+to a live, *different* mob, since `fl_free` returns the block to a size class the
+next `mob_spawn` re-issues.
 
 **1.3.0** — the 1.3.0 pair, 2026-07-28. **M10 (wire-safe prose)** and
 **M11 (migration-gate repair)**. Suite 298 → **333 assertions**; `cyrius audit`
@@ -278,7 +299,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **333** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **346** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -408,13 +429,13 @@ _None yet._
 **No active cycle.** 1.2.0 (toolchain + dep upgrade, first clean audit) closed.
 The tree builds, `cyrius audit` exits 0, and 298 tests + 3 benches pass.
 
-**1.3.0 shipped (M10 + M11).** Next is **1.4.0 — M12 (instance lifecycle)**:
-nothing the world creates is ever reclaimed. Mob and object instances come from
-`alloc` and `mob_remove` only unlinks; corpses are never removed from a room at
-all. It blocks M13, M15, M17 and M20. Mind the trap recorded in the milestone:
-`mob_died` clears only the *killing* session's `SS_TARGET`, so a second attacker
-keeps a stale pointer — inert today precisely because nothing is freed, and a
-use-after-free the moment anything is.
+**1.4.0 shipped (M12).** Next is **1.5.0 — M13 (the actor tick)**: mobs stand
+still until hit. Wander, assist, and flee-at-low-health. Keep thresholds
+hardcoded — an authored `morale` key is a `kind = "mob"` field and therefore
+frozen surface, so it belongs to M19. Two things to watch: wandering mobs change
+what `maybe_zone_reset`'s presence gate means by "empty", and every sub-bite is
+paid out of the 50 ms p99 tick budget, so re-run `bench_combat` per bite rather
+than at the end.
 
 **M8 (Joshua) moved to the backlog**: it was blocked on an upstream Cyrius port,
 and specced against a management CLI that turned out to be an AI-NPC simulation

@@ -212,8 +212,14 @@ fn mob_died(s, m): i64 {
     room_combat_line(mi_room(m), s, mi_name_ptr(m), mi_name_len(m),
     " collapses, destroyed.", 0, 0, "\r\n");
     corpse_of(m, mi_room(m));     # M4-E: leave a lootable corpse
+    # M12-C — every session pointing at this mob must let go, not just the
+    # killer. A second attacker's SS_TARGET would otherwise outlive the
+    # instance; see sessions_forget_mob (server.cyr) for why that is fatal once
+    # mob_remove starts actually freeing.
+    sessions_forget_mob(m);
+    store64(s + SS_TARGET, 0);    # covers the test/bench path, where the
+    # killer may not be on g_session_head
     mob_remove(m);
-    store64(s + SS_TARGET, 0);
     return 0;
 }
 

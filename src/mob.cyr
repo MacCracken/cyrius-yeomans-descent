@@ -51,6 +51,18 @@ enum MI {
 var g_mob_tpls      = 0;   # contiguous block of MT_SIZE templates
 var g_mob_tpl_count = 0;
 
+# Live-instance counters (M12-D). Incremented where an instance is minted,
+# decremented where it is freed, so a soak can assert the world returns to a
+# bounded steady state instead of climbing forever.
+#
+# These exist because there is no other way to see it: lib/freelist.cyr exposes
+# only fl_init / fl_alloc / fl_free / fl_calloc — no occupancy or arena
+# accessor — and CLAUDE.md forbids modifying lib/. Cheap enough to leave in the
+# production build (two adds per spawn), and `@stats` is the natural place to
+# surface them once the operator channel lands at M18.
+var g_mob_live = 0;
+var g_obj_live = 0;
+
 # === Template accessors ===
 fn mt_at(i): i64          { return g_mob_tpls + i * MT_SIZE; }
 # Inline name bytes. The loader caps at CAP-1 into zeroed space, so it is also a cstr.
@@ -259,7 +271,13 @@ fn mob_tpl_by_id(buf, len): i64 {
 
 # === mob_spawn — create a live instance of `tpl` in room `room_idx`. ===
 fn mob_spawn(tpl, room_idx): i64 {
-    var m = alloc(MI_SIZE);
+    # M12-B — freelist, not the bump allocator: alloc() has no free(), so every
+    # instance minted here used to leak for the process lifetime. fl_alloc
+    # REUSES freed blocks and does not zero them, so memset first — the bump
+    # allocator handed out fresh (zero) pages and this code leaned on that.
+    var m = fl_alloc(MI_SIZE);
+    memset(m, 0, MI_SIZE);
+    g_mob_live = g_mob_live + 1;   # M12-D
     store64(m + MI_TPL, tpl);
     store64(m + MI_HP, mt_hp(tpl));
     store64(m + MI_ROOM, room_idx);
@@ -272,14 +290,25 @@ fn mob_spawn(tpl, room_idx): i64 {
     return m;
 }
 
-# Unlink a mob instance from its room's list (on death / despawn).
+# Return a mob instance to the freelist (M12-B). Only mob_remove calls this,
+# and only after the instance is off the room list AND every session reference
+# has been dropped by sessions_forget_mob — see the note there for why the
+# ordering is not negotiable.
+fn _mob_free(m): i64 {
+    g_mob_live = g_mob_live - 1;
+    fl_free(m);
+    return 0;
+}
+
+# Unlink a mob instance from its room's list, then free it (on death /
+# despawn). The caller MUST have cleared every SS_TARGET pointing at `m` first.
 fn mob_remove(m): i64 {
     var r = room_at(mi_room(m));
     var head = room_mob_head(r);
-    if (head == m) { room_set_mob_head(r, mi_next(m)); return 0; }
+    if (head == m) { room_set_mob_head(r, mi_next(m)); _mob_free(m); return 0; }
     var prev = head;
     while (prev != 0) {
-        if (mi_next(prev) == m) { store64(prev + MI_NEXT, mi_next(m)); return 0; }
+        if (mi_next(prev) == m) { store64(prev + MI_NEXT, mi_next(m)); _mob_free(m); return 0; }
         prev = mi_next(prev);
     }
     return 0;

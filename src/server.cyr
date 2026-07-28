@@ -143,6 +143,32 @@ fn save_sweep(): i64 {
 # g_zone_reset_secs. Read from YD_RESET_SECS at serve start.
 var g_reset_secs_override = 0;
 
+# === M12-C — drop every session reference to a mob instance. ===
+#
+# Called from mob_died before the instance leaves the room list. Until 1.4.0
+# `mob_died` cleared only the *killing* session's SS_TARGET, so a second player
+# who had also typed `kill drone` kept a pointer to the dead mob across ticks.
+#
+# That was inert only because nothing was ever reclaimed: combat_round's
+# `mi_hp(m) <= 0` guard read the corpse's memory, saw a dead mob, and
+# disengaged. The moment M12-B started freeing instances, that same read became
+# a use-after-free — and worse, fl_free returns the block to a size class that
+# the very next mob_spawn re-issues, so the stale pointer would resolve to a
+# *live, different* mob rather than obviously-dead memory.
+#
+# Deferring the free to end-of-tick does not help; the reference outlives the
+# tick. The reference has to go, not the timing. Forward-referenced from
+# combat.cyr, which is included ahead of this file (same shape as
+# room_combat_line).
+fn sessions_forget_mob(m): i64 {
+    var s = g_session_head;
+    while (s != 0) {
+        if (load64(s + SS_TARGET) == m) { store64(s + SS_TARGET, 0); }
+        s = load64(s + SS_NEXT);
+    }
+    return 0;
+}
+
 # M7-B presence gate — is any in-world session standing in this zone? A
 # session with SS_ROOM in [0, room_count) is placed in the world (login
 # leaves it at -1). Single-writer (ADR 0003), so this snapshot can't race.
@@ -201,6 +227,7 @@ fn advance_tick(): i64 {
     if (g_save_interval_ticks > 0) {
         if (g_tick_count % g_save_interval_ticks == 0) { save_sweep(); }
     }
+    corpse_decay_sweep();   # M12-A — age out corpses and reclaim them
     maybe_zone_reset();  # M7 — respawn mobs/loot when the zone empties out
     return 0;
 }

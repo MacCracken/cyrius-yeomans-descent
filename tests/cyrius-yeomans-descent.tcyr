@@ -1093,6 +1093,102 @@ fn test_wire_hygiene(): i64 {
     return 0;
 }
 
+# === M12 — instance lifecycle: nothing the world creates may leak ===
+fn test_lifecycle(): i64 {
+    test_group("lifecycle");
+
+    # The world must be loaded for room lists to exist.
+    if (g_room_count == 0) {
+        assert(0, "lifecycle: no world loaded (fixture ordering)");
+        return 0;
+    }
+
+    # --- Mobs are reclaimed on death. Before M12 mob_remove only unlinked, and
+    # the instance came from alloc(), which has no free() at all — so every kill
+    # leaked for the process lifetime.
+    var tpl = mt_at(0);
+    var mobs0 = g_mob_live;
+    var m = mob_spawn(tpl, 0);
+    assert_eq(g_mob_live, mobs0 + 1, "spawning a mob raises the live count");
+    mob_remove(m);
+    assert_eq(g_mob_live, mobs0, "removing a mob returns it to the freelist");
+
+    # --- A corpse owns its loot: freeing it must take the contents too, or the
+    # contents become unreachable AND unfreed — the same leak wearing a hat.
+    var objs0 = g_obj_live;
+    var corpse = corpse_new("test-thing", 10);
+    ilist_push(corpse + OI_CONTENTS, item_new(ot_at(0)));
+    ilist_push(corpse + OI_CONTENTS, item_new(ot_at(0)));
+    assert_eq(g_obj_live, objs0 + 3, "corpse plus two items = three live objects");
+    obj_free(corpse);
+    assert_eq(g_obj_live, objs0, "freeing a corpse frees its contents too");
+
+    # --- get/drop must NOT free. ilist_remove is the MOVE primitive (cmd_get is
+    # remove-then-push); freeing there would destroy every `get`. This is the
+    # regression that guards the rule.
+    var objs1 = g_obj_live;
+    var it = item_new(ot_at(0));
+    var slot_a = room_at(0) + RM_OBJ_HEAD;
+    ilist_push(slot_a, it);
+    ilist_remove(slot_a, it);
+    assert_eq(g_obj_live, objs1 + 1, "ilist_remove is a move, not a free");
+    obj_free(it);
+    assert_eq(g_obj_live, objs1, "explicit free reclaims it");
+
+    # --- M12-C: every session pointing at a dying mob must let go, not just the
+    # killer. Two attackers, one kill. Before M12-C the second kept a pointer to
+    # a freed instance — and fl_free returns the block to a size class the next
+    # mob_spawn re-issues, so it would resolve to a live, DIFFERENT mob.
+    var m2 = mob_spawn(tpl, 0);
+    var a = _mk_sess("AttackerA", 9);
+    var b = _mk_sess("AttackerB", 9);
+    store64(a + SS_ROOM, 0); store64(b + SS_ROOM, 0);
+    store64(a + SS_PHASE, PHASE_CMD); store64(b + SS_PHASE, PHASE_CMD);
+    store64(a + SS_TARGET, m2); store64(b + SS_TARGET, m2);
+    # Put both on the active list sessions_forget_mob walks.
+    store64(a + SS_NEXT, b); store64(b + SS_NEXT, 0);
+    var saved_head = g_session_head;
+    g_session_head = a;
+    sessions_forget_mob(m2);
+    assert_eq(load64(a + SS_TARGET), 0, "first attacker's target cleared");
+    assert_eq(load64(b + SS_TARGET), 0, "SECOND attacker's target cleared too");
+    g_session_head = saved_head;
+    mob_remove(m2);
+
+    # --- Corpse decay ages out and reclaims. CORPSE_TICKS ticks of sweeping
+    # must leave the count where it started.
+    var mobs1 = g_mob_live;
+    var objs2 = g_obj_live;
+    var c2 = corpse_new("decay-me", 8);
+    ilist_push(room_at(0) + RM_OBJ_HEAD, c2);
+    assert_eq(g_obj_live, objs2 + 1, "corpse placed in the room");
+    var t = 0;
+    while (t < CORPSE_TICKS - 1) { corpse_decay_sweep(); t = t + 1; }
+    assert_eq(g_obj_live, objs2 + 1, "corpse survives until its age is reached");
+    corpse_decay_sweep();
+    assert_eq(g_obj_live, objs2, "corpse is reclaimed once it ages out");
+
+    # --- The soak. Spawn, kill, decay, repeat — the counts must return to a
+    # bounded steady state rather than climbing. This is the M12 gate.
+    var mobs_base = g_mob_live;
+    var objs_base = g_obj_live;
+    var round = 0;
+    while (round < 25) {
+        var mm = mob_spawn(tpl, 0);
+        mi_set_hp(mm, 0);
+        corpse_of(mm, 0);          # the death path: corpse + loot
+        sessions_forget_mob(mm);
+        mob_remove(mm);
+        var k = 0;
+        while (k < CORPSE_TICKS) { corpse_decay_sweep(); k = k + 1; }
+        round = round + 1;
+    }
+    assert_eq(g_mob_live, mobs_base, "soak: mob count returns to baseline");
+    assert_eq(g_obj_live, objs_base, "soak: object count returns to baseline");
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -1300,6 +1396,7 @@ fn main() {
     test_freeze();
     test_migration();
     test_wire_hygiene();
+    test_lifecycle();
 
     return assert_summary();
 }
