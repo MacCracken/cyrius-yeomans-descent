@@ -169,7 +169,7 @@ fn sessions_forget_mob(m): i64 {
     return 0;
 }
 
-# === M14-A — drop every mob's reference to a session. ===
+# === H1 — drop every mob's reference to a session. ===
 #
 # The mirror of sessions_forget_mob, and the same hazard pointing the other way.
 # `drop_session` frees a Session on quit / idle-reap / socket close, but nothing
@@ -312,7 +312,7 @@ fn drop_session(epfd, s): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     sys_epoll_ctl(epfd, EPOLL_CTL_DEL, load64(s + SS_FD), 0);
     #endif
-    # M14-A/B — nothing may still point at this session, and nothing it owns may
+    # H1/B — nothing may still point at this session, and nothing it owns may
     # outlive it. Both BEFORE session_free: mobs_forget_session clears the
     # MI_TARGET the actor tick would otherwise dereference, and session_drop_inv
     # returns the carried inventory that session_free never touched. Order

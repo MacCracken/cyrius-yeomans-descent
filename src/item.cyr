@@ -92,7 +92,7 @@ fn obj_free(o): i64 {
     return 0;
 }
 
-# === M14-B — return a disconnecting player's inventory to the freelist. ===
+# === H2 — return a disconnecting player's inventory to the freelist. ===
 #
 # `session_free` frees the rx / tx / line / name buffers and the ident block, and
 # has never touched SS_INV — so every object a player was carrying leaked at

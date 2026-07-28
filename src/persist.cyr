@@ -555,7 +555,7 @@ fn player_auth_load(s, pass, passlen): i64 {
     store64(s + SS_CLASS, cls);
     store64(s + SS_HP,    _clamp(toml_int(pairs, "hp", PC_HP), 0, 1000000));
     store64(s + SS_MAXHP, _clamp(toml_int(pairs, "maxhp", PC_HP), 1, 1000000));
-    # M14-C — hp and maxhp were each clamped to an absolute range but never
+    # H3 — hp and maxhp were each clamped to an absolute range but never
     # against EACH OTHER, and nothing downstream ever pulls hp back down:
     # classes_upkeep only regenerates while `hp < max`, ability_heal caps on the
     # way up, and player_died assigns hp = maxhp. So a record carrying

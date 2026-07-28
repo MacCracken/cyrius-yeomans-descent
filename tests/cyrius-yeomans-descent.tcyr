@@ -1375,7 +1375,7 @@ fn test_hardening(): i64 {
     persist_init();
     if (g_room_count == 0) { assert(0, "hardening: no world loaded"); return 0; }
 
-    # --- M14-A: a mob must not keep a pointer to a disconnected session.
+    # --- H1: a mob must not keep a pointer to a disconnected session.
     #
     # Before 1.5.0 this was inert — MI_TARGET was only ever COMPARED. M13's
     # _mob_assist dereferences it (`load64(s + SS_ROOM)`), so the actor tick
@@ -1400,7 +1400,7 @@ fn test_hardening(): i64 {
     assert_eq(mi_target(m2), 0, "a mob in another room is cleared as well");
     mob_remove(m); mob_remove(m2);
 
-    # --- M14-B: a disconnecting player's inventory must be reclaimed.
+    # --- H2: a disconnecting player's inventory must be reclaimed.
     # session_free frees rx/tx/line/name/ident and never touched SS_INV, so every
     # carried object leaked on `quit`. Remotely driven: connect, get, quit, repeat.
     var objs0 = g_obj_live;
@@ -1416,7 +1416,7 @@ fn test_hardening(): i64 {
     session_drop_inv(s2);
     assert_eq(g_obj_live, objs0, "dropping an already-empty inventory is a no-op");
 
-    # --- M14-C: hp must be clamped against maxhp, not just to an absolute range.
+    # --- H3: hp must be clamped against maxhp, not just to an absolute range.
     # A player owns their signing key, so a re-signed record can carry any
     # values; nothing downstream ever pulls an over-max hp back down.
     var s3 = _mk_sess("Inflated", 8);
