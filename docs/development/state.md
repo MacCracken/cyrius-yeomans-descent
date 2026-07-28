@@ -3,14 +3,37 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-28 (v1.4.0)
+> **Last refresh**: 2026-07-28 (v1.5.0)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.4.0 tree.
+> tests, boot guide) describes the **current** 1.5.0 tree.
 
 ## Version
+
+**1.5.0** — M13, the actor tick, 2026-07-28. **373 assertions**; `cyrius audit`
+exits 0; host and `--agnos` warning-free; p99 **1338 µs** against the 50 ms
+budget, so mob agency is not measurable at Hub scale.
+
+Mobs were furniture. They now take a turn each tick: pace, join a room-mate's
+fight, or break off below 20% HP. Two things the milestone did not anticipate,
+both load-bearing:
+
+- **Wander needs a leash.** The first live run walked the Foundry Sentinel —
+  authored into `foundry.overseer` — the length of the zone and into `hub.gate`,
+  the newbie start room. A roaming population diffuses evenly and erases the
+  authored difficulty curve. Mobs are now bounded to within one room of
+  `MI_HOME`. The proper per-template "does not roam" flag is a `kind = "mob"`
+  key and therefore frozen surface — M19's, not 1.x's.
+- **The zone reset had to change first.** Respawn counted mobs *standing in* a
+  room, so a mob that wandered off left a deficit and every reset spawned a
+  replacement — population climbing by one per reset, forever. `_mob_alive_count`
+  now counts by `MI_HOME`.
+
+`mob_unlink` is split from `mob_remove` (wander relinks; retire frees).
+Conflating them double-frees on every move, which does not fail a test — it
+corrupts the freelist into an infinite loop.
 
 **1.4.0** — M12, instance lifecycle, 2026-07-28. **346 assertions**; `cyrius
 audit` exits 0; host and `--agnos` warning-free; `bench_combat` p99 1422 µs
@@ -299,7 +322,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **346** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **373** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -429,13 +452,16 @@ _None yet._
 **No active cycle.** 1.2.0 (toolchain + dep upgrade, first clean audit) closed.
 The tree builds, `cyrius audit` exits 0, and 298 tests + 3 benches pass.
 
-**1.4.0 shipped (M12).** Next is **1.5.0 — M13 (the actor tick)**: mobs stand
-still until hit. Wander, assist, and flee-at-low-health. Keep thresholds
-hardcoded — an authored `morale` key is a `kind = "mob"` field and therefore
-frozen surface, so it belongs to M19. Two things to watch: wandering mobs change
-what `maybe_zone_reset`'s presence gate means by "empty", and every sub-bite is
-paid out of the 50 ms p99 tick budget, so re-run `bench_combat` per bite rather
-than at the end.
+**The 1.x line is complete** — M10, M11, M12 and M13 all shipped. The tree
+builds on both targets, `cyrius audit` exits 0, and 373 assertions pass.
+
+Next is **2.0.0**, starting with **M14 — ADR 0008 + save schema v2**. Everything
+else in the 2.0 line routes through it. Before touching it, read the critical
+path in [`roadmap.md`](roadmap.md#critical-path); the binding constraint is that
+records are signed with a key re-derived from the player's passphrase, which the
+server never holds, so **there is no offline migration and there cannot be one** —
+every 2.0 field must be additive, defaulted, and migrated lazily at login.
+M11 already repaired the gate that makes the bump safe.
 
 **M8 (Joshua) moved to the backlog**: it was blocked on an upstream Cyrius port,
 and specced against a management CLI that turned out to be an AI-NPC simulation

@@ -45,7 +45,10 @@ enum MI {
     MI_TARGET = 24;      # session it is fighting (0 = none)
     MI_NEXT   = 32;      # intrusive room-occupant list
     MI_STUN   = 40;      # ticks it is stunned (skips its attack) — M5
-    MI_SIZE   = 48;
+    # M13 — the actor tick.
+    MI_HOME   = 48;      # room it was authored into; MI_ROOM is where it is NOW
+    MI_ACTED  = 56;      # g_tick_count of its last turn (re-entry guard)
+    MI_SIZE   = 64;
 }
 
 var g_mob_tpls      = 0;   # contiguous block of MT_SIZE templates
@@ -281,6 +284,8 @@ fn mob_spawn(tpl, room_idx): i64 {
     store64(m + MI_TPL, tpl);
     store64(m + MI_HP, mt_hp(tpl));
     store64(m + MI_ROOM, room_idx);
+    store64(m + MI_HOME, room_idx);   # M13 — wander changes MI_ROOM, never this
+    store64(m + MI_ACTED, 0);
     store64(m + MI_TARGET, 0);
     store64(m + MI_STUN, 0);
     # push onto the room's mob list
@@ -300,17 +305,31 @@ fn _mob_free(m): i64 {
     return 0;
 }
 
+# Take a mob off its room's occupant list WITHOUT freeing it. Split out at M13
+# because wander needs to relink an instance into a different room — the same
+# unlink, but the instance lives on. Callers that are retiring the mob want
+# mob_remove instead.
+fn mob_unlink(m): i64 {
+    var r = room_at(mi_room(m));
+    var head = room_mob_head(r);
+    if (head == m) { room_set_mob_head(r, mi_next(m)); store64(m + MI_NEXT, 0); return 0; }
+    var prev = head;
+    while (prev != 0) {
+        if (mi_next(prev) == m) {
+            store64(prev + MI_NEXT, mi_next(m));
+            store64(m + MI_NEXT, 0);
+            return 0;
+        }
+        prev = mi_next(prev);
+    }
+    return 0;
+}
+
 # Unlink a mob instance from its room's list, then free it (on death /
 # despawn). The caller MUST have cleared every SS_TARGET pointing at `m` first.
 fn mob_remove(m): i64 {
-    var r = room_at(mi_room(m));
-    var head = room_mob_head(r);
-    if (head == m) { room_set_mob_head(r, mi_next(m)); _mob_free(m); return 0; }
-    var prev = head;
-    while (prev != 0) {
-        if (mi_next(prev) == m) { store64(prev + MI_NEXT, mi_next(m)); _mob_free(m); return 0; }
-        prev = mi_next(prev);
-    }
+    mob_unlink(m);
+    _mob_free(m);
     return 0;
 }
 
@@ -366,12 +385,26 @@ fn world_spawn_all(): i64 {
 # their authored room (mob_spawn).
 
 # Living instances of `tpl` currently in room `ri`.
+# How many live instances of `tpl` belong to room `ri` — counted by MI_HOME,
+# across the whole world, NOT by who is standing in ri right now.
+#
+# M13: once mobs wander, current-room counting breaks the zone reset. A mob that
+# walked from its authored room to the next one leaves a deficit behind it, so
+# every reset would spawn a replacement and the pair would never be reconciled —
+# mob population climbing by one per reset, forever. Home is the authored fact;
+# MI_ROOM is just where it happens to be standing.
 fn _mob_alive_count(ri, tpl): i64 {
-    var m = room_mob_head(room_at(ri));
     var n = 0;
-    while (m != 0) {
-        if (mi_tpl(m) == tpl) { n = n + 1; }
-        m = mi_next(m);
+    var r = 0;
+    while (r < g_room_count) {
+        var m = room_mob_head(room_at(r));
+        while (m != 0) {
+            if (mi_tpl(m) == tpl) {
+                if (load64(m + MI_HOME) == ri) { n = n + 1; }
+            }
+            m = mi_next(m);
+        }
+        r = r + 1;
     }
     return n;
 }
@@ -425,6 +458,196 @@ fn zone_reset_room_mobs(ri): i64 {
         }
     }
     return spawned;
+}
+
+# === M13 — the actor tick: mobs get a turn. ===
+#
+# Until 1.5.0 a mob was furniture: it stood in its authored room forever and did
+# nothing until a player typed `kill`. It now gets one turn per server tick —
+# wander, assist a room-mate, or break off at low health.
+#
+# Everything here is paid out of the 50 ms p99 drift budget (ADR 0001) on a
+# single-threaded loop, so the sweep is O(rooms + living mobs) with no inner
+# scan: one pass over the room list, one pass over each room's occupants.
+#
+# Rates are per-tick probabilities against a 2.5 s cadence: WANDER_CHANCE 1-in-20
+# is roughly one move per 50 s of real time, which reads as restless rather than
+# frantic. All three are hardcoded constants, NOT authored template fields —
+# `kind = "mob"` keys are frozen by [ADR 0007](../docs/adr/0007-frozen-1.0-surface.md)
+# §5 for all of 1.x, so an authored `morale` or `aggression` belongs to M19.
+enum ActorTick {
+    WANDER_CHANCE   = 20;   # 1-in-N per tick for an idle mob to move
+    ASSIST_CHANCE   = 3;    # 1-in-N for an idle mob to join a room-mate's fight
+    MORALE_FLEE_PCT = 20;   # break off below this % of max HP
+}
+
+# Can this mob act at all this tick? Stunned mobs forfeit their turn (the same
+# rule combat_round applies to their swing), and a mob already engaged is driven
+# from the session side, not here.
+fn _mob_can_act(m): i64 {
+    if (mi_stun(m) > 0) { return 0; }
+    if (mi_hp(m) <= 0)  { return 0; }
+    return 1;
+}
+
+# Move `m` to `dest`, unlinking from its current room's occupant list and
+# pushing onto the destination's. Broadcasts departure and arrival to whoever
+# is watching. The mob's MI_HOME is deliberately untouched — see
+# _mob_alive_count for why the zone reset depends on that.
+fn mob_move_to(m, dest, dir): i64 {
+    var from = mi_room(m);
+    # Departure line first, while the watchers can still see it leave.
+    room_combat_line(from, 0, mi_name_ptr(m), mi_name_len(m),
+    " heads ", dir_name(dir), strlen(dir_name(dir)), ".\r\n");
+    mob_unlink(m);
+    store64(m + MI_ROOM, dest);
+    var r = room_at(dest);
+    store64(m + MI_NEXT, room_mob_head(r));
+    room_set_mob_head(r, m);
+    room_combat_line(dest, 0, mi_name_ptr(m), mi_name_len(m), " arrives.", 0, 0, "\r\n");
+    return 0;
+}
+
+# Is `b` the same room as `a`, or one exit away from it?
+fn _room_adjacent(a, b): i64 {
+    if (a == b) { return 1; }
+    var d = 0;
+    while (d < NDIR) {
+        if (room_exit(room_at(a), d) == b) { return 1; }
+        d = d + 1;
+    }
+    return 0;
+}
+
+# Collect the directions out of `m`'s current room that stay within one move of
+# its HOME room, into `out`. Returns how many.
+#
+# **The leash.** Unbounded wander is a content bug, not a feature: the first live
+# run of M13 had the Foundry Sentinel — the endgame boss, authored into
+# `foundry.overseer` — walk the length of the zone and turn up in `hub.gate`, the
+# newbie start room. A wandering population eventually diffuses evenly across the
+# map, which erases the authored difficulty curve entirely.
+#
+# The proper fix is an authored per-template flag ("this one is a sentinel, it
+# does not roam"), but `kind = "mob"` keys are frozen by ADR 0007 §5 for all of
+# 1.x — that is M19's, alongside `morale` and aggression. A home leash needs no
+# new authored field: it is a spatial rule, so every mob paces the neighbourhood
+# it was placed in and the zone keeps the shape its author gave it.
+fn _mob_leashed_dirs(m, out): i64 {
+    var here = room_at(mi_room(m));
+    var home = load64(m + MI_HOME);
+    var nd = 0;
+    var d = 0;
+    while (d < NDIR) {
+        var dest = room_exit(here, d);
+        if (dest >= 0) {
+            if (_room_adjacent(home, dest) == 1) { store64(out + nd * 8, d); nd = nd + 1; }
+        }
+        d = d + 1;
+    }
+    return nd;
+}
+
+# One idle mob's turn: maybe pace to an adjacent room, within its leash.
+fn _mob_wander(m): i64 {
+    if (rng_below(WANDER_CHANCE) != 0) { return 0; }
+    var dirs[48];
+    var nd = _mob_leashed_dirs(m, &dirs);
+    if (nd == 0) { return 0; }
+    var pick = load64(&dirs + rng_below(nd) * 8);
+    mob_move_to(m, room_exit(room_at(mi_room(m)), pick), pick);
+    return 1;
+}
+
+# An idle mob joins a room-mate's fight. Anything already engaged in this room
+# tells us a player is worth attacking; the mob picks that player as its target,
+# and the tick's combat pass does the rest. The player's SS_TARGET is left
+# alone — being jumped by a second mob does not retarget your own swing.
+fn _mob_assist(m): i64 {
+    if (rng_below(ASSIST_CHANCE) != 0) { return 0; }
+    var other = room_mob_head(room_at(mi_room(m)));
+    while (other != 0) {
+        if (other != m) {
+            var s = mi_target(other);
+            if (s != 0) {
+                # Only assist against someone standing here — a target that
+                # walked out is stale until that mob's own turn clears it.
+                if (load64(s + SS_ROOM) == mi_room(m)) {
+                    mi_set_target(m, s);
+                    room_combat_line(mi_room(m), 0, mi_name_ptr(m), mi_name_len(m),
+                    " snaps round and joins the fight!", 0, 0, "\r\n");
+                    return 1;
+                }
+            }
+        }
+        other = mi_next(other);
+    }
+    return 0;
+}
+
+# A badly hurt mob breaks off and bolts, mirroring the player's `flee`. Below
+# MORALE_FLEE_PCT of max HP it drops its target and takes an exit if there is
+# one; cornered (no exits) it fights on, which is the interesting case.
+#
+# Note this clears the mob's grip on the player but NOT the player's SS_TARGET:
+# the player stays swinging at empty air for one tick and then combat_round's
+# own room check disengages them, which reads as the mob getting away.
+fn _mob_flee(m): i64 {
+    var maxhp = mt_hp(mi_tpl(m));
+    if (maxhp <= 0) { return 0; }
+    if (mi_hp(m) * 100 >= maxhp * MORALE_FLEE_PCT) { return 0; }
+    var dirs[48];
+    var nd = _mob_leashed_dirs(m, &dirs);
+    if (nd == 0) { return 0; }          # cornered — it has to fight
+    mi_set_target(m, 0);
+    room_combat_line(mi_room(m), 0, mi_name_ptr(m), mi_name_len(m),
+    " breaks and flees!", 0, 0, "\r\n");
+    var pick = load64(&dirs + rng_below(nd) * 8);
+    mob_move_to(m, room_exit(room_at(mi_room(m)), pick), pick);
+    return 1;
+}
+
+# One tick for every living mob in the world.
+#
+# The walk captures `next` BEFORE the mob acts, because a wander unlinks it from
+# the list being walked — reading mi_next afterward would follow a pointer into
+# the destination room's list and either skip occupants or loop. MI_ACTED is the
+# second half of that guard: a mob that wanders *forward* into a room this sweep
+# has not reached yet would otherwise take a second turn in the same tick.
+#
+# `tick` is passed rather than read from g_tick_count: that global lives in
+# server.cyr, which is included AFTER this file, and leaning on forward global
+# resolution is exactly the kind of silent-wrong this guard exists to avoid.
+#
+# Returns the number of mobs that TOOK A TURN, not the number that visibly did
+# something — wander and assist are 1-in-N rolls, so an "acted" count is
+# probabilistic and cannot be asserted on. Turns taken is deterministic, which
+# makes the re-entry guard testable: sweeping twice at the same tick must report
+# a full count and then zero.
+fn mob_tick_all(tick): i64 {
+    var took_turn = 0;
+    var ri = 0;
+    while (ri < g_room_count) {
+        var m = room_mob_head(room_at(ri));
+        while (m != 0) {
+            var nxt = mi_next(m);          # BEFORE any move
+            if (load64(m + MI_ACTED) != tick) {
+                store64(m + MI_ACTED, tick);
+                took_turn = took_turn + 1;
+                if (_mob_can_act(m) == 1) {
+                    if (mi_target(m) != 0) {
+                        _mob_flee(m);        # engaged: break off?
+                    } else {
+                        _mob_assist(m);      # idle: join in?
+                        if (mi_target(m) == 0) { _mob_wander(m); }
+                    }
+                }
+            }
+            m = nxt;
+        }
+        ri = ri + 1;
+    }
+    return took_turn;
 }
 
 # Top up every room in the zone. Returns total mobs spawned this reset.

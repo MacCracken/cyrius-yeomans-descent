@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-28 (v1.4.0 — M12 instance lifecycle)
+> **Last Updated**: 2026-07-28 (v1.5.0 — M13 the actor tick)
 >
 > Milestone plan through v1.0 (shipped) and on to v2.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
@@ -43,7 +43,7 @@ MUD rather than a well-built room-crawler.
 |---|---|---|
 | **1.3.0** | M10 — wire-safe prose · M11 — migration-gate repair | ✅ 2026-07-28 |
 | **1.4.0** | M12 — instance lifecycle: free the leaks, decay the corpses | ✅ 2026-07-28 |
-| **1.5.0** | M13 — the actor tick: mobs get agency | planned |
+| **1.5.0** | M13 — the actor tick: mobs get agency | ✅ 2026-07-28 |
 | **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
 | **2.1.0** | M17 — equipment slots + item modifiers · M18 — operator identity + control channel | planned |
 | **2.2.0** | M19 — threat, aggression, resistance · M20 — currency and shops | planned |
@@ -64,7 +64,9 @@ embarrassing the release.
 
 **1.4.0 shipped** — M12 (instance lifecycle), 346 assertions. The milestone under-stated the problem: `alloc()` has no `free()` at all, so instances had to *move* to the freelist rather than simply gain a reclaim path. Corpses now decay after 120 ticks (~5 min), taking un-looted contents with them. The use-after-free trap was real and landed first: every session reference to a dying mob is cleared, not just the killer's. `bench_combat` p99 1422 µs, unmoved by the new per-tick sweep.
 
-**Next is 1.5.0 — M13 (the actor tick).** Mobs stand still until hit; give them wander, assist and flee-at-low-health. Thresholds stay hardcoded — an authored `morale` key would be a `kind = "mob"` field and therefore frozen surface, so that belongs to M19. Watch the interaction with `maybe_zone_reset`'s presence gate: wandering mobs change what "the zone is empty" means. Every sub-bite is paid out of the 50 ms tick budget — re-run `bench_combat` per bite. Pickup pointer in [`state.md`](state.md).
+**1.5.0 shipped** — M13 (the actor tick), 373 assertions. Mobs wander, assist and flee; wander is leashed to within one room of home after the first live run walked the boss into the newbie start room. The zone reset now counts by `MI_HOME`, which it had to before wander could ship. p99 1338 µs — the actor tick is not measurable at Hub scale.
+
+**The 1.x line is complete.** M10–M13 all shipped. Next is **2.0.0**, and it starts with **M14 — [ADR 0008](../adr/0008-two-zero-surface-contract.md) + save schema v2**, which is the gate everything else routes through. Read the critical path above before starting: the binding constraint is that saves are signed with a key derived from the player's passphrase, which the server never holds, so **migration is lazy-at-login and additive only**. Pickup pointer in [`state.md`](state.md).
 
 ---
 
@@ -462,9 +464,16 @@ the gameplay fix, and it must precede anything that mints instances faster.
 
 **Gate:** a soak of N zone resets with combat returns `g_mob_live` / `g_obj_live` to a bounded steady state; no room accumulates corpses without bound; the suite gains a use-after-free regression for the two-attacker case.
 
-### M13 — The actor tick: mobs get agency (v1.5.0)
+### M13 — The actor tick: mobs get agency (v1.5.0) ✅
 
-**Line:** 1.x · **Depends on:** M12 · **Blocks:** M19
+**Line:** 1.x · **Depends on:** M12 · **Blocks:** M19 · **Status:** shipped
+
+One thing the milestone did not anticipate: **wander needs a leash.** The first
+live run walked the Foundry Sentinel out of `foundry.overseer` and into the
+newbie start room. Mobs are now bounded to within one room of `MI_HOME`. The
+proper per-template "does not roam" flag is frozen surface and stays M19's.
+Also load-bearing: the zone reset had to start counting by home rather than by
+current room, or every reset would have duplicated each wandered mob.
 
 Mobs stand still until hit. Give them a turn: wander, assist, flee at low health.
 This is the last big 1.x item because it needs no new zone field — thresholds are

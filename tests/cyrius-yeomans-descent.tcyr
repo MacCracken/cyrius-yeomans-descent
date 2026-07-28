@@ -1189,6 +1189,186 @@ fn test_lifecycle(): i64 {
     return 0;
 }
 
+# Count mobs currently standing in room `ri`.
+fn _mobs_in(ri): i64 {
+    var m = room_mob_head(room_at(ri));
+    var n = 0;
+    while (m != 0) { n = n + 1; m = mi_next(m); }
+    return n;
+}
+
+# Is `m` on room `ri`'s occupant list?
+fn _mob_on_list(ri, m): i64 {
+    var o = room_mob_head(room_at(ri));
+    while (o != 0) { if (o == m) { return 1; } o = mi_next(o); }
+    return 0;
+}
+
+# === M13 — the actor tick ===
+fn test_actor_tick(): i64 {
+    test_group("actor-tick");
+
+    if (g_room_count < 2) {
+        assert(0, "actor-tick: need a multi-room world (fixture ordering)");
+        return 0;
+    }
+    var tpl = mt_at(0);
+
+    # --- MI_HOME is the authored room and survives a move. The zone reset counts
+    # by it, so if a wander overwrote it every reset would spawn a replacement
+    # for the mob that walked away — population climbing by one, forever.
+    var m = mob_spawn(tpl, 0);
+    assert_eq(load64(m + MI_HOME), 0, "spawn records its home room");
+    var dest = 0 - 1;
+    var d = 0;
+    while (d < NDIR) {
+        if (room_exit(room_at(0), d) >= 0) { dest = room_exit(room_at(0), d); d = NDIR; }
+        else { d = d + 1; }
+    }
+    assert(dest >= 0, "start room has an exit to move through");
+    mob_move_to(m, dest, 0);
+    assert_eq(mi_room(m), dest, "the mob is now in the destination room");
+    assert_eq(load64(m + MI_HOME), 0, "MI_HOME is unchanged by a move");
+    assert_eq(_mob_on_list(0, m), 0, "it left the origin room's list");
+    assert_eq(_mob_on_list(dest, m), 1, "it joined the destination room's list");
+
+    # --- The reset must NOT duplicate a wandered mob. This is the interaction
+    # that makes MI_HOME load-bearing: count by home, not by who is standing here.
+    assert_eq(_mob_alive_count(0, tpl), 1, "a wandered mob still counts against its home");
+    mob_remove(m);
+
+    # --- mob_unlink must not free. It is the move primitive; mob_remove is the
+    # retire primitive. Conflating them would double-free every wander.
+    var live0 = g_mob_live;
+    var m2 = mob_spawn(tpl, 0);
+    mob_unlink(m2);
+    assert_eq(g_mob_live, live0 + 1, "mob_unlink is a move, not a free");
+    assert_eq(mi_next(m2), 0, "unlink clears the stale forward link");
+    _mob_free(m2);
+    assert_eq(g_mob_live, live0, "explicit free reclaims it");
+
+    # --- The re-entry guard. A mob that wanders FORWARD into a room the sweep
+    # has not visited yet would take a second turn in the same tick without
+    # MI_ACTED. Drive two sweeps at the same tick number and require the second
+    # to be a no-op for an already-stamped mob.
+    var m3 = mob_spawn(tpl, 0);
+    var turns = mob_tick_all(4242);
+    assert(turns > 0, "a fresh tick gives every mob a turn");
+    assert_eq(mob_tick_all(4242), 0, "sweeping the SAME tick again gives nobody a turn");
+    assert_eq(mob_tick_all(4243), turns, "the next tick gives them all a turn again");
+    mob_remove(m3);
+
+    # --- Stunned and dead mobs forfeit their turn.
+    var m4 = mob_spawn(tpl, 0);
+    mi_set_stun(m4, 3);
+    assert_eq(_mob_can_act(m4), 0, "a stunned mob cannot act");
+    mi_set_stun(m4, 0);
+    mi_set_hp(m4, 0);
+    assert_eq(_mob_can_act(m4), 0, "a dead mob cannot act");
+    mi_set_hp(m4, mt_hp(tpl));
+    assert_eq(_mob_can_act(m4), 1, "an intact idle mob can act");
+    mob_remove(m4);
+
+    # --- Flee: below MORALE_FLEE_PCT a mob drops its target and moves. Above it,
+    # it holds. Driven directly so the test does not depend on the 1-in-N roll.
+    var sess = _mk_sess("FleeBait", 8);
+    store64(sess + SS_ROOM, 0);
+    store64(sess + SS_PHASE, PHASE_CMD);
+    var m5 = mob_spawn(tpl, 0);
+    mi_set_target(m5, sess);
+    mi_set_hp(m5, mt_hp(tpl));                       # full health
+    assert_eq(_mob_flee(m5), 0, "a healthy mob holds its ground");
+    assert_eq(mi_target(m5), sess, "and keeps its target");
+    mi_set_hp(m5, 1);                                # 1 hp of a much larger pool
+    assert_eq(_mob_flee(m5), 1, "a badly hurt mob breaks off");
+    assert_eq(mi_target(m5), 0, "fleeing drops its target");
+    assert(mi_room(m5) != 0, "fleeing moves it out of the room");
+    mob_remove(m5);
+
+    # --- A cornered mob fights on. Find a room with no exits, or skip honestly.
+    var walled = 0 - 1;
+    var ri = 0;
+    while (ri < g_room_count) {
+        var any = 0;
+        var dd = 0;
+        while (dd < NDIR) { if (room_exit(room_at(ri), dd) >= 0) { any = 1; } dd = dd + 1; }
+        if (any == 0) { walled = ri; ri = g_room_count; } else { ri = ri + 1; }
+    }
+    if (walled >= 0) {
+        var m6 = mob_spawn(tpl, walled);
+        mi_set_target(m6, sess);
+        mi_set_hp(m6, 1);
+        assert_eq(_mob_flee(m6), 0, "a cornered mob cannot flee and fights on");
+        assert_eq(mi_target(m6), sess, "and keeps its target");
+        mob_remove(m6);
+    }
+
+    # --- Assist: an idle mob joins a room-mate's fight against a player who is
+    # actually present. A target who has left is stale and must not be joined.
+    var engaged = mob_spawn(tpl, 0);
+    var idle = mob_spawn(tpl, 0);
+    mi_set_target(engaged, sess);
+    store64(sess + SS_ROOM, 0);
+    var joined = 0;
+    var attempt = 0;
+    while (attempt < 200) {                 # ASSIST_CHANCE is 1-in-N; drive it
+        if (mi_target(idle) == 0) { _mob_assist(idle); } else { joined = 1; attempt = 200; }
+        attempt = attempt + 1;
+    }
+    assert_eq(joined, 1, "an idle mob eventually joins a room-mate's fight");
+    assert_eq(mi_target(idle), sess, "and targets the player being fought");
+
+    # The player walks out: a fresh idle mob must not assist against an absent target.
+    store64(sess + SS_ROOM, dest);
+    var idle2 = mob_spawn(tpl, 0);
+    var tries = 0;
+    while (tries < 200) { _mob_assist(idle2); tries = tries + 1; }
+    assert_eq(mi_target(idle2), 0, "no assist against a target who has left the room");
+
+    mob_remove(engaged); mob_remove(idle); mob_remove(idle2);
+
+    # --- The leash. Unbounded wander is a content bug: the first live run of
+    # M13 had the Foundry Sentinel walk from `foundry.overseer` the length of the
+    # zone into `hub.gate`, the newbie start room. A roaming population diffuses
+    # evenly across the map and erases the authored difficulty curve.
+    #
+    # Soak the real spawn set for many ticks and require every mob to stay
+    # within one room of where it was authored.
+    var spawned = zone_reset_mobs();
+    var tick = 9000;
+    var sweeps = 0;
+    while (sweeps < 400) { mob_tick_all(tick + sweeps); sweeps = sweeps + 1; }
+    var strayed = 0;
+    var checked = 0;
+    var rr = 0;
+    while (rr < g_room_count) {
+        var mm = room_mob_head(room_at(rr));
+        while (mm != 0) {
+            checked = checked + 1;
+            if (_room_adjacent(load64(mm + MI_HOME), mi_room(mm)) == 0) { strayed = strayed + 1; }
+            mm = mi_next(mm);
+        }
+        rr = rr + 1;
+    }
+    assert(checked > 0, "the soak actually had mobs to move");
+    assert_eq(strayed, 0, "after 400 ticks every mob is still within one room of home");
+
+    # And the leash must not have frozen them solid — some movement did happen.
+    var moved = 0;
+    rr = 0;
+    while (rr < g_room_count) {
+        var m7 = room_mob_head(room_at(rr));
+        while (m7 != 0) {
+            if (mi_room(m7) != load64(m7 + MI_HOME)) { moved = moved + 1; }
+            m7 = mi_next(m7);
+        }
+        rr = rr + 1;
+    }
+    assert(moved > 0, "the leash still permits movement (mobs are not frozen)");
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -1397,6 +1577,7 @@ fn main() {
     test_migration();
     test_wire_hygiene();
     test_lifecycle();
+    test_actor_tick();
 
     return assert_summary();
 }

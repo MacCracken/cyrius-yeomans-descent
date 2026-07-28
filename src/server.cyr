@@ -227,6 +227,7 @@ fn advance_tick(): i64 {
     if (g_save_interval_ticks > 0) {
         if (g_tick_count % g_save_interval_ticks == 0) { save_sweep(); }
     }
+    mob_tick_all(g_tick_count);   # M13 — every living mob takes a turn
     corpse_decay_sweep();   # M12-A — age out corpses and reclaim them
     maybe_zone_reset();  # M7 — respawn mobs/loot when the zone empties out
     return 0;

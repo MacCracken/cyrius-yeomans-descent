@@ -4,6 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-07-28
+
+**M13 — the actor tick.** Mobs were furniture: they stood in their authored room
+forever and did nothing until a player typed `kill`. They now take a turn each
+server tick — pace around, join a room-mate's fight, or break off when badly
+hurt. The world moves whether or not you are looking at it.
+
+### Added
+
+- **`mob_tick_all`**, run once per tick from `advance_tick`. O(rooms + living
+  mobs), no inner scan. Returns the number of mobs that **took a turn**, not the
+  number that visibly did something — wander and assist are 1-in-N rolls, so an
+  "acted" count is probabilistic and cannot be asserted on.
+- **Wander** — an idle mob paces to an adjacent room (`WANDER_CHANCE` 1-in-20 per
+  tick, roughly one move per 50 s), with departure and arrival lines to whoever
+  is watching.
+- **Assist** — an idle mob joins a room-mate's fight against a player who is
+  actually present. A target who has walked out is stale and is not joined.
+- **Flee** — below `MORALE_FLEE_PCT` (20%) of max HP a mob drops its target and
+  bolts. Cornered, it fights on.
+
+All three thresholds are hardcoded constants, **not** authored template fields:
+`kind = "mob"` keys are frozen by [ADR 0007](docs/adr/0007-frozen-1.0-surface.md)
+§5 for all of 1.x, so authored `morale` / aggression belongs to M19.
+
+### Fixed
+
+- **Wander was leashed after it broke the game.** The first live run had the
+  Foundry Sentinel — the endgame boss, authored into `foundry.overseer` — walk
+  the length of the zone and turn up in `hub.gate`, the newbie start room. A
+  roaming population diffuses evenly across the map and erases the authored
+  difficulty curve entirely. Mobs now stay within one room of `MI_HOME`. The
+  proper fix is a per-template "does not roam" flag, which is frozen surface and
+  therefore M19's; a home leash needs no authored field because it is a spatial
+  rule. Flee respects the leash too — a boss that could flee anywhere would end
+  up exactly where wander must not put it.
+- **The zone reset would have duplicated every wandered mob.** Respawn topped
+  each room up by counting mobs *standing in it*; a mob that walked away left a
+  deficit behind, so every reset spawned a replacement and the population would
+  climb by one per reset forever. `_mob_alive_count` now counts by **`MI_HOME`**
+  across the world — home is the authored fact, `MI_ROOM` is just where it
+  happens to be standing.
+- **`mob_unlink` split out from `mob_remove`.** Wander relinks an instance into
+  a different room: the same unlink, but the instance lives on. Conflating them
+  would double-free on every move — verified, and it does not merely fail a test,
+  it corrupts the freelist into an infinite loop.
+
+### Notes
+
+- **Re-entry guard.** `MI_ACTED` stamps the tick a mob last took a turn. The
+  sweep captures `next` *before* the mob acts (a wander unlinks it from the list
+  being walked), and the stamp stops a mob that wandered *forward* into a
+  not-yet-visited room from taking a second turn in the same tick.
+- `mob_tick_all` takes the tick as a **parameter** rather than reading
+  `g_tick_count`: that global lives in `server.cyr`, which is included *after*
+  `mob.cyr`, and leaning on forward global resolution is the kind of
+  silent-wrong the guard exists to prevent.
+- **Tick budget:** p99 **1338 µs** against a 50 ms budget — the actor tick is not
+  measurable at Hub scale. Re-measure when the world grows.
+- Suite **346 → 373**. Mutation-verified: unleashing wander fails the soak,
+  removing the re-entry guard fails the turn count, ignoring the morale
+  threshold fails 2, assisting an absent target fails 1, and letting `MI_HOME`
+  follow a move fails 2. An earlier draft of the re-entry test passed against the
+  unguarded code — it asserted on a 1-in-20 wander — and was rewritten to assert
+  on turns taken instead.
+
 ## [1.4.0] — 2026-07-28
 
 **M12 — instance lifecycle.** Nothing the world created was ever reclaimed. Mob,
