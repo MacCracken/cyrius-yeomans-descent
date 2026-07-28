@@ -2,7 +2,7 @@
 
 > **Last Updated**: 2026-07-28 (v1.2.0 — toolchain 6.4.83 + libro 2.8.2, first clean `cyrius audit`)
 >
-> Milestone plan through v1.0. State lives in [`state.md`](state.md);
+> Milestone plan through v1.0 (shipped) and on to v2.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
 > what dependency gates. Design reference: [`../architecture/overview.md`](../architecture/overview.md).
 >
@@ -32,13 +32,76 @@
 | **1.0.0** | Clean release — final hardening + playtest sign-off | ✅ 2026-06-10 |
 | **1.1.x** | AGNOS build target, telnet echo fix, dep-sidecar migration | ✅ 2026-07-02 |
 | **1.2.0** | Toolchain 6.4.83 + libro 2.8.2; first clean `cyrius audit` | ✅ 2026-07-28 |
-| _next_ | M8 — Joshua operator interface (the first post-1.0 milestone) | |
+
+### 2.0 line — planned
+
+The 1.x line is **maintenance and foundations**: everything that touches no
+ADR-0007-frozen surface. 2.0 is where the surface opens and the game becomes a
+MUD rather than a well-built room-crawler.
+
+| Tag | Theme | Status |
+|---|---|---|
+| **1.3.0** | M10 — wire-safe prose · M11 — migration-gate repair | planned |
+| **1.4.0** | M12 — instance lifecycle: free the leaks, decay the corpses | planned |
+| **1.5.0** | M13 — the actor tick: mobs get agency | planned |
+| **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
+| **2.1.0** | M17 — equipment slots + item modifiers · M18 — operator identity + control channel | planned |
+| **2.2.0** | M19 — threat, aggression, resistance · M20 — currency and shops | planned |
+| **2.3.0** | M21 — titles, channels, ignore · M22 — offline state (mail / boards / guilds) | planned |
+| **2.4.0** | M23 — parties and group play | planned |
+
+**The minimum credible 2.0 is M14 + M15 + M16** — the contract, the content
+ceiling, and progression. Everything from M17 on can slip to 2.x without
+embarrassing the release.
 
 ---
 
 ## In progress
 
-**No active cycle.** 1.2.0 closed — a toolchain (6.3.32 → 6.4.83) and dependency (libro 2.7.10 → 2.8.2) upgrade plus the first clean `cyrius audit` run. It repaired a `main` that no longer compiled, a bench that no longer compiled, a `version` verb two releases behind, and three latent symbol-collision hazards; see [CHANGELOG 1.2.0](../../CHANGELOG.md). The public surface remains frozen ([ADR 0007](../adr/0007-frozen-1.0-surface.md)): command verbs + `@`-namespace, save-record schema v1 (stamped + version-gated), Telnet/wire behaviour, zone-file format, env knobs. The `@`-admin namespace is gated behind `YD_ADMIN` (default off). **M8 (Joshua) is the next milestone** and is the work that earns the right to extend the frozen surface. Pickup pointer in [`state.md`](state.md).
+**No active cycle.** 1.2.0 closed — a toolchain (6.3.32 → 6.4.83) and dependency (libro 2.7.10 → 2.8.2) upgrade plus the first clean `cyrius audit` run. It repaired a `main` that no longer compiled, a bench that no longer compiled, a `version` verb two releases behind, and three latent symbol-collision hazards; see [CHANGELOG 1.2.0](../../CHANGELOG.md). The public surface remains frozen ([ADR 0007](../adr/0007-frozen-1.0-surface.md)): command verbs + `@`-namespace, save-record schema v1 (stamped + version-gated), Telnet/wire behaviour, zone-file format, env knobs. The `@`-admin namespace is gated behind `YD_ADMIN` (default off).
+
+**Next is the 1.3.0 pair — M10 (wire-safe prose) and M11 (migration-gate repair).** Both are 1.x work: they touch no frozen surface, and M11 is the prerequisite for the 2.0 schema bump. M8 (Joshua) moved to the backlog below — it was blocked on an upstream port and specced against a dependency that turned out to be something else. Pickup pointer in [`state.md`](state.md).
+
+---
+
+## Backlog — Joshua operator interface (was M8)
+
+**Unscheduled. Blocked on an upstream port, and the spec no longer matches its
+dependency.** M8 was written against a "Joshua" that is an AGNOS game-*management*
+CLI — `joshua mud players`, `joshua mud kick <name>`, `joshua mud broadcast`.
+[MacCracken/joshua](https://github.com/MacCracken/joshua) is something else: a
+v0.1.0 **Rust** "AI-native game manager and simulation runtime" — NPC perception
+and memory, deterministic replay, scene format, engine/physics bridges, mood and
+pathfinding integrations. Its own README says it is not a game engine; it is an
+NPC brain. It is also **not yet ported to Cyrius**, so `[deps.joshua]` cannot
+resolve at all today.
+
+Two independent prerequisites, in order:
+
+1. **Joshua ports to Cyrius** (`cyrius port`, the Rust → Cyrius migration path).
+   Upstream work, not descent's.
+2. **The M8 spec is rewritten against what Joshua actually is** — or descent's
+   operator control channel is designed to stand alone, and Joshua integration
+   becomes a separate, later concern. Kick/ban/broadcast/reload do not need an
+   AI simulation runtime; they need a control channel and operator auth.
+
+Nothing here blocks the 2.0 line. Operator auth — replacing the `YD_ADMIN` env
+gate, which is the part with real security value — is tracked in the 2.0
+milestones below and deliberately does **not** depend on Joshua.
+
+**Held sub-bites, verbatim from the old M8:**
+
+- **M8-A — Joshua dep landing.** Pull Joshua into `cyrius.cyml [deps]`. *(Blocked: not ported.)*
+- **M8-B — Live player list.** `joshua mud players` → name / class / level / location / idle-time / connection-time. *(Note: "level" does not exist yet — see M16.)*
+- **M8-C — Kick & ban.** `joshua mud kick <name>` (terminate session); `joshua mud ban <name> [--for <duration>]` (refuse reconnect).
+- **M8-D — Broadcast.** `joshua mud broadcast <message>` → server-wide announcement rendered to every live session.
+- **M8-E — Zone reload.** `joshua mud reload <zone>` → re-parse the zone file, replace the in-memory zone tree, evict mobs that no longer exist, relocate players whose room was deleted.
+- **M8-F — Operator audit log.** Every operator action appends to `docs/audit/operator.log` with operator identity + timestamp + target.
+
+The groundwork that already exists stays valid whichever way this resolves:
+`@stats` / `@who` / `@reset` (`render_*` in `server.cyr`, gated by `YD_ADMIN`),
+`g_session_head` for session enumeration, `g_zone_last_reset_ms = 0` to force a
+reset, and the libro audit chain as the operator-action log.
 
 ---
 
@@ -84,6 +147,74 @@ re-adopts WILL SGA / char-mode for advanced client features. Parked until then.
 Verify against `telnet`, `nc`, and Mudlet; QEMU-repro via `agnosticos/docker/descent-sweep/`
 (`./run.sh serve` → telnet in).
 
+### B2 — `world_load_classes` leaves a live half-table on a mid-file error (1.2.0)
+
+`world_load_classes` (`src/classes.cyr`) sets `g_class_count = n` **before** its parse
+loop, then can `return WL_ERR_NOID` / `WL_ERR_KIND` from inside it. The caller
+(`src/server.cyr`, `var cc = world_load_classes(DP_CLASSES)`) only prints a message on
+a negative return and never zeroes the count — so a malformed entry partway through
+`data/classes.cyml` leaves a live table whose trailing records are zeroed, and
+`apply_class` will stamp `hp = 0` / `maxhp = 0` / `ac = 0` / `energy = 0` onto a player
+who picks one. The failure is silent: it presents as a 0-HP character, not as
+"no classes loaded". Fix: set `g_class_count` only on success, or zero it on every
+error path. Authored content, so not player-reachable — a robustness bug, not a
+security one.
+
+### B3 — `CL_ID` is copied at `CAP`, not `CAP - 1` (1.2.0)
+
+`src/classes.cyr` does `copy_str_capped(c + CL_ID, CL_ID_CAP, id)` while the adjacent
+name/role copies use `CL_NAME_CAP - 1` / `CL_ROLE_CAP - 1`. A full 32-byte id therefore
+fills the buffer with no NUL and abuts `CL_ID_LEN` at offset 32. Safe **today** only
+because `cl_id_eq` and `class_id_prefix` iterate by `CL_ID_LEN` and never treat
+`CL_ID` as a cstr — a latent trap for the first caller that does. Fix: use
+`CL_ID_CAP - 1` for consistency with every other inline-string field.
+
+### B4 — `epoll_event` layout is hardcoded to the x86 packed struct
+
+`src/server.cyr` — `EPOLL_EVENT_SIZE = 12` with `load32(events_buf + ev_off)` and
+`load64(events_buf + ev_off + 4)`. That is the x86_64 **packed** layout. aarch64 Linux
+uses the unpacked 16-byte struct with `data` at offset 8. Not hit today (descent builds
+and runs x86_64 + agnos), but the first `--aarch64` build that runs will read a
+corrupt session pointer out of every epoll event. Fix: `#ifdef CYRIUS_ARCH_AARCH64`
+the size and the data offset together.
+
+### B5 — Instances are never freed; corpses are never removed
+
+`mob_spawn` (`src/mob.cyr`) takes each instance from `alloc(MI_SIZE)`; `mob_remove`
+only unlinks it from the room occupant list. `item_new` and `corpse_new`
+(`src/item.cyr`) likewise use `alloc(OI_SIZE)`, and **no corpse is ever removed
+from a room** — there is no decay path at all. Every kill and every zone reset
+leaks, and rooms accumulate corpses for the process lifetime, which is exactly
+descent's deployment shape. Mobs and objects use `alloc`, not the per-session
+`fl_alloc` arena, so disconnect does not reclaim them either.
+
+Scheduled as **M12**, not a drive-by fix: `mob_died` clears only the *killing*
+session's `SS_TARGET`, so a second attacker still holds the pointer across ticks.
+That is inert today precisely *because* nothing is reclaimed — the first free
+turns it into a use-after-free onto a recycled instance.
+
+### B6 — The save-record writer is unbounded
+
+`_ac` / `_ap` / `_ai` / `_fstr` / `_fint` (`src/persist.cyr`) append into the
+4096-byte `g_persist_save` with **no** bounds check against `SAVE_CAP`; the only
+guard in `_build_record` is inside the inventory loop. Safe today only because
+`name` is capped at 16 and room ids are short — but it is a write-side overflow
+that no amount of load-side clamping prevents, and every variable-length 2.0
+field would land on it. Fix: make the appenders fail closed and check once at the
+end of `_build_record`. Scheduled as **M11-D**, ahead of any new save field.
+
+### B7 — Signed integers do not round-trip through a save
+
+`toml_int` (`src/mob.cyr`) routes through `parse_uint` and returns the caller's
+default on a negative parse, while the writer `_ai` uses `fmt_int_buf`, which
+*does* emit a sign. So the record writer can produce a value the reader silently
+discards and replaces with a default. **Latent, not confirmed live** — no v1
+schema field appears to reach a negative value in practice, and the obvious
+candidate (`hp` going negative in combat) is reset by `player_died` within the
+same tick. But the first genuinely signed field — an item `ac` modifier, a class
+whose AC improves with level — would fail silently. Fix: a signed reader
+(**M14-C**) before M16/M17 need one.
+
 ---
 
 ## Milestones
@@ -109,7 +240,7 @@ The world becomes physical. Players have a location; rooms have prose, exits, co
 
 **Sub-bites:**
 
-- **M3-A — Zone file format.** Pick a serialization — likely `lib/cyml.cyr` or `lib/toml.cyr`. Decision recorded as **ADR 0005** ([see open ADRs](#open-adrs)). Format covers zone metadata, rooms (id / title / prose / exits / mob spawns / object spawns), mob templates, object templates.
+- **M3-A — Zone file format.** Pick a serialization — likely `lib/cyml.cyr` or `lib/toml.cyr`. Decision recorded as **ADR 0005** ([see ADRs](#adrs)). Format covers zone metadata, rooms (id / title / prose / exits / mob spawns / object spawns), mob templates, object templates.
 - **M3-B — Zone loader.** Parse zone files at boot; validate exit graph (no dangling refs); build in-memory world tree. Reload via an admin verb (becomes Joshua-driven at M8).
 - **M3-C — Movement.** Cardinal navigation (`n`/`s`/`e`/`w`/`u`/`d`); auto-look on arrival; departure / arrival messages to onlookers in the source / destination rooms; "you can't go that way" for closed exits.
 - **M3-D — Room rendering (ANSI).** Title (bold/colored), prose (default), exits line (cyan-ish), present entities (one per line, distinct color per kind: players / mobs / objects). Uses `lib/darshana` for SGR escapes.
@@ -182,20 +313,14 @@ Mobs and loot respawn. Players don't get respawn-stomped. **Shipped at 0.8.0.**
 
 **Gate met:** empty zone resets within its window; a zone with a player in any room does not reset; reset event log matches observed state.
 
-### M8 — Joshua management interface (deferred — post-1.0)
+### M8 — Joshua management interface — **moved to backlog**
 
-The operator surface. Joshua is the AGNOS game-management tool; this milestone wires the MUD's admin verbs into it. **Deferred to post-1.0** — 1.0.0 ships without it. The verb groundwork exists: `@stats` / `@who` / `@reset` (`render_*` in `server.cyr`), gated behind `YD_ADMIN`; `g_session_head` enumerates sessions; `g_zone_last_reset_ms = 0` forces a reset; the libro audit chain + reset log are the data surfaces. The remaining work is the Joshua control channel + replacing the `YD_ADMIN` gate with real operator authentication.
-
-**Sub-bites (post-1.0):**
-
-- **M8-A — Joshua dep landing.** Pull Joshua into `cyrius.cyml [deps]`. Same dep-gap caveat as M6.
-- **M8-B — Live player list.** `joshua mud players` → name / class / level / location / idle-time / connection-time.
-- **M8-C — Kick & ban.** `joshua mud kick <name>` (terminate session); `joshua mud ban <name> [--for <duration>]` (refuse reconnect).
-- **M8-D — Broadcast.** `joshua mud broadcast <message>` → server-wide MOTD-style announcement (rendered to every live session).
-- **M8-E — Zone reload.** `joshua mud reload <zone>` → re-parse the zone file, replace the in-memory zone tree, evict any mobs that no longer exist (players gracefully relocated if their room was deleted).
-- **M8-F — Audit log.** Every operator action (kick / ban / broadcast / reload) appends to `docs/audit/operator.log` with operator identity + timestamp + target.
-
-**Gate:** the v1.0 live-ops procedures (kick a misbehaving player, ban a repeat offender, broadcast a server-restart warning, reload a zone after a content fix) are all runnable from Joshua alone, no MUD-server shell access required.
+No longer a scheduled milestone. It was blocked on an upstream Cyrius port and
+specced against a dependency that turned out to be a different product. The full
+sub-bite list and the reasoning are held in
+[Backlog — Joshua operator interface](#backlog--joshua-operator-interface-was-m8)
+above. The operator work with real value — replacing the `YD_ADMIN` env gate with
+operator authentication — is **M18**, and deliberately does not depend on Joshua.
 
 ### M9 — Hardening → 1.0 (executed across 0.9.0 / 0.9.1 / 1.0.0)
 
@@ -216,6 +341,237 @@ and the clean release at **1.0.0**.
 
 ---
 
+## Milestones — the 2.0 line
+
+### Critical path
+
+Three things gate everything, and two ship in 1.x.
+
+**M11** repairs the save migration hook *before* it becomes load-bearing.
+`player_auth_load` reads `toml_int(pairs, "schema", SCHEMA_VERSION)`
+(`src/persist.cyr:407`) — the default for a record with no `schema` key is the
+*current* version, not the literal 1. Harmless while `SCHEMA_VERSION == 1`;
+the instant it becomes 2, every pre-0.9.1 record claims to be v2 and skips the
+v1 path. The bug ships **with** the bump unless it is fixed first.
+
+**M12** gives instances a free path. `mob_spawn` (`src/mob.cyr`), `item_new` and
+`corpse_new` (`src/item.cyr`) all take memory from `alloc`; `mob_remove` only
+unlinks, and **no corpse is ever removed from a room**. Every milestone after
+this one mints more instances, so the reclaim path must exist before they do.
+
+**M14** is the 2.0 contract, and one discovery inside it binds every other
+milestone: `_build_record` signs with the secret key re-derived from the typed
+passphrase ([ADR 0004](../adr/0004-identity-and-authentication.md)), which the
+server never holds. **There is therefore no offline save migration and there
+cannot be one.** Every 2.0 save field must be additive, defaulted, and migrated
+lazily at login. That is also why schema 2 should be the *last* schema bump of
+the 2.x line: fields added inside schema 2 are read-with-default and
+ignored-if-unknown, so equipment and currency do not each earn a bump.
+
+    M11 ──> M14 ──> M15 ──> M16 ──> M17, M20, M23
+    M12 ──> M13, M15, M17, M20
+    M10 ──> M21, M22        (persisted player prose)
+    M13 ──> M19             (threat needs a mob that can act)
+    M14 ──> everything touching a frozen surface
+
+**Honest sizing.** M10–M13 is on the order of six to eight months of solo
+evenings; the 2.0 gate (M14–M16) another five or six; the full set through 2.4
+is comfortably past two years. Plan the 2.0 gate, not the tail.
+
+### M10 — Wire-safe prose (v1.3.0)
+
+**Line:** 1.x
+
+Player-authored bytes reach every other player's socket by raw `memcpy`.
+`telnet_feed` *decodes* `IAC IAC` into a literal 0xFF data byte — that is correct
+RFC 854 behaviour and the suite asserts it — but `session_push_line_byte` then
+drops only `b < 32`, so 0xFF survives into the line buffer, and `cmd_say` hands
+`buf + rs, len - rs` straight to `session_appendtx` and `room_say_broadcast`. A
+player can put a bare IAC into a `say` and a conformant client on the other end
+reads it as the start of a Telnet command. The comment at that filter —
+"telnet IAC is already stripped upstream" — is wrong: IAC is stripped as
+*framing*, and the escaped literal is deliberately preserved as data. Re-emitting
+it unescaped is the bug. Touches no frozen surface, and it is the precondition
+for 2.0 ever persisting player prose.
+
+**Sub-bites:**
+
+- **M10-A — `session_appendtx_prose`.** An escaping appender beside `session_appendtx`: double 0xFF to `IAC IAC`, drop C0/C1. It must be a **bounded writer** against `TX_CAP - SS_TX_LEN`, not a pure `(buf,len)` transform — `LINE_CAP` and `TX_CAP` are both 4096, so a 4096-byte all-0xFF `say` escapes to 8192, and `session_appendtx`'s silent truncation could cut *between* the two bytes of a pair and re-emit the very lone 0xFF this fixes.
+- **M10-B — Route player bytes through it.** `cmd_say`, `cmd_emote`, both halves of `cmd_tell`, and the `body` parameters of `room_say_broadcast`. The `lead`/`tail` cstr parameters stay as they are — those are server literals. Authored room prose (`room_prose_ptr`, zero-copy into the CYML buffer) must **not** be sanitized, or zone authors lose formatting.
+- **M10-C — Names too.** `room_broadcast`, `room_append_present`, `cmd_who`, `render_who`, `cmd_examine`'s player branch. `login_name_ok` already constrains names to leading-alpha alnum, so this is defence in depth — but it is the identical path M21's persisted `title` will use.
+- **M10-D — Fuzz the sanitizer.** Every byte value at every position; no lone 0xFF survives; no partial escape pair at the buffer boundary. Test the C0/C1 branch by calling the sanitizer directly — ESC cannot reach it through `say` today, since the input filter drops everything `< 32`.
+
+**Gate:** a session sending `IAC IAC` inside `say`/`emote`/`tell` produces no lone 0xFF in any other session's tx buffer, including at the truncation boundary; the sanitizer fuzzes clean across all 256 byte values.
+
+### M11 — Migration-gate repair (v1.3.0)
+
+**Line:** 1.x · **Blocks:** M14 and every milestone that adds a save field
+
+Three defects in the migration hook, all latent at `SCHEMA_VERSION == 1` and all
+load-bearing the moment it moves. The schema default (above). The same gate
+returns the *same* error code as a failed `ed25519_verify`, so an operator who
+rolls a deploy back tells every returning player their record "has been tampered
+with". And `_find_sig_offset` ends the signed prefix at the first line beginning
+`sig ` — harmless while no field can carry a newline, fatal the first time a 2.0
+field carries free text. Nothing observable changes when this lands, which is
+exactly why it must not be folded into the bump it protects.
+
+**Sub-bites:**
+
+- **M11-A — Default the stamp to a literal.** Add `SCHEMA_V1 = 1` to `enum PersistConst`; the gate reads `toml_int(pairs, "schema", SCHEMA_V1)`. Identical today, correct after the bump. Also introduce the test seam the regression floor needs — `SCHEMA_VERSION` is a compile-time enum member and the suite compiles the same `persist.cyr`, so make the ceiling a settable `var` or an `#ifdef`, and name the mechanism here.
+- **M11-B — Separate "too new" from "tampered".** A distinct `PL_ERR_SCHEMA` and a third branch: *"Your record was written by a newer server than this one."* No `SEV_SECURITY` audit entry. Still refuses the session — a downgraded server must not half-load a v2 record.
+- **M11-C — Refuse signed-prefix splitting.** Reject any record whose `name` / `room` / `inv` value contains a byte `< 0x20`, before those values are trusted.
+- **M11-D — Bound the record writer.** `_ac` / `_ap` / `_ai` / `_fstr` / `_fint` do **no** bounds check against `SAVE_CAP`; the only guard is inside the inventory loop. Safe today only because `name ≤ 16` and room ids are short — but every variable-length 2.0 field would write unguarded into a 4096-byte buffer. Make the appenders fail closed and check once at the end of `_build_record`. This is the sub-bite that makes every later additive field safe by construction.
+- **M11-E — Regression floor.** Extend `test_freeze`: a stampless record loading as v1 under a schema-2 ceiling; `schema = 0`; a non-integer `schema`; the planted-newline record; the negative-integer round-trip from B7.
+
+**Gate:** a record with no `schema` key loads through the v1 path under a schema-2 ceiling; a `schema = 3` record disconnects with the "newer server" message and writes no tamper audit entry; an over-long record fails the write instead of overflowing.
+
+### M12 — Instance lifecycle (v1.4.0)
+
+**Line:** 1.x · **Blocks:** M13, M15, M17, M20
+
+Nothing the world creates is ever reclaimed. Mob instances come from
+`alloc(MI_SIZE)` and `mob_remove` only unlinks them; object and corpse instances
+come from `alloc(OI_SIZE)` and corpses are never removed from a room at all. On a
+long-lived server — descent's entire deployment shape — every kill and every zone
+reset leaks, and rooms silently fill with corpses. This is both the memory fix and
+the gameplay fix, and it must precede anything that mints instances faster.
+
+**Sub-bites:**
+
+- **M12-A — Corpse decay.** A tick-driven sweep retiring corpses after N ticks, and the room-render change that follows. This is the one site in 1.x where an instance genuinely leaves the object graph, so it is also the only place a free is unambiguously safe.
+- **M12-B — Free rule.** State it as *"free only where an instance leaves the object graph entirely."* Not "free at `ilist_remove`" — that is the **move** primitive (`cmd_get` does `ilist_remove` then `ilist_push`), and freeing there would destroy every `get`.
+- **M12-C — The dangling-target hazard.** `mob_died` clears only the *killing* session's `SS_TARGET`. A second session that also engaged still holds that pointer across ticks. Today that is inert because nothing is ever reclaimed and `combat_round`'s `mi_hp(m) <= 0` guard catches it. **The moment M12 frees anything, that becomes a use-after-free onto a recycled instance.** Deferring the free to end-of-tick does not fix it. Every reference must be cleared — sweep sessions on death, or carry a generation counter.
+- **M12-D — Live counters.** `lib/freelist.cyr` exposes no occupancy accessor and CLAUDE.md forbids modifying `lib/`, so the gate needs descent-side `g_mob_live` / `g_obj_live`, incremented on create and decremented on free.
+
+**Gate:** a soak of N zone resets with combat returns `g_mob_live` / `g_obj_live` to a bounded steady state; no room accumulates corpses without bound; the suite gains a use-after-free regression for the two-attacker case.
+
+### M13 — The actor tick: mobs get agency (v1.5.0)
+
+**Line:** 1.x · **Depends on:** M12 · **Blocks:** M19
+
+Mobs stand still until hit. Give them a turn: wander, assist, flee at low health.
+This is the last big 1.x item because it needs no new zone field — thresholds are
+hardcoded constants here, and authored `morale` / aggression keys are M19's
+business, since a `kind = "mob"` key is frozen surface. Note the interaction with
+`maybe_zone_reset`'s presence gate: wandering mobs change what "the zone is empty"
+means. Everything here is paid out of the 50 ms p99 tick budget, and the bench
+must be re-run per sub-bite.
+
+**Sub-bites:**
+
+- **M13-A — Mob turn in `advance_tick`.** O(living mobs), not O(rooms). Budget it.
+- **M13-B — Wander.** Movement between rooms with onlooker broadcasts, respecting the reset presence gate.
+- **M13-C — Assist and flee.** Room-mates join a fight; a mob below a hardcoded `MORALE_FLEE_PCT` disengages and moves.
+- **M13-D — Bench.** `bench_combat` re-baselined with the actor tick live; the drift budget re-verified with mobs moving, not just swinging.
+
+**Gate:** mobs wander, assist, and flee; an occupied zone still defers its reset correctly; `bench_combat` p99 stays inside 50 ms with the actor tick active.
+
+### M14 — ADR 0008 and save schema v2 (v2.0.0)
+
+**Line:** 2.0 · **Depends on:** M11 · **Blocks:** everything below
+
+The contract change. [ADR 0007](../adr/0007-frozen-1.0-surface.md) says plainly
+that "a 2.0 may supersede it"; this milestone is that supersession, and it should
+be a new ADR 0008 rather than an edit — the 1.x contract stays readable for anyone
+maintaining a 1.x deployment. The binding constraint is the one named in the
+critical path: saves are signed with a key derived from the player's passphrase,
+which the server never has, so **migration is lazy-at-login and additive only.**
+
+**Sub-bites:**
+
+- **M14-A — ADR 0008.** Supersede 0007. Enumerate the new frozen-for-2.x surface: verb table, `@`-namespace, schema 2 field set, wire behaviour, zone format (with its own `format` stamp), env knobs. Record the no-offline-migration constraint as the reason schema 2 is designed to be the last bump of the line.
+- **M14-B — Schema 2.** Bump `SCHEMA_VERSION`; `v >= 2` reads the v2 path, else v1. Every v2 field is read-with-default so a v1 record upgrades silently on the next successful login. Unknown keys are ignored, never fatal.
+- **M14-C — Signed-integer support.** `toml_int` routes through `parse_uint` and returns the default on a negative, while the writer `_ai` uses `fmt_int_buf`, which emits a sign. Nothing v1 appears to go negative today, so this is latent — but the first signed field (an item `ac` modifier, a class whose AC improves with level) would silently read back its default. Add a signed reader before M16/M17 need it.
+- **M14-D — Zone format stamp.** A `format` key in the zone header plus a `WL_ERR_FORMAT`, so zone authors get a real error instead of a misparse when the format moves again.
+- **M14-E — `validate` argv verb.** Offline zone/save validation, outside the command surface. Also the natural home for an authored-prose 0xFF check (M10's gate covers player bytes, not authored files).
+
+**Gate:** a 1.2.0 save loads, upgrades to schema 2 on login, and round-trips; a schema-3 record is refused with the "newer server" message; ADR 0008 is Accepted and 0007 marked Superseded.
+
+### M15 — Zone registry and the entry cap (v2.0.0)
+
+**Line:** 2.0 · **Depends on:** M12, M14
+
+The content ceiling, and the reason it is 2.0 rather than 1.x: ADR 0007 §5 freezes
+the zone-file format, and a zone *manifest* introduces a new file kind and new
+header keys. That is a strictly larger §5 change than the entry cap — the plan
+cannot hold one integer to 2.0 and ship a new file type in a minor. Today
+`MAX_ENTRIES = 32` and there is exactly one room table (`g_rooms`,
+`g_room_count`, `g_zone_id`, `g_zone_reset_secs` — all single globals), so the
+world is capped at 32 entries and 21 rooms of it are spent.
+
+**Sub-bites:**
+
+- **M15-A — Raise the cap.** `MAX_ENTRIES` to **255**, not 256: `bayan_cyml_parse` stops scanning at 256 entries, and descent's check is `n > MAX_ENTRIES`, so 256 would admit exactly the silently-truncated case. Four call sites share the constant.
+- **M15-B — Zone registry.** Replace the `g_zone_*` singletons with a table; per-zone reset timers; `world_load_rooms` becomes a per-zone load. This is the architectural core of the milestone and it is a rewrite of `world.cyr`'s ownership model, not an addition.
+- **M15-C — Room-id namespacing.** Saves already record location by **string room id**, not index — so location survives multi-zone for free, *provided ids stay unique across zones*. Make a cross-zone duplicate a boot error. Do not rewrite authored ids to a dotted scheme; that breaks every existing zone file.
+- **M15-D — Cross-zone exits.** Exit resolution across the registry, with dangling-reference rejection preserved.
+- **M15-E — Boot fallback.** A 1.x data directory holding only `hub.*.cyml` must still boot — try the manifest, fall back to the three `DP_*` paths as a synthetic single-zone registry, and make the fallback a tested path.
+
+**Gate:** two zones load and link; a player walks between them and a reconnect restores them to the right room in the right zone; a duplicate room id across zones fails the boot loudly; a 1.2.0-shaped data directory still boots.
+
+### M16 — XP, levels, and a death cost (v2.0.0)
+
+**Line:** 2.0 · **Depends on:** M14, M15
+
+The thing a MUD is. Players have fixed class stats and never advance;
+`MT_LEVEL` exists on every mob template and **nothing reads it**. `mob_died`
+already holds both the killing session and the mob, so the XP hook has its
+arguments in scope. `player_died` currently restores full HP and moves you to the
+start room with no cost at all.
+
+**Sub-bites:**
+
+- **M16-A — XP and the curve.** Award in `mob_died`, valued off `mt_level` — the field goes live. `xp` and `level` become schema-2 fields.
+- **M16-B — Level-up.** HP/energy/stat progression on top of the class profile, so `apply_class` becomes the level-1 case of a curve rather than the whole story.
+- **M16-C — Ability gating.** The 12 existing class abilities gate by level instead of all arriving at creation.
+- **M16-D — Death cost.** Replace the free respawn. XP loss, a corpse run, or a resurrection cost — pick one and write it down; the point is that death means something.
+- **M16-E — Surface.** `examine me` and `who` show level. Note `who`'s output shape is frozen surface, which is why this is 2.0.
+
+**Gate:** a fresh character levels from 1 to the cap through authored content; a v1 save upgrades to level 1 with its existing stats intact; death imposes its cost and is recoverable.
+
+### M17–M23 — the 2.x tail
+
+Sketched, not specified. Each earns a full entry when the milestone before it
+lands and the design is real rather than aspirational.
+
+- **M17 — Equipment slots + item modifiers (2.1.0).** Real slots feeding `player_eff_ac` / `player_eff_hit` / `player_dmg_bonus`, which already exist as the hook. Item stat modifiers need M14-C's signed reader.
+- **M18 — Operator identity + control channel (2.1.0).** Replace the `YD_ADMIN` env gate with real operator auth and an out-of-band channel. **Deliberately independent of Joshua** — see the backlog above.
+- **M19 — Threat, aggression, resistance (2.2.0).** Needs M13's actor tick to have a turn to spend. Authored `morale` / aggression keys land here.
+- **M20 — Currency and shops (2.2.0).** Shopkeeper mobs, a `scrip` currency folded into the session rather than carried as instances — which needs an inventory migration for records that already hold one.
+- **M21 — Titles, channels, ignore (2.3.0).** The first persisted *player-authored* prose; hard-depends on M10.
+- **M22 — Offline state: mail, boards, guilds (2.3.0).** Consider libro rather than player saves — it is already a dep and is an append-only signed chain, which is a better fit for boards and mail than a per-player record.
+- **M23 — Parties and group play (2.4.0).** Shared XP and group targeting; price it against the tick budget before committing.
+
+---
+
+## v2.0 criteria
+
+A release qualifies for 2.0 when:
+
+1. **M14, M15 and M16 have shipped** — the contract, the world, and progression. M17+ are not 2.0 gates.
+2. **ADR 0008 is Accepted and ADR 0007 is marked Superseded**, with the 2.x surface enumerated as precisely as 0007 enumerated 1.x.
+3. **Every 1.2.0 save loads and upgrades** to schema 2 on first login, with no data loss and no operator intervention.
+4. **Every 1.x-authored zone file still loads**, or fails with a named error that says what to change.
+5. **The world spans at least two linked zones**, and reconnect restores a player to the correct room in the correct zone.
+6. **A character can level from 1 to the cap through authored content**, and death imposes a real, recoverable cost.
+7. **Build, test, bench, fuzz and `cyrius audit` all pass** — the 1.2.0 gate, held.
+8. **`bench_combat` p99 stays inside the 50 ms drift budget** with the actor tick and progression live.
+9. **No instance leak** — mob, object and corpse counts return to a bounded steady state under soak.
+10. **CHANGELOG, README, `state.md` and this file current.**
+
+## Deferred to 2.x and beyond
+
+- **Joshua integration** — blocked on an upstream Cyrius port and a spec rewrite. See the backlog above. Operator control (M18) deliberately does not wait for it.
+- **PvP** — needs threat, equipment and levels to be meaningful first. Post-2.0.
+- **Crafting** — needs currency, shops and item modifiers underneath it.
+- **Quests** — needs a state machine per player, which is a schema conversation, and a lot of authored content.
+- **Skills separate from levels** — a second progression axis; not worth it until the first one is proven.
+- **aarch64** — B4 must be fixed before any ARM target runs, but no target is planned.
+- Everything in the v1.0 **Out of scope** list below still stands, except that PvP and MUD protocol extensions move from "not our problem" to "post-2.0, on merit".
+
+---
+
 ## Closed milestones
 
 Brief one-liners; per-tag chronology in [`../../CHANGELOG.md`](../../CHANGELOG.md). Detail folded back into the active body when relevant.
@@ -232,7 +588,7 @@ Brief one-liners; per-tag chronology in [`../../CHANGELOG.md`](../../CHANGELOG.m
   - **M1-H** — `@stats` admin verb (connections, logged-in, ticks, tick-drift p99). Gate met: 32 concurrent connect→login→disconnect, sessions reclaimed, tick p99 drift < 10 ms.
 - **M2 (0.3.0)** — the verb-noun parser (`src/parser.cyr`), pure and fuzz-clean. Tokenizer (M2-A) → verb table + aliases (M2-B) → keyword-prefix direct-object resolution (M2-C) → preposition / indirect-object split (M2-D) → `all.X` / `N.X` qualifiers (M2-E) → 100k-input fuzz harness (M2-F, `fuzz/parser_fuzz.fcyr`). `cmd_on_line` routes through the parser; `quit` disconnects via the new `SS_QUIT` flag. Object/world binding deferred to M3 — the resolution matchers run against synthetic scopes for now. Gate met: fuzz clean against 100k random inputs; verb table covered by the 154-assertion suite.
 - **M3 (0.4.0)** — the world becomes physical. [ADR 0005](../adr/0005-zone-file-format.md) picks CYML for zone files; the loader (`src/world.cyr`, M3-B) builds an in-memory room tree at boot and rejects dangling exits. Movement (M3-C) with onlooker broadcasts, ANSI room rendering (M3-D), inspection verbs (M3-E, `examine` resolving the M2 parser against live room presence), room-scoped `say`/`emote` + cross-room `tell` + `who` (M3-F), and the authored 21-room Hub starter zone (M3-G, `data/zones/hub.rooms.cyml`). Gate met: two players walk the Hub end-to-end seeing each other's arrivals / departures / says; 174-assertion suite.
-- **M4 (0.5.0)** — the combat tick. Mobs (`src/mob.cyr`) and items/corpses (`src/item.cyr`) load from `<zone>.mobs/.objs.cyml`; combat (`src/combat.cyr`) resolves a hidden-roll round per tick inside `advance_tick` (M4-A/B/C/D), with `kill`/`flee`, death → corpse + loot, and player respawn (M4-E/F). The Hub gains a bestiary (scavver → Foundry Sentinel boss) and loot tables. Gate met: `benches/bench_combat.bcyr` ticks 32 players × 64 mobs at p99 ≈ 62 µs (50 ms budget); 203-assertion suite.
+- **M4 (0.5.0)** — the combat tick. Mobs (`src/mob.cyr`) and items/corpses (`src/item.cyr`) load from `<zone>.mobs/.objs.cyml`; combat (`src/combat.cyr`) resolves a hidden-roll round per tick inside `advance_tick` (M4-A/B/C/D), with `kill`/`flee`, death → corpse + loot, and player respawn (M4-E/F). The Hub gains a bestiary (scavver → Foundry Sentinel boss) and loot tables. Gate met: `benches/bench_combat.bcyr` ticks 32 players × 64 mobs inside the 50 ms budget; 203-assertion suite. (The p99 ≈ 62 µs figure recorded here at 0.5.0 is **stale** — the bench stopped compiling at some point before 1.2.0 and was only repaired there. Measured at the 1.2.0 cut: **p99 ≈ 1.4–1.7 ms**, still far inside budget, but the two numbers are not comparable — the current compilation unit includes `persist.cyr` and a newer codegen.)
 - **M5 (0.6.0)** — the four classes (`src/classes.cyr`, `data/classes.cyml`). Class selection at login (M5-A), per-class attributes + combat profile (M5-B), and twelve abilities (M5-C..F) on an energy + tick-cooldown + status framework (M5-G) that composes with the auto-attack. Gate met: each class clears the Hub solo and kills the Foundry Sentinel without dying (M5-H); 232-assertion suite.
 - **M6 (0.7.0)** — player persistence via **libro + sigil** (`src/persist.cyr`). Ed25519 identity derived from a passphrase ([ADR 0004](../adr/0004-identity-and-authentication.md)); crash-safe signed per-player CYML saves with `.tmp`+rename writes ([ADR 0006](../adr/0006-persistence-shape.md)); load+auth on login; libro audit chain. Gate met: `kill -9` mid-tick → restart → no data loss.
 - **M7 (0.8.0)** — zone resets (`src/server.cyr` `maybe_zone_reset`, `mob.cyr`/`item.cyr` respawn). Per-zone `reset_secs` timer, player-presence gate (defer while occupied), mob/loot top-up without duplication, reset event log. Gate met: empty zone resets in window; occupied zone defers.
@@ -267,7 +623,9 @@ All ADRs are filed and **Accepted** — none open at 1.0. Index in [`../adr/READ
 - [0004](../adr/0004-identity-and-authentication.md) Ed25519 identity from a passphrase (resolved at M6) · [0005](../adr/0005-zone-file-format.md) CYML zone format (M3) · [0006](../adr/0006-persistence-shape.md) per-player signed saves + libro audit (M6)
 - [0007](../adr/0007-frozen-1.0-surface.md) frozen 1.0 surface (0.9.1)
 
-Post-1.0, the Joshua operator channel (M8) likely earns a new ADR if it adds a new wire/auth surface.
+Two land in the 2.0 line: **ADR 0008** supersedes 0007 with the 2.x surface
+contract (M14), and the operator control channel (M18) earns its own if it adds a
+new wire/auth surface — which it will, since it replaces the `YD_ADMIN` gate.
 
 ---
 

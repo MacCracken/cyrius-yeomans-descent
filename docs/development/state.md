@@ -385,8 +385,20 @@ _None yet._
 
 **No active cycle.** 1.2.0 (toolchain + dep upgrade, first clean audit) closed.
 The tree builds, `cyrius audit` exits 0, and 298 tests + 3 benches pass.
-**M8 (Joshua) remains the next feature milestone**, deferred to post-1.0.
-Pick up per the boot guide below.
+
+**Next is the 1.3.0 pair: M10 (wire-safe prose) + M11 (migration-gate repair).**
+Both are 1.x — they touch no ADR-0007-frozen surface — and M11 is the hard
+prerequisite for the 2.0 save-schema bump, because the migration gate currently
+defaults a stampless record's schema to `SCHEMA_VERSION` rather than the literal
+1. Fix it *before* the constant moves, or the bug ships with the bump.
+
+**M8 (Joshua) moved to the backlog**: it was blocked on an upstream Cyrius port,
+and specced against a management CLI that turned out to be an AI-NPC simulation
+runtime. The operator work worth doing — real operator auth replacing the
+`YD_ADMIN` gate — is M18 and does not depend on it.
+
+The full 2.0 line (M10–M23, with M14+M15+M16 as the minimum credible 2.0) is in
+[`roadmap.md`](roadmap.md#milestones--the-20-line). Pick up per the boot guide below.
 
 Carried forward from 1.2.0 (none block a release):
 
