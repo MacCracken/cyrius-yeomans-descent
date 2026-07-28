@@ -84,9 +84,20 @@ fn world_load_classes(path): i64 {
     if (n <= 0)          { return WL_ERR_EMPTY; }
     if (n > MAX_ENTRIES) { return WL_ERR_OVERCAP; }
 
+    # H9 (1.6.5) — build into the global, but publish the COUNT only on the
+    # success return below. Every `return WL_ERR_*` in the parse loop sits after
+    # this point, so setting the count here meant a rejected file left a live,
+    # partly-filled table behind: cmd_serve printed "no zone loaded" / "no mobs
+    # loaded" and every `world_room_count() == 0` guard in session.cyr,
+    # combat.cyr, item.cyr and server.cyr was defeated at the same moment. A
+    # player could log in, walk into the prefix that did parse, and be stranded
+    # in a room with no exits — with the operator told the load had failed.
+    # Zeroing first is what makes cmd_serve's documented non-fatal behaviour
+    # ("the server still runs, with the verbs answering their no-zone
+    # placeholders") actually true.
     g_classes = alloc(n * CL_SIZE);
     memset(g_classes, 0, n * CL_SIZE);
-    g_class_count = n;
+    g_class_count = 0;   # published on success only
 
     var i = 0;
     while (i < n) {
@@ -128,6 +139,7 @@ fn world_load_classes(path): i64 {
         store64(c + CL_DESC_LEN, cyml_entry_body_len(e));
         i = i + 1;
     }
+    g_class_count = n;   # H9 — publish only now that every entry parsed
     return n;
 }
 
@@ -243,7 +255,13 @@ fn login_on_class(s, buf, len): i64 {
     session_appendtx_cstr(s, ".\r\n");
     session_appendtx_cstr(s, "Type \"help\" for commands.\r\n");
     session_enter_world(s);
-    player_save(s);   # M6: persist the new character's first record (persist.cyr)
+    # H10 (1.6.5) — the character's FIRST record. Failing silently here means a
+    # player finishes creation, plays, and finds nothing to log back in to.
+    if (player_save(s) != 1) {
+        audit_event(SEV_WARNING, "save.fail.create",
+        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+        session_appendtx_cstr(s, "\r\nWARNING: your character could not be written to disk.\r\n");
+    }
     session_send_cmd_prompt(s);
     return 0;
 }

@@ -1734,6 +1734,67 @@ fn test_chpass_isolation(): i64 {
     return 0;
 }
 
+# === H9/H10 (1.6.5) — failed loads publish nothing; failed saves are not silent ===
+fn test_load_and_save_failure(): i64 {
+    test_group("failure-paths");
+    persist_init();
+
+    # --- H9: a rejected content file must leave NO live table. Publishing the
+    # count before the parse loop meant a rejected file left a partly-filled
+    # world behind — cmd_serve printed "no zone loaded" while every
+    # `world_room_count() == 0` guard downstream was simultaneously defeated, so
+    # a player could log in and be stranded in the prefix that happened to parse.
+    var saved_rooms = g_room_count;
+    var saved_start = g_start_room;
+    assert_eq(world_load_rooms("tests/fixtures/wrongkind.rooms.cyml"), WL_ERR_KIND,
+              "a wrong-kind rooms file is rejected");
+    assert_eq(g_room_count, 0, "and leaves no live room table");
+    assert_eq(world_load_rooms("tests/fixtures/dangling.rooms.cyml"), WL_ERR_DANGLE,
+              "a dangling-exit rooms file is rejected");
+    assert_eq(g_room_count, 0, "and likewise leaves nothing live");
+    assert_eq(world_load_rooms("tests/fixtures/nosuchfile.cyml"), WL_ERR_IO,
+              "a missing file is rejected");
+    assert_eq(g_room_count, 0, "and leaves nothing live");
+    # Restore the real world for the groups that follow.
+    assert_eq(world_load_rooms(DP_ROOMS), WL_OK, "the real zone reloads");
+    assert(g_room_count > 0, "and publishes its count on success");
+
+    # --- H10: the `passwd` commit must not claim success when the save failed.
+    # It used to discard player_save's return, write a SEV_INFO "passwd.change"
+    # entry and tell the player their record was re-keyed — while the on-disk
+    # record still held the OLD pubkey, so the next login rejected the new
+    # passphrase and the retired one still worked.
+    #
+    # Force the failure the way M11-D's bound does: an inventory too large for
+    # SAVE_CAP makes _build_record return -1.
+    var s = _mk_sess("Rekeyfail", 9);
+    var blk = sess_ident(s);
+    random_bytes(blk, SALT_LEN);
+    ident_derive(blk, "origpass12", 10, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 1);
+    store64(s + SS_AUTHED, 1); store64(s + SS_ROOM, 0 - 1); store64(s + SS_CLASS, 0);
+    var k = 0;
+    while (k < 400) {
+        var o = corpse_new("bulkitem", 8);
+        store64(o + OI_TPL_ID_LEN, copy_bytes_capped(o + OI_TPL_ID, OI_TPL_ID_CAP - 1, "bulkitem", 8));
+        ilist_push(s + SS_INV, o);
+        k = k + 1;
+    }
+    assert_eq(player_save(s), 0 - 1, "the oversized record genuinely fails to save");
+
+    # Capture the live pubkey, then attempt the re-key.
+    var before = alloc(PK_LEN);
+    memcpy(before, blk + IDENT_PK, PK_LEN);
+    store64(s + SS_PHASE, PHASE_CHPASS_NEW);
+    chpass_on_new(s, "replacement", 11);
+    chpass_on_confirm(s, "replacement", 11);
+    assert_eq(_bytes_eq(blk + IDENT_PK, before, PK_LEN), 1,
+              "a failed re-key leaves the live identity UNCHANGED");
+    assert_eq(load64(s + SS_IDENT_CAND), 0, "and still releases the candidate block");
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -1948,6 +2009,7 @@ fn main() {
     test_accept_limits();
     test_assist_real();
     test_chpass_isolation();
+    test_load_and_save_failure();
 
     return assert_summary();
 }

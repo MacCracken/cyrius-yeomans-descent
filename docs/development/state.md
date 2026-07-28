@@ -3,14 +3,34 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-28 (v1.6.4 — 1.x closed)
+> **Last refresh**: 2026-07-28 (v1.6.5 — sweep batches A–D scheduled through 1.6.9)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.6.4 tree.
+> tests, boot guide) describes the **current** 1.6.5 tree.
 
 ## Version
+
+**1.6.5** — loader + save-failure integrity, 2026-07-28. **431 assertions**;
+`cyrius audit` exits 0; `--agnos` warning-free.
+
+- **Four content loaders published their globals before validating.** A rejected
+  file left a live half-table, so `cmd_serve` reported the failure while every
+  `world_room_count() == 0` guard downstream was defeated at the same instant —
+  a player could log in and be stranded in whatever prefix parsed. Three now
+  publish on success only; `world_load_rooms` cannot (it is two-pass and pass 2
+  walks the count), so its eight error returns route through `_wl_rooms_fail`.
+- **`player_save` failures were discarded at four of five sites**, including the
+  `passwd` commit — which claimed the record was re-keyed while the on-disk copy
+  kept the old pubkey. Now checked, with a rollback of the live ident block, and
+  the rest audit their failures.
+
+**Next: the sweep is not finished.** Twelve findings remain, batched into
+**1.6.6–1.6.9** (state integrity → content/parser → resource & timing →
+coverage + docs). See [`roadmap.md`](roadmap.md#sweep-backlog--the-remaining-16x-batches).
+**2.0 / M14 does not start until 1.6.9 lands** and a re-run sweep produces no
+critical or high findings.
 
 **1.6.4** — `passwd` isolation + the assist made real, 2026-07-28. **420
 assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
@@ -379,7 +399,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **420** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **431** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,

@@ -217,18 +217,33 @@ fn room_index_by_id(buf, len): i64 {
     return 0 - 1;
 }
 
+# H9 (1.6.5) — abandon a failed room load without leaving a live world behind.
+#
+# world_load_rooms is TWO-PASS: pass 2 resolves exits via room_index_by_id,
+# which walks g_room_count, so unlike the other three loaders the count has to be
+# live *during* parsing and cannot simply be published at the end. Zeroing it on
+# the way out is the equivalent guarantee: a rejected file leaves no world, so
+# cmd_serve's "running roomless" message is true and every
+# `world_room_count() == 0` guard downstream actually holds.
+fn _wl_rooms_fail(code): i64 {
+    g_room_count = 0;
+    g_start_room = 0;
+    return code;
+}
+
 # === world_load_rooms — parse + build the room tree from a CYML file. ===
 #
 # Returns WL_OK on success, or a negative WL_ERR_* code. On success the
-# world globals are populated and exits are resolved + validated.
+# world globals are populated and exits are resolved + validated; on ANY
+# failure _wl_rooms_fail leaves no live world behind.
 fn world_load_rooms(path): i64 {
     var r = cyml_parse_file_r(path);
-    if (is_ok(r) == 0) { return WL_ERR_IO; }
+    if (is_ok(r) == 0) { return _wl_rooms_fail(WL_ERR_IO); }
     var doc = result_unwrap(r);
 
     var n = cyml_doc_entry_count(doc);
-    if (n <= 0)            { return WL_ERR_EMPTY; }
-    if (n > MAX_ENTRIES)   { return WL_ERR_OVERCAP; }
+    if (n <= 0)            { return _wl_rooms_fail(WL_ERR_EMPTY); }
+    if (n > MAX_ENTRIES)   { return _wl_rooms_fail(WL_ERR_OVERCAP); }
 
     # Zone metadata from the file-level header.
     var start_id = 0;   # optional `start` room id (str); else room 0
@@ -242,6 +257,17 @@ fn world_load_rooms(path): i64 {
         g_zone_reset_secs = toml_int(fpairs, "reset_secs", 900);   # M7-A
     }
 
+    # H9 (1.6.5) — build into the global, but publish the COUNT only on the
+    # success return below. Every `return WL_ERR_*` in the parse loop sits after
+    # this point, so setting the count here meant a rejected file left a live,
+    # partly-filled table behind: cmd_serve printed "no zone loaded" / "no mobs
+    # loaded" and every `world_room_count() == 0` guard in session.cyr,
+    # combat.cyr, item.cyr and server.cyr was defeated at the same moment. A
+    # player could log in, walk into the prefix that did parse, and be stranded
+    # in a room with no exits — with the operator told the load had failed.
+    # Zeroing first is what makes cmd_serve's documented non-fatal behaviour
+    # ("the server still runs, with the verbs answering their no-zone
+    # placeholders") actually true.
     g_rooms = alloc(n * RM_SIZE);
     memset(g_rooms, 0, n * RM_SIZE);   # zero list heads / spawn ptrs
     g_room_count = n;
@@ -256,16 +282,16 @@ fn world_load_rooms(path): i64 {
         var e = cyml_doc_entry(doc, i);
         var hs = str_new(cyml_entry_header(e), cyml_entry_header_len(e));
         var secs = toml_parse(hs);
-        if (vec_len(secs) == 0) { return WL_ERR_NOID; }
+        if (vec_len(secs) == 0) { return _wl_rooms_fail(WL_ERR_NOID); }
         var pairs = toml_section_pairs(vec_get(secs, 0));
 
         var kind = toml_get(pairs, "kind");
-        if (kind == 0) { return WL_ERR_KIND; }
-        if (str_eq_cstr(kind, "room") == 0) { return WL_ERR_KIND; }
+        if (kind == 0) { return _wl_rooms_fail(WL_ERR_KIND); }
+        if (str_eq_cstr(kind, "room") == 0) { return _wl_rooms_fail(WL_ERR_KIND); }
 
         var rm = room_at(i);
         var id = toml_get(pairs, "id");
-        if (id == 0) { return WL_ERR_NOID; }
+        if (id == 0) { return _wl_rooms_fail(WL_ERR_NOID); }
         store64(rm + RM_ID_LEN, copy_str_capped(rm + RM_ID, RM_ID_CAP, id));
 
         var title = toml_get(pairs, "title");
@@ -302,7 +328,7 @@ fn world_load_rooms(path): i64 {
             var v = load64(exit_tmp + (i * NDIR + dir) * 8);
             if (v != 0) {
                 var idx = room_index_by_str(v);
-                if (idx < 0) { return WL_ERR_DANGLE; }
+                if (idx < 0) { return _wl_rooms_fail(WL_ERR_DANGLE); }
                 store64(rm + RM_EXIT + dir * 8, idx);
             }
             dir = dir + 1;

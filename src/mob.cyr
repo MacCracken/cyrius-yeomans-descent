@@ -187,9 +187,20 @@ fn world_load_mobs(path): i64 {
     if (n <= 0)          { return WL_ERR_EMPTY; }
     if (n > MAX_ENTRIES) { return WL_ERR_OVERCAP; }
 
+    # H9 (1.6.5) — build into the global, but publish the COUNT only on the
+    # success return below. Every `return WL_ERR_*` in the parse loop sits after
+    # this point, so setting the count here meant a rejected file left a live,
+    # partly-filled table behind: cmd_serve printed "no zone loaded" / "no mobs
+    # loaded" and every `world_room_count() == 0` guard in session.cyr,
+    # combat.cyr, item.cyr and server.cyr was defeated at the same moment. A
+    # player could log in, walk into the prefix that did parse, and be stranded
+    # in a room with no exits — with the operator told the load had failed.
+    # Zeroing first is what makes cmd_serve's documented non-fatal behaviour
+    # ("the server still runs, with the verbs answering their no-zone
+    # placeholders") actually true.
     g_mob_tpls = alloc(n * MT_SIZE);
     memset(g_mob_tpls, 0, n * MT_SIZE);
-    g_mob_tpl_count = n;
+    g_mob_tpl_count = 0;   # published on success only
 
     var i = 0;
     while (i < n) {
@@ -235,6 +246,7 @@ fn world_load_mobs(path): i64 {
         store64(t + MT_LOOT, toml_get(pairs, "loot"));   # str or 0
         i = i + 1;
     }
+    g_mob_tpl_count = n;   # H9 — publish only now that every entry parsed
     return n;
 }
 

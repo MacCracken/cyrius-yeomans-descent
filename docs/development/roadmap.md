@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-28 (v1.6.4 — passwd isolation + assist repair; the 1.x line is closed)
+> **Last Updated**: 2026-07-28 (v1.6.5 — loader + save-failure integrity; sweep batches A–D scheduled)
 >
 > Milestone plan through v1.0 (shipped) and on to v2.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
@@ -49,6 +49,11 @@ MUD rather than a well-built room-crawler.
 | **1.6.2** | Pre-auth CPU exhaustion — dispatch cap, bare-CR guard, passlen hoist, attempt cap | ✅ 2026-07-28 |
 | **1.6.3** | Accept-path fd-exhaustion spin + session cap + `save` rate limit | ✅ 2026-07-28 |
 | **1.6.4** | `passwd` candidate isolation + the M13 assist made real | ✅ 2026-07-28 |
+| **1.6.5** | Loaders publish only on success · `player_save` failures no longer silent | ✅ 2026-07-28 |
+| **1.6.6** | Sweep batch A — state integrity | planned |
+| **1.6.7** | Sweep batch B — content + parser correctness | planned |
+| **1.6.8** | Sweep batch C — resource & timing hygiene | planned |
+| **1.6.9** | Sweep batch D — coverage + docs, then close the sweep | planned |
 | **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
 | **2.1.0** | M17 — equipment slots + item modifiers · M18 — operator identity + control channel | planned |
 | **2.2.0** | M19 — threat, aggression, resistance · M20 — currency and shops | planned |
@@ -75,9 +80,93 @@ embarrassing the release.
 
 **1.6.1–1.6.4 shipped** on top: the audit chain bounded via upstream libro 2.8.4; pre-auth CPU exhaustion closed (one 4 KB write froze the loop for 5–27 s); the accept-path fd-exhaustion spin closed (60 idle sockets pinned a core and leaked 2.3 MB/s); and the `passwd` candidate moved off a global that persistence overwrites — a data-loss bug that could install signature bytes as a secret key. 1.6.4 also repaired the M13 assist, which 1.5.0 shipped as prose: the mob never swung, and the latch froze it out of wander permanently. **420 assertions.**
 
-**Fourteen lower-severity sweep findings remain open** — see the 1.6.4 CHANGELOG entry for the list. None is DoS-class or memory-unsafe.
+**1.6.5 shipped** — the two flagged as worth pulling forward: four content loaders that published global state before validating it (a rejected file left a live half-world while telling the operator the load had failed), and `player_save` failures discarded at four of five call sites, including the `passwd` commit that claimed success while the record kept the old key. **431 assertions.**
+
+**Twelve sweep findings remain, batched into 1.6.6–1.6.9** — see *Sweep backlog* below. None is DoS-class or memory-unsafe. **2.0 work does not start until 1.6.9 lands.**
 
 **Next is 2.0.0**, starting with **M14 — ADR 0008 + save schema v2**, the gate everything else routes through. Read the critical path above first: saves are signed with a key derived from the player's passphrase, which the server never holds, so **migration is lazy-at-login and additive only**. Pickup pointer in [`state.md`](state.md).
+
+---
+
+## Sweep backlog — the remaining 1.6.x batches
+
+The 1.6.0 audit produced 56 findings; 44 survived adversarial verification.
+Twenty-two are closed across 1.6.0–1.6.5. **Twelve remain**, grouped below into
+four batches by the kind of work rather than by severity, so each release has one
+coherent theme and one coherent test story.
+
+**None is DoS-class or memory-unsafe** — those are all closed. **2.0 work does
+not start until 1.6.9 lands.**
+
+### 1.6.6 — Batch A: state integrity
+
+The three that can still corrupt or duplicate player state.
+
+- **Single-session guard.** `login_on_name` checks only `player_exists`; nothing
+  scans `g_session_head` for an already-authed session with the same name. Both
+  sessions run `_restore_inv` and each mints a full copy of the saved inventory —
+  reproduced: one authored `notice` became two on disk, doubling per cycle. Both
+  also write the same record with no compare-and-swap, so the stale session's
+  `drop_session` reverts the live one's room, drops, HP and class. Refuse the
+  second login; takeover semantics are a 2.0 conversation.
+- **`OI_TPL_ID` is one byte shorter than `OT_ID`.** A 32-byte template id is
+  truncated on the way into an instance, so it will not match on reload.
+- **Audit chain re-links to genesis on every restart.** The on-disk chain's head
+  hash is not read back at boot, so each run starts a fresh linkage — the
+  tamper-evidence claim only holds within a single process lifetime.
+
+### 1.6.7 — Batch B: content + parser correctness
+
+Things the game says it does and does not.
+
+- **The `N.X` qualifier is parsed everywhere and honoured nowhere.**
+  `qual_parse` correctly returns `QUAL_NTH` with a count; `cmd_get` / `cmd_drop`
+  read only `QUAL_ALL` and hand the base noun to `ilist_find_kw`, which returns
+  the head-most match. `get 2.ration` takes the first. `cmd_kill` never calls
+  `qual_parse` at all.
+- **Five item verbs still answer the M2-era placeholder** — `put` / `give` /
+  `wear` / `remove` / `wield` parse fully and then reply with the stub.
+- **`toml_int` silently substitutes the default** for any unparseable value, so a
+  typo'd zone field reads as "absent" rather than as an error. (Related to
+  backlog **B7**, the signed-value gap — fix them together.)
+- **`bash` and `emp` print their status prose after a killing blow**, describing a
+  mob that is already dead.
+
+### 1.6.8 — Batch C: resource & timing hygiene
+
+Measured costs and clock handling. Nothing here is reachable as an attack; all of
+it is waste or drift.
+
+- **Room broadcasts are O(engaged × room population) in `write(2)` syscalls** —
+  `room_combat_line` walks the session list per line and flushes each recipient
+  immediately. Coalesce: append during the tick, flush each dirty session once at
+  the end. Measured at 18.8 ms for 128 co-located players.
+- **`save_sweep` runs inline in the tick** and measured 50.5 ms with 32 dirty
+  sessions — 101% of the entire ADR 0001 drift budget in one tick. Smear it with
+  a cursor, a few sessions per tick.
+- **Every `player_save` leaks ~1.9 kB of bump arena** (hex encodes and `Str`
+  headers that `alloc` never reclaims). Same allocator-level root cause recorded
+  in libro 2.8.4.
+- **Tick snap-forward compares against a pre-`advance_tick` clock sample**, so a
+  long tick mis-measures its own drift.
+- **`reset_secs` has no floor and an unchecked `× 1000`**, so a small or hostile
+  authored value can overflow or reset continuously.
+
+### 1.6.9 — Batch D: coverage, then close the sweep
+
+- **Close the benchmark and soak blind spots this sweep exposed** — the existing
+  benches cover the combat tick and the telnet parser and nothing else. No bench
+  touches the login path, the save path, room broadcasts or the loaders, which is
+  why items in Batch C went unmeasured for so long.
+- **Documentation sweep** (CLAUDE.md Process step 6 requires it anyway): reconcile
+  `state.md`'s source-layout section, the stale M4 bench figure, and the comments
+  this sweep found contradicting their code.
+- **Re-run the full audit sweep** against the repaired tree and confirm the
+  finding count actually falls — a sweep that is never re-run proves only that
+  the first pass found things.
+
+**Exit criterion for the 1.x line:** batches A–D landed, `cyrius audit` green,
+and a re-run sweep producing no critical or high findings. Then 2.0 / M14.
 
 ---
 

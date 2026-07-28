@@ -138,7 +138,15 @@ fn save_sweep(): i64 {
     while (s != 0) {
         var nxt = load64(s + SS_NEXT);
         if (load64(s + SS_AUTHED) == 1) {
-            if (load64(s + SS_SAVE_DIRTY) == 1) { player_save(s); }
+            if (load64(s + SS_SAVE_DIRTY) == 1) {
+                # H10 (1.6.5) — a discarded failure here is silent data loss on
+                # a five-minute cadence. The player is still connected and has no
+                # idea; the audit chain is the only durable record.
+                if (player_save(s) != 1) {
+                    audit_event(SEV_WARNING, "save.fail.sweep",
+                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+                }
+            }
         }
         s = nxt;
     }
@@ -399,7 +407,15 @@ fn session_list_remove(s): i64 {
 fn drop_session(epfd, s): i64 {
     # M6-D: flush state on the way out — covers `quit`, idle reap, and
     # client-side disconnects alike. A no-op for unauthenticated sessions.
-    if (load64(s + SS_AUTHED) == 1) { player_save(s); }
+    if (load64(s + SS_AUTHED) == 1) {
+        # H10 — the last save a character gets. Queueing a line would be dead
+        # code (the socket is going away), so record it where an operator can
+        # find it afterwards.
+        if (player_save(s) != 1) {
+            audit_event(SEV_WARNING, "save.fail.disconnect",
+            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+        }
+    }
     #ifndef CYRIUS_TARGET_AGNOS
     sys_epoll_ctl(epfd, EPOLL_CTL_DEL, load64(s + SS_FD), 0);
     #endif
@@ -923,10 +939,21 @@ fn cmd_serve(port): i64 {
         # Object + mob templates, then spawn mobs into rooms (M4).
         var oc = world_load_objs(DP_OBJS);
         if (oc >= 0) { print_num(oc); println(" object templates"); }
+        else {
+            # H9 (1.6.5) — a rejected objs file used to produce NO diagnostic at
+            # all: there was no else arm, and zone_reset_objs below was gated on
+            # the MOB result, not this one. A malformed hub.objs.cyml therefore
+            # gave a completely clean-looking boot.
+            println("world: no objects loaded (code below)");
+            print_num(oc);
+            println("");
+        }
         var mc = world_load_mobs(DP_MOBS);
         if (mc >= 0) {
             var sp = world_spawn_all();
-            var so = zone_reset_objs();   # M7-D: place authored room objects
+            # H9 — gated on the OBJECT result; it was reading mc.
+            var so = 0;
+            if (oc >= 0) { so = zone_reset_objs(); }   # M7-D: place authored room objects
             print_num(mc); print(" mob templates, ", 16);
             print_num(sp); print(" mobs, ", 7);
             print_num(so); println(" objs spawned");

@@ -4,6 +4,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.5] — 2026-07-28
+
+**A failed load leaves no world; a failed save is never reported as success.**
+
+### Fixed
+
+- **Four content loaders published global state before validating it.** Each of
+  `world_load_rooms` / `world_load_mobs` / `world_load_objs` /
+  `world_load_classes` set its count immediately after `alloc`, while every
+  `return WL_ERR_*` in the parse loop sits *below* that point. A rejected file
+  therefore left a live, partly-filled table: `cmd_serve` printed "no zone
+  loaded" and **every `world_room_count() == 0` guard in `session.cyr`,
+  `combat.cyr`, `item.cyr` and `server.cyr` was defeated at the same moment**. A
+  player could log in, walk into whatever prefix happened to parse, and be
+  stranded in a room with no exits — with the operator told the load had failed.
+
+  Three of the four now publish the count only on the success return.
+  `world_load_rooms` could not: it is **two-pass**, and pass 2 resolves exits via
+  `room_index_by_id`, which walks `g_room_count` — so the count has to be live
+  *during* parsing. Its eight error returns route through `_wl_rooms_fail`
+  instead, which zeroes the count and start room on the way out. Same guarantee,
+  different mechanism. (This is the shape backlog **B2** described for
+  `world_load_classes`; all four are now closed.)
+- **A rejected `objs` file produced no diagnostic at all.** `cmd_serve` had no
+  `else` arm for `world_load_objs`, and `zone_reset_objs()` was gated on the
+  **mob** result rather than the object one — so a malformed `hub.objs.cyml`
+  gave a completely clean-looking boot and then spawned from a file the loader
+  had rejected. Both corrected.
+- **`player_save` failures were discarded at four of five call sites.** The
+  sharp one is the `passwd` commit: it ignored the return, wrote a `SEV_INFO`
+  `passwd.change` entry, and told the player *"Passphrase changed. Your record is
+  re-keyed."* — while the on-disk record still held the **old** pubkey. The next
+  login would reject the new passphrase and the retired one would still work.
+  Reachable from any I/O failure (ENOSPC, EIO, a failed rename), not only the
+  over-cap-inventory route M11-D added.
+
+  `chpass_on_confirm` now checks the return **before** the audit entry and the
+  success prose, and **rolls the live ident block back** — the memcpy has
+  already overwritten it by then, so without the rollback the session would keep
+  a key the record does not have. The other three sites (`save_sweep`,
+  `drop_session`, character creation) emit a `SEV_WARNING` audit event; creation
+  also warns the player, since a failed first save means there is nothing to log
+  back in to. A queued session line would be dead code in `drop_session` — the
+  socket is already going away — so the audit chain is the only lever that works
+  everywhere.
+
+### Notes
+
+- Suite **420 → 431**. Mutation-verified: stopping `_wl_rooms_fail` zeroing
+  fails 2; making the `passwd` commit ignore its save return fails 4 — including
+  two **pre-existing** assertions, which is precisely the corruption the check
+  prevents.
+- One test of mine asserted `WL_ERR_EXIT`, which does not exist; the real code is
+  `WL_ERR_DANGLE`. Caught by the compiler, not by a passing test.
+
 ## [1.6.4] — 2026-07-28
 
 **Two more sweep findings — one of them a data-loss bug, one of them mine.**
