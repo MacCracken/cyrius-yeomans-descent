@@ -92,6 +92,33 @@ fn obj_free(o): i64 {
     return 0;
 }
 
+# === M14-B — return a disconnecting player's inventory to the freelist. ===
+#
+# `session_free` frees the rx / tx / line / name buffers and the ident block, and
+# has never touched SS_INV — so every object a player was carrying leaked at
+# disconnect. Remotely driven and unbounded: connect, `get all`, `quit`, repeat.
+# 1.4.0 gave objects a free path but only wired it to corpse decay; this is the
+# other end of the same job.
+#
+# The items are genuinely leaving the object graph here — the save record stores
+# inventory by TEMPLATE ID (persist.cyr's `inv` field), not by instance, so the
+# player gets them back on next login from a fresh `item_new`. Nothing else can
+# reach these instances once the session is gone, which is exactly the condition
+# M12-B's free rule requires.
+#
+# Call this BEFORE session_free, and only from the disconnect path — dropping a
+# live player's inventory anywhere else would destroy what they are carrying.
+fn session_drop_inv(s): i64 {
+    var o = load64(s + SS_INV);
+    while (o != 0) {
+        var nxt = oi_next(o);      # capture before the free
+        obj_free(o);
+        o = nxt;
+    }
+    store64(s + SS_INV, 0);
+    return 0;
+}
+
 # Push `o` onto the front of the intrusive list at `slot`. O(1) and
 # order-agnostic — nothing in the game depends on inventory or room-object
 # ordering, so the cheapest insertion wins.

@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Yeoman's Descent — a Cyrius-native text MUD server set in a techno-feudal arcology"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.4.83"
+cyrius = "6.4.86"
 
 [build]
 entry = "src/main.cyr"
@@ -52,7 +52,7 @@ stdlib = ["std", "assert", "bench", "args", "net", "chrono", "result", "tagged",
 # "T.Ron" persistence subsystem. Pulls sigil 3.12.1 (Ed25519) + sakshi 2.4.3 +
 # patra 1.12.12 TRANSITIVELY (libro dropped its own [deps.agnosys] at the
 # agnosys → agnodrm decomposition; the trust stack lives in sigil now).
-# `path` resolves from the local sibling checkout (currently libro 2.8.2) —
+# `path` resolves from the local sibling checkout (currently libro 2.8.3) —
 # the `tag` documents the pinned release and must track that checkout's VERSION.
 #
 # NOTE — libro 2.8.0 thinned its sigil surface to capability sub-bundles, so
@@ -62,11 +62,11 @@ stdlib = ["std", "assert", "bench", "args", "net", "chrono", "result", "tagged",
 # back: the monolith redefines every one of those symbols and drags in the
 # x509/RSA bignum tables — ~13 MB of .bss nothing here calls. See src/main.cyr.
 #
-# sakshi resolves to 2.4.3 because sigil 3.12.1 pins that tag, while the 6.4.83
+# sakshi resolves to 2.4.3 because sigil 3.12.1 pins that tag, while the 6.4.86
 # toolchain bundles 2.4.6 — hence the standing "./lib/ shadows version-pinned"
 # build warning. Needs a sigil-side bump; not fixable from descent.
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
 path = "../libro"
-tag = "2.8.2"
+tag = "2.8.3"
 modules = ["dist/libro.cyr"]

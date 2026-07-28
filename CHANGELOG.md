@@ -4,6 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-07-28
+
+**Hardening sweep, closing the 1.x line.** Toolchain `6.4.83` → **`6.4.86`**,
+libro `2.8.2` → **`2.8.3`** (a pure toolchain refresh upstream — zero `src`
+changes). Then an eight-lens audit of the whole tree with every finding put
+through an independent refuter.
+
+### Fixed
+
+- **Use-after-free: a mob kept pointing at a disconnected player — a regression
+  1.5.0 introduced.** `drop_session` frees a Session on quit / idle-reap /
+  socket close and never walked the mob lists, so a mob the player had engaged
+  (`cmd_kill` → `mi_set_target(m, s)`) held `MI_TARGET` into freed memory.
+  That was **inert until 1.5.0**: `MI_TARGET` had only ever been *compared*
+  (`combat_disengage`), never followed. M13's `_mob_assist` reads it and then
+  dereferences — `var s = mi_target(other); … load64(s + SS_ROOM)` — so the actor
+  tick turned a dormant dangling pointer into a live use-after-free. Worse,
+  `fl_free` returns the block to the size class the next `session_new` draws
+  from, so the read can land on a **live, different player** and hand that
+  session to a second mob as its target.
+  New `mobs_forget_session` — the exact mirror of 1.4.0's `sessions_forget_mob`,
+  the same hazard pointing the other way — called from `drop_session` before the
+  free.
+- **A disconnecting player's inventory was never reclaimed.** `session_free`
+  frees the rx / tx / line / name buffers and the ident block, and has never
+  touched `SS_INV`, so every carried object leaked. Remotely driven and
+  unbounded: connect, `get all`, `quit`, repeat. 1.4.0 gave objects a free path
+  but only wired it to corpse decay; `session_drop_inv` is the other end of that
+  job. Safe because the save record stores inventory by **template id**, not by
+  instance — the player gets them back from a fresh `item_new` on next login.
+- **`hp` was clamped to an absolute range but never against `maxhp`.** The two
+  were validated independently, and nothing downstream ever pulls an over-max
+  value back down: `classes_upkeep` regenerates only while `hp < max`,
+  `ability_heal` caps on the way up, `player_died` assigns `hp = maxhp`. A
+  re-signed record carrying `hp = 1000000, maxhp = 30` produced a permanently
+  million-HP character. A player owns their signing key (ADR 0004), so this is
+  the 0.9.0 rule again — a signature proves **authorship**, not field validity —
+  extended to *relational* invariants, not just per-field ranges. Load-side
+  only; no schema change.
+
+### Notes
+
+- Suite **373 → 385**. All three fixes mutation-verified: neutering
+  `mobs_forget_session` fails 2, stopping `session_drop_inv` freeing fails 2,
+  removing the `hp`/`maxhp` clamp fails 1.
+- **RSS is the wrong instrument for the inventory leak** and deliberately is not
+  quoted as evidence: `fl_free` returns blocks to the freelist but never
+  `munmap`s, so reclaiming cannot shrink RSS. A 260 s / 41-login soak measures
+  +636 kB both before and after. The fix is proven by `g_obj_live` returning to
+  baseline, which the mutation test confirms.
+- `bench_combat` p99 **1299 µs** against the 50 ms budget; `--agnos`
+  warning-free; `cyrius audit` exits 0.
+
+### Known — needs upstream libro
+
+**The in-memory audit chain grows without bound.** `audit_event` appends on every
+login / save / security event and `g_audit_chain` is **never read** — durability
+comes from `filestore_append`. libro offers no way to bound it that actually
+releases memory: `chain_new()` sets capacity `0` so `_chain_auto_rotate` returns
+immediately and rotation never fires (there is no capacity constructor);
+`chain_apply_retention` redistributes into two *new* vecs while archived entries
+stay referenced; and libro contains exactly one `fl_free` in ~4,400 lines,
+nowhere near the entry path. This is the residual growth in the soak above.
+Fixing it needs a libro mode that frees, or descent dropping the in-memory chain
+entirely — neither is a 1.x change.
+
 ## [1.5.0] — 2026-07-28
 
 **M13 — the actor tick.** Mobs were furniture: they stood in their authored room

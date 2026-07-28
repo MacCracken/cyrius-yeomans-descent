@@ -1369,6 +1369,76 @@ fn test_actor_tick(): i64 {
     return 0;
 }
 
+# === M14 — 1.6.0 hardening: disconnect-path lifetime + relational save validation ===
+fn test_hardening(): i64 {
+    test_group("hardening");
+    persist_init();
+    if (g_room_count == 0) { assert(0, "hardening: no world loaded"); return 0; }
+
+    # --- M14-A: a mob must not keep a pointer to a disconnected session.
+    #
+    # Before 1.5.0 this was inert — MI_TARGET was only ever COMPARED. M13's
+    # _mob_assist dereferences it (`load64(s + SS_ROOM)`), so the actor tick
+    # turned a dormant dangling pointer into a live use-after-free. fl_free
+    # returns the block to the size class the next session_new draws from, so the
+    # read can land on a live, DIFFERENT player.
+    var tpl = mt_at(0);
+    var m = mob_spawn(tpl, 0);
+    var s = _mk_sess("Quitter", 7);
+    store64(s + SS_ROOM, 0);
+    mi_set_target(m, s);
+    assert_eq(mi_target(m), s, "the mob is holding the session");
+    mobs_forget_session(s);
+    assert_eq(mi_target(m), 0, "disconnect clears the mob's target pointer");
+
+    # A second mob in another room must be cleared too — the sweep is world-wide,
+    # not room-local, because a player can engage and then walk away.
+    var m2 = mob_spawn(tpl, 0);
+    mob_move_to(m2, room_exit(room_at(0), 0), 0);
+    mi_set_target(m2, s);
+    mobs_forget_session(s);
+    assert_eq(mi_target(m2), 0, "a mob in another room is cleared as well");
+    mob_remove(m); mob_remove(m2);
+
+    # --- M14-B: a disconnecting player's inventory must be reclaimed.
+    # session_free frees rx/tx/line/name/ident and never touched SS_INV, so every
+    # carried object leaked on `quit`. Remotely driven: connect, get, quit, repeat.
+    var objs0 = g_obj_live;
+    var s2 = _mk_sess("Hoarder", 7);
+    var k = 0;
+    while (k < 5) { ilist_push(s2 + SS_INV, item_new(ot_at(0))); k = k + 1; }
+    assert_eq(g_obj_live, objs0 + 5, "five carried objects are live");
+    session_drop_inv(s2);
+    assert_eq(g_obj_live, objs0, "disconnect reclaims the carried inventory");
+    assert_eq(load64(s2 + SS_INV), 0, "the inventory head is cleared");
+
+    # Idempotent — drop_session must be safe if the path is ever reached twice.
+    session_drop_inv(s2);
+    assert_eq(g_obj_live, objs0, "dropping an already-empty inventory is a no-op");
+
+    # --- M14-C: hp must be clamped against maxhp, not just to an absolute range.
+    # A player owns their signing key, so a re-signed record can carry any
+    # values; nothing downstream ever pulls an over-max hp back down.
+    var s3 = _mk_sess("Inflated", 8);
+    var blk = sess_ident(s3);
+    random_bytes(blk, SALT_LEN);
+    ident_derive(blk, "inflate99", 9, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 1);
+    _plant_record(blk, "schema = 1\nname = \"FreezeHero\"\nroom = \"\"\ninv = \"\"\nhp = 1000000\nmaxhp = 30\nclass = 0\n");
+    var s4 = _mk_sess("FreezeHero", 10);
+    assert_eq(player_auth_load(s4, "inflate99", 9), 1, "the inflated record loads");
+    assert_eq(load64(s4 + SS_MAXHP), 30, "maxhp is as recorded");
+    assert_eq(load64(s4 + SS_HP), 30, "hp is clamped down to maxhp on load");
+
+    # The ordinary case is untouched: hp below max stays where it is.
+    _plant_record(blk, "schema = 1\nname = \"FreezeHero\"\nroom = \"\"\ninv = \"\"\nhp = 12\nmaxhp = 30\nclass = 0\n");
+    var s5 = _mk_sess("FreezeHero", 10);
+    assert_eq(player_auth_load(s5, "inflate99", 9), 1, "a normal record loads");
+    assert_eq(load64(s5 + SS_HP), 12, "hp below maxhp is preserved");
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -1578,6 +1648,7 @@ fn main() {
     test_wire_hygiene();
     test_lifecycle();
     test_actor_tick();
+    test_hardening();
 
     return assert_summary();
 }

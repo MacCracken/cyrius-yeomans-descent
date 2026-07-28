@@ -555,6 +555,18 @@ fn player_auth_load(s, pass, passlen): i64 {
     store64(s + SS_CLASS, cls);
     store64(s + SS_HP,    _clamp(toml_int(pairs, "hp", PC_HP), 0, 1000000));
     store64(s + SS_MAXHP, _clamp(toml_int(pairs, "maxhp", PC_HP), 1, 1000000));
+    # M14-C — hp and maxhp were each clamped to an absolute range but never
+    # against EACH OTHER, and nothing downstream ever pulls hp back down:
+    # classes_upkeep only regenerates while `hp < max`, ability_heal caps on the
+    # way up, and player_died assigns hp = maxhp. So a record carrying
+    # hp = 1000000 with maxhp = 30 produced a permanently million-HP character.
+    #
+    # A player owns their signing key (ADR 0004), so re-signing arbitrary values
+    # is entirely within their power — this is the 0.9.0 rule again: a signature
+    # proves AUTHORSHIP, not field validity. Relational invariants need checking
+    # too, not just per-field ranges. Load-side only; no schema change.
+    var mh = load64(s + SS_MAXHP);
+    if (load64(s + SS_HP) > mh) { store64(s + SS_HP, mh); }
     store64(s + SS_AC,    _clamp(toml_int(pairs, "ac", PC_AC), 0 - 100, 100));
     store64(s + SS_HIT,   _clamp(toml_int(pairs, "hit", PC_HIT), 0 - 100, 1000));
     store64(s + SS_NDICE, _clamp(toml_int(pairs, "ndice", PC_NDICE), 1, 100));

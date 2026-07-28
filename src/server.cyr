@@ -169,6 +169,36 @@ fn sessions_forget_mob(m): i64 {
     return 0;
 }
 
+# === M14-A — drop every mob's reference to a session. ===
+#
+# The mirror of sessions_forget_mob, and the same hazard pointing the other way.
+# `drop_session` frees a Session on quit / idle-reap / socket close, but nothing
+# walked the mob lists, so a mob that the player had engaged (`cmd_kill` does
+# `mi_set_target(m, s)`) kept MI_TARGET pointing at freed memory.
+#
+# That was inert until 1.5.0 — before the actor tick, MI_TARGET was only ever
+# COMPARED (`combat_disengage`'s `if (mi_target(m) == s)`), never followed. M13's
+# `_mob_assist` reads it and then dereferences: `var s = mi_target(other);
+# ... load64(s + SS_ROOM)`. So the actor tick turned a dormant dangling pointer
+# into a live use-after-free, and `fl_free` hands the block to the size class the
+# next `session_new` draws from — meaning the read can land on a *live, different*
+# player and hand that session to a second mob as its target.
+#
+# Exactly the shape M12-C fixed for sessions→mobs. Clearing the reference is the
+# fix; deferring the free is not, because the reference outlives any tick.
+fn mobs_forget_session(s): i64 {
+    var ri = 0;
+    while (ri < g_room_count) {
+        var m = room_mob_head(room_at(ri));
+        while (m != 0) {
+            if (mi_target(m) == s) { mi_set_target(m, 0); }
+            m = mi_next(m);
+        }
+        ri = ri + 1;
+    }
+    return 0;
+}
+
 # M7-B presence gate — is any in-world session standing in this zone? A
 # session with SS_ROOM in [0, room_count) is placed in the world (login
 # leaves it at -1). Single-writer (ADR 0003), so this snapshot can't race.
@@ -282,6 +312,13 @@ fn drop_session(epfd, s): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     sys_epoll_ctl(epfd, EPOLL_CTL_DEL, load64(s + SS_FD), 0);
     #endif
+    # M14-A/B — nothing may still point at this session, and nothing it owns may
+    # outlive it. Both BEFORE session_free: mobs_forget_session clears the
+    # MI_TARGET the actor tick would otherwise dereference, and session_drop_inv
+    # returns the carried inventory that session_free never touched. Order
+    # matters only in that both must precede the free.
+    mobs_forget_session(s);
+    session_drop_inv(s);
     session_list_remove(s);
     session_free(s);
     g_session_count = g_session_count - 1;

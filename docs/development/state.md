@@ -3,14 +3,35 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-28 (v1.5.0)
+> **Last refresh**: 2026-07-28 (v1.6.0 — 1.x closed)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.5.0 tree.
+> tests, boot guide) describes the **current** 1.6.0 tree.
 
 ## Version
+
+**1.6.0** — hardening sweep, closing the 1.x line, 2026-07-28. Toolchain
+`6.4.83` → **`6.4.86`**, libro `2.8.2` → **`2.8.3`**. **385 assertions**;
+`cyrius audit` exits 0; `--agnos` warning-free; p99 **1299 µs**.
+
+Three fixes, each mutation-verified:
+
+- **A use-after-free 1.5.0 activated.** `drop_session` never cleared mobs'
+  `MI_TARGET`, which was harmless while that field was only ever *compared* —
+  until M13's `_mob_assist` started dereferencing it. `fl_free` recycles the
+  block into the next `session_new`, so the read could land on a live, different
+  player. New `mobs_forget_session`, the mirror of `sessions_forget_mob`.
+- **Inventory leaked at disconnect** — `session_free` never touched `SS_INV`.
+  Remotely driven and unbounded. Safe to free because saves store inventory by
+  template id, not by instance.
+- **`hp` was never clamped against `maxhp`**, and nothing downstream lowers it.
+  The 0.9.0 rule extended to *relational* invariants.
+
+**Measurement note worth keeping:** RSS cannot show the leak fix — `fl_free`
+never `munmap`s, so a 41-login soak reads +636 kB before and after. Use
+`g_mob_live` / `g_obj_live`.
 
 **1.5.0** — M13, the actor tick, 2026-07-28. **373 assertions**; `cyrius audit`
 exits 0; host and `--agnos` warning-free; p99 **1338 µs** against the 50 ms
@@ -322,7 +343,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **373** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **385** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -452,8 +473,16 @@ _None yet._
 **No active cycle.** 1.2.0 (toolchain + dep upgrade, first clean audit) closed.
 The tree builds, `cyrius audit` exits 0, and 298 tests + 3 benches pass.
 
-**The 1.x line is complete** — M10, M11, M12 and M13 all shipped. The tree
-builds on both targets, `cyrius audit` exits 0, and 373 assertions pass.
+**The 1.x line is closed** — M10–M13 plus the 1.6.0 hardening sweep. The tree
+builds on both targets, `cyrius audit` exits 0, and 385 assertions pass.
+
+**One item is parked for upstream:** descent's in-memory libro audit chain grows
+without bound. `audit_event` appends on every login/save/security event and
+`g_audit_chain` is never read — durability is `filestore_append`. libro cannot
+bound it: `chain_new()` sets capacity 0 so auto-rotate never fires, there is no
+capacity constructor, `chain_apply_retention` redistributes without releasing,
+and libro has one `fl_free` in ~4,400 lines nowhere near the entry path. Needs a
+libro mode that frees, or descent dropping the in-memory chain.
 
 Next is **2.0.0**, starting with **M14 — ADR 0008 + save schema v2**. Everything
 else in the 2.0 line routes through it. Before touching it, read the critical
