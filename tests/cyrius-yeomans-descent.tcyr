@@ -896,6 +896,15 @@ fn _str_into(buf, off, cstr): i64 {
     return off + i;
 }
 
+# N bytes of 'a', for over-length passphrase probes.
+fn _rep_a(n): i64 {
+    var b = alloc(n + 1);
+    var i = 0;
+    while (i < n) { store8(b + i, 97); i = i + 1; }
+    store8(b + n, 0);
+    return b;
+}
+
 fn test_security(): i64 {
     test_group("security");
     persist_init();
@@ -939,7 +948,17 @@ fn test_security(): i64 {
     _path_for("Forged", 6, g_persist_path);
     file_write_all(g_persist_path, fbuf, o);
     var s4 = _mk_sess("Forged", 6);
-    assert_eq(player_auth_load(s4, "x", 1), 0 - 2, "over-long salt hex rejected before decode (no overflow)");
+    # H5 (1.6.2) moved the passlen bounds ABOVE the record read, so this must use
+    # an in-range passphrase to still reach the salt-length check — "x" (len 1)
+    # is below PASS_MIN and would now short-circuit before the record is touched,
+    # silently retiring the 0.9.0 overflow coverage this assertion exists for.
+    assert_eq(player_auth_load(s4, "xxxx", 4), 0 - 2, "over-long salt hex rejected before decode (no overflow)");
+    # And the new short-circuit itself: an out-of-range passphrase is a plain
+    # wrong-passphrase reject, and costs nothing — no record read, no verify.
+    assert_eq(player_auth_load(_mk_sess("Forged", 6), "x", 1), 0,
+              "an under-length passphrase is rejected before the record is read");
+    assert_eq(player_auth_load(_mk_sess("Forged", 6), _rep_a(200), 200), 0,
+              "an over-length passphrase is rejected before the record is read");
 
     # _clamp sanity.
     assert_eq(_clamp(5, 1, 10), 5, "clamp in-range");
@@ -1457,6 +1476,67 @@ fn test_hardening(): i64 {
     return 0;
 }
 
+# === H5 (1.6.2) — pre-auth work is metered ===
+fn test_preauth_meter(): i64 {
+    test_group("preauth-meter");
+
+    # --- The dispatch cap. One readable event may complete at most RX_MAX_LINES
+    # lines; the rest of the buffer is RETAINED, not dropped. Unmetered, a 4 KB
+    # read held ~800 login attempts and froze the single-threaded loop for
+    # seconds (measured: 5.2 s wrong-passphrase, 27.1 s bare-CR).
+    var s = _tx_sess();
+    store64(s + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(s + SS_NAME_BUF, fl_alloc(NAME_CAP));
+    store64(s + SS_TS, telnet_state_new());
+    store64(s + SS_PHASE, PHASE_NAME);
+    var rx = fl_alloc(RX_CAP);
+    store64(s + SS_RX_BUF, rx);
+    # 40 short lines: "ab\r" x 40 = 120 bytes.
+    var n = 0;
+    var w = 0;
+    while (n < 40) {
+        store8(rx + w, 97); store8(rx + w + 1, 98); store8(rx + w + 2, 13);
+        w = w + 3; n = n + 1;
+    }
+    store64(s + SS_RX_LEN, w);
+    var more = session_consume_rx(s);
+    assert_eq(more, 1, "the cap reports there is more to do");
+    assert(load64(s + SS_RX_LEN) > 0, "the unconsumed tail is retained, not dropped");
+    assert(load64(s + SS_RX_LEN) < w, "and some of it was consumed");
+
+    # Draining repeatedly must finish — the retained tail is not a stall.
+    var guard = 0;
+    while (load64(s + SS_RX_LEN) > 0) {
+        session_consume_rx(s);
+        guard = guard + 1;
+        if (guard > 100) { store64(s + SS_RX_LEN, 0); }
+    }
+    assert(guard <= 100, "repeated passes drain the buffer to empty");
+    assert(guard >= 4, "40 lines took several capped passes, not one");
+
+    # --- A bare CR must not dispatch an empty line. The LF branch always had
+    # this guard; CR did not, so 4096 CRs cost 4096 login attempts.
+    var s2 = _tx_sess();
+    store64(s2 + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(s2 + SS_LINE_LEN, 0);
+    store64(s2 + SS_PHASE, PHASE_NAME);
+    assert_eq(session_push_line_byte(s2, 13), 0, "a bare CR on an empty line dispatches nothing");
+    store8(load64(s2 + SS_LINE_BUF), 120);
+    store64(s2 + SS_LINE_LEN, 1);
+    assert_eq(session_push_line_byte(s2, 13), 1, "a CR after real bytes does dispatch");
+
+    # --- The passphrase bounds are checked before the record is touched, so an
+    # out-of-range attempt costs nothing. "Nonesuch" has no save file at all:
+    # before the hoist this returned -1 (no record); now the length gate fires
+    # first and it is a plain wrong-passphrase 0.
+    assert_eq(player_auth_load(_mk_sess("Nonesuch", 8), "x", 1), 0,
+              "under-length passphrase short-circuits before the record read");
+    assert_eq(player_auth_load(_mk_sess("Nonesuch", 8), _rep_a(200), 200), 0,
+              "over-length passphrase short-circuits before the record read");
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -1667,6 +1747,7 @@ fn main() {
     test_lifecycle();
     test_actor_tick();
     test_hardening();
+    test_preauth_meter();
 
     return assert_summary();
 }

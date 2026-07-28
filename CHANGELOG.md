@@ -4,6 +4,69 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.2] — 2026-07-28
+
+**Pre-auth CPU exhaustion.** One 4 KB write from an unauthenticated connection
+froze the entire single-threaded loop (ADR 0003) for seconds — every other player
+stalled with it. Measured against a bystander's time-to-first-byte:
+
+| 4 KB burst | before | after |
+|---|---|---|
+| `wrong\r` × 682 (a name with a save record) | **5,232 ms** | **13 ms** |
+| bare `\r` × 4096 | **27,145 ms** | **0.4 ms** |
+
+### Fixed
+
+Four changes, one defect chain. None touches an ADR 0007 frozen surface.
+
+- **`session_consume_rx` had no dispatch cap.** It fed every byte of a 4 KB read
+  and dispatched every complete line, then zeroed `SS_RX_LEN` regardless. Now it
+  stops after `RX_MAX_LINES` (8) completed lines and **retains** the rest.
+  The resume point is a **byte** index, not a line index: `telnet_feed` is a
+  byte-at-a-time state machine and an IAC sequence can straddle the cut, so
+  resuming anywhere else would resurrect the split-IAC case that machine exists
+  to handle.
+- **Retained bytes are drained on the tick** (`drain_pending_rx`). epoll is
+  level-triggered on *socket* data — nothing here sets `EPOLLET` — so once bytes
+  are off the socket and into `rx` it will not fire again for them. Without this
+  a capped remainder would sit unprocessed until the client happened to send
+  more. Metering per tick is the point: a burst is spread across ticks at 8 lines
+  each and the loop stays responsive throughout.
+- **A bare CR dispatched an empty line.** The LF branch has always guarded
+  `len == 0`; CR never did, so 4096 bare CRs cost 4096 full login attempts. This
+  is why the CR burst was 5× worse than the wrong-passphrase one.
+- **The passphrase length bounds ran *after* the expensive work** — after
+  `file_read_all`, `toml_parse` **and** `ed25519_verify` (~7 ms). Hoisted above
+  the record read. Same semantics: 0, a re-promptable wrong passphrase.
+- **`login_on_pass` re-prompted forever.** Now capped at `MAX_LOGIN_FAILS` (5)
+  *consecutive* failures, then the session closes; a success resets the count.
+  Hardcoded — ADR 0007 §6 freezes the `YD_*` knob set for 1.x.
+
+### Changed
+
+- `SS_PLAYER` → **`SS_FAILS`**. That slot was declared at M1-B and never read by
+  anything in the tree; reused for the attempt counter rather than growing the
+  Session struct.
+- `session_push_line_byte` now returns 1 when it completed and dispatched a
+  line — the signal the cap meters on.
+
+### Notes
+
+- Suite **390 → 399**. All three guards mutation-verified: removing the dispatch
+  cap fails 3, the bare-CR guard fails 1, the passlen hoist fails 4.
+- **A measurement correction worth recording.** The first before/after run
+  reported 65 s → 60 s and looked like the fix had barely helped. The instrument
+  was wrong: it timed a full socket *drain*, which waits out its own timeout
+  after the banner arrives, so both readings were pinned at the timeout. Switched
+  to time-to-first-byte and rebuilt a pre-fix binary for a like-for-like
+  comparison — the table above. The corrected "before" figures (5.2 s / 27.1 s)
+  match the audit sweep's independent estimates (5.2 s / 28 s).
+- The existing 0.9.0 assertion `over-long salt hex rejected before decode` used a
+  1-byte passphrase, which the hoist now short-circuits — it would have kept
+  passing while silently no longer reaching the salt-length check. Given an
+  in-range passphrase so it still exercises that path, and the short-circuit
+  itself got its own assertions.
+
 ## [1.6.1] — 2026-07-28
 
 **Bounds the audit chain, via an upstream libro fix.** `[deps.libro]` `2.8.3` →

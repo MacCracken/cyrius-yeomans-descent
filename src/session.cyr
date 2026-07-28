@@ -30,7 +30,10 @@ enum SS {
     SS_TX_OFF     = 56;   # bytes already drained to the socket
     SS_OUT_ARMED  = 64;   # 1 iff the fd is currently registered with EPOLLOUT
     SS_TS         = 72;   # Telnet parser state ptr (M1-C)
-    SS_PLAYER     = 80;   # player id (M6; 0 until then)
+    SS_FAILS      = 80;   # consecutive failed login attempts (H5, 1.6.2).
+    # Was SS_PLAYER, declared at M1-B and never read
+    # by anything in the tree — reused rather than
+    # growing the struct.
     SS_LINE_BUF   = 88;   # ptr to decoded-data line accumulator (LINE_CAP)
     SS_LINE_LEN   = 96;   # decoded data bytes in the current partial line
     SS_NAME_BUF   = 104;  # ptr to captured player name (NAME_CAP bytes)
@@ -105,6 +108,14 @@ enum SessConst {
     NAME_CAP = 32;        # name buffer (NAME_MAX + headroom)
     NAME_MAX = 16;        # longest accepted player name
     NAME_MIN = 2;         # shortest accepted player name
+    # H5 (1.6.2) — most lines one readable event may dispatch. A 4 KB read can
+    # hold ~800 short lines, and each login-phase line costs a full record read +
+    # ed25519_verify; unmetered, one write froze the single-threaded loop for
+    # 65-87 s (measured). 8 is far past any human's typing burst, and the
+    # remainder is retained rather than dropped.
+    RX_MAX_LINES = 8;
+    # Consecutive failed passphrase attempts before the session is closed.
+    MAX_LOGIN_FAILS = 5;
 }
 
 enum Phase {
@@ -984,6 +995,8 @@ fn session_on_line(s, buf, len): i64 {
 }
 
 # === session_push_line_byte — append one decoded data byte to the line. ===
+# Returns 1 if this byte completed a line and dispatched it, else 0 — the
+# signal session_consume_rx meters its per-event work by (H5, 1.6.2).
 #
 # CR is the canonical line terminator. CR LF collapses to one line: the
 # CR dispatches, then the paired LF arrives with the line already empty
@@ -1006,10 +1019,16 @@ fn session_push_line_byte(s, b): i64 {
     if (phase == PHASE_CHPASS_CONFIRM) { is_pass = 1; }
 
     if (b == 13) {
+        # H5 (1.6.2) — an empty line is not a command. The LF branch below has
+        # always had this guard; CR never did, so 4096 bare CRs in one write
+        # dispatched 4096 empty lines, each paying a full login attempt. Costs
+        # nothing legitimate: a player pressing Enter on a blank prompt gets the
+        # same re-prompt either way.
+        if (len == 0) { return 0; }
         if (is_pass == 1) { session_appendtx_cstr(s, "\r\n"); }
         session_on_line(s, ln, len);
         store64(s + SS_LINE_LEN, 0);
-        return 0;
+        return 1;
     }
     if (b == 10) {
         # len == 0 here is the LF half of a CR LF pair — absorb it.
@@ -1017,7 +1036,7 @@ fn session_push_line_byte(s, b): i64 {
         if (is_pass == 1) { session_appendtx_cstr(s, "\r\n"); }
         session_on_line(s, ln, len);
         store64(s + SS_LINE_LEN, 0);
-        return 0;
+        return 1;
     }
     # Backspace (BS) / DEL: drop the last buffered byte; in masked mode erase it
     # on screen too (back-space-back).
@@ -1059,7 +1078,9 @@ fn session_consume_rx(s): i64 {
     var len = load64(s + SS_RX_LEN);
     var ts = load64(s + SS_TS);
     var i = 0;
+    var fired = 0;
     while (i < len) {
+        if (fired >= RX_MAX_LINES) { i = i; break; }
         var ev = telnet_feed(ts, load8(rx + i));
         # Drain any negotiation reply into the tx queue before the data
         # byte, preserving RFC 854 on-wire ordering.
@@ -1069,10 +1090,26 @@ fn session_consume_rx(s): i64 {
             telnet_tx_consume(ts);
         }
         if (ev == EV_DATA) {
-            session_push_line_byte(s, telnet_data_byte(ts) & 0xFF);
+            fired = fired + session_push_line_byte(s, telnet_data_byte(ts) & 0xFF);
         }
         # EV_SB / EV_NONE: nothing for the application at M1-C/M1-D.
         i = i + 1;
+    }
+    # Retain whatever the cap left unread. The resume point is a BYTE index, not
+    # a line index: telnet_feed is a byte-at-a-time state machine and an IAC
+    # sequence can straddle the cut, so stopping mid-sequence and resuming
+    # anywhere else would resurrect exactly the split-IAC bug that machine exists
+    # to handle. Shift the tail down (dst < src, so a forward copy is safe) and
+    # record the new length; session_on_readable appends after it, and
+    # drain_pending_rx (server.cyr) gives it another capped pass each tick — epoll
+    # is level-triggered on socket data, so it will NOT re-fire for bytes already
+    # sitting in this buffer.
+    if (i < len) {
+        var rem = len - i;
+        var k = 0;
+        while (k < rem) { store8(rx + k, load8(rx + i + k)); k = k + 1; }
+        store64(s + SS_RX_LEN, rem);
+        return 1;
     }
     store64(s + SS_RX_LEN, 0);
     return 0;

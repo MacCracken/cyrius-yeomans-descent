@@ -199,6 +199,32 @@ fn mobs_forget_session(s): i64 {
     return 0;
 }
 
+# === H5 (1.6.2) — give sessions with retained rx bytes another capped pass. ===
+#
+# session_consume_rx now stops after RX_MAX_LINES dispatches and keeps the rest
+# of the buffer. epoll is level-triggered on SOCKET data (nothing in this tree
+# sets EPOLLET), so once those bytes are off the socket and into rx it will not
+# fire again for them — without this sweep a capped remainder would sit
+# unprocessed until the client happened to send more.
+#
+# Metering per tick rather than per event is the whole point: a burst that used
+# to be paid in one 65-second stall is now spread across ticks at RX_MAX_LINES
+# each, and the loop stays responsive to everyone else throughout.
+fn drain_pending_rx(): i64 {
+    var s = g_session_head;
+    var drained = 0;
+    while (s != 0) {
+        var nxt = load64(s + SS_NEXT);
+        if (load64(s + SS_RX_LEN) > 0) {
+            session_consume_rx(s);
+            flush_session(g_epfd, s);
+            drained = drained + 1;
+        }
+        s = nxt;
+    }
+    return drained;
+}
+
 # M7-B presence gate — is any in-world session standing in this zone? A
 # session with SS_ROOM in [0, room_count) is placed in the world (login
 # leaves it at -1). Single-writer (ADR 0003), so this snapshot can't race.
@@ -257,6 +283,7 @@ fn advance_tick(): i64 {
     if (g_save_interval_ticks > 0) {
         if (g_tick_count % g_save_interval_ticks == 0) { save_sweep(); }
     }
+    drain_pending_rx();           # H5 — metered leftovers from a capped read
     mob_tick_all(g_tick_count);   # M13 — every living mob takes a turn
     corpse_decay_sweep();   # M12-A — age out corpses and reclaim them
     maybe_zone_reset();  # M7 — respawn mobs/loot when the zone empties out
