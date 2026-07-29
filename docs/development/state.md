@@ -26,9 +26,20 @@ Both docs also picked up the two user-visible changes of the whole 1.6.x line,
 neither of which had reached them: the **100-item carry cap** and the **30 s
 pre-auth disconnect**.
 
-**Every open issue from the 1.6.0 sweep is now closed.** What remains before 2.0
-is the gate: a re-run sweep with no critical or high findings. One item is
-blocked upstream (libro 2.8.5) and is not schedulable here.
+**Every open issue from the 1.6.0 sweep and its two re-runs is closed.** The
+**third (gate) sweep has since run against this version and did not come back
+clean** — 8 open items, two of them high, batched as 1.7.0–1.7.3 in
+[`roadmap.md`](roadmap.md#open-issues--8). The two highs are a **252 ms tick pass
+at 504% of the ADR 0001 drift budget** (both per-tick line budgets were derived
+against a 1.08 ms line when the real worst case is 7.46 ms) and **1640 bytes of
+unreclaimable arena per failed connection attempt**, 563 MB/hour at 100
+reconnects/s. Neither needs an account.
+
+Of that second one, ~1.4 kB per event is inside libro's `filestore_append` and
+needs an upstream fix; **the event rate is ours and is what is unbounded**, so
+1.7.1 is schedulable work here. An earlier version of this file described the
+whole item as blocked upstream with Descent's share "already zero" — that was
+wrong about the part we own.
 
 ---
 
@@ -42,7 +53,18 @@ appearance of one defect — *a per-item cap is not a bound on a loop that walks
 many items* — after three releases each capped a neighbour of the open hole.
 When a finding feels familiar, enumerate the class first: `grep -n ident_derive
 src/` lists every expensive-line path; "every loop that dispatches lines" lists
-every place a cap must be aggregate. Both were one command away.
+every place a cap must be aggregate. Both were one command away. **The gate sweep
+found a fifth instance** — the 100-item carry cap is checked at all three
+acquisition sites and at none on the load path — which is why 1.7.2 sweeps the
+class rather than patching the instance.
+
+**A comment is not a bound, and a comment's arithmetic is not a measurement.**
+The gate sweep's worst finding is a budget comment that multiplied out the wrong
+line cost (1.08 ms for a keypair derivation, when the reachable worst case is a
+7.46 ms passphrase verify) and read as finished reasoning for eight releases. A
+second finding was stated outright in a source comment — *"it did not bound
+reconnects, and nothing else did either"* — and left open. Write the number down,
+then have a bench assert it.
 
 **A signature proves authorship, not field validity.** Players own their signing
 key (ADR 0004), so every loaded field needs a range check *and* the relational
@@ -380,12 +402,13 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** Status, the open gate and the parked upstream item are in
-[Version](#version) above — not repeated here, because they were, and the two
-copies had already drifted apart.
+**No active cycle.** Status and the open findings are in [Version](#version)
+above — not repeated here, because they were, and the two copies had already
+drifted apart.
 
-**Next: another re-run sweep**, then 2.0.0 starting with **M14 — ADR 0008 + save
-schema v2**. Before touching M14, read the critical path in
+**Next: 1.7.0** — re-derive both per-tick line budgets from the measured worst
+case and land the bench that gates a whole tick pass. Then 1.7.1–1.7.3, a gate
+re-run, and only then 2.0.0 starting with **M14 — ADR 0008 + save schema v2**. Before touching M14, read the critical path in
 [`roadmap.md`](roadmap.md#critical-path): records are signed with a key
 re-derived from the player's passphrase, which the server never holds, so **there
 is no offline migration and there cannot be one** — every 2.0 field must be
@@ -401,11 +424,11 @@ that makes the bump safe.
   broken, but the next toolchain bump is a release of its own (1.2.0 is the
   precedent: an upgrade repaired a `main` and a bench that had both silently
   stopped compiling), so it should not be folded into a feature change.
-- **aarch64 epoll layout** — `src/server.cyr` hardcodes the x86 *packed*
-  `epoll_event` (`EPOLL_EVENT_SIZE = 12`, data at +4); aarch64 Linux uses the
-  unpacked 16-byte layout with data at +8. Not hit today (x86_64 / agnos only),
-  but it corrupts the session pointer the first time someone builds `--aarch64`.
-  Tracked as roadmap **B4**.
+- ~~**aarch64 epoll layout**~~ — **closed in 1.6.14.** `epoll_ev_size()` /
+  `epoll_data_off()` (`src/server.cyr:111`/`:118`) now branch on the target, and
+  `bench_loaders` asserts the writer and reader agree on whichever arch it runs.
+  Listed here as closed rather than deleted because it sat in this list as *open*
+  for two releases after it was fixed.
 - **`cyrius audit` is a CI step.** If it fails on a style gate rather than a real
   defect, fix the code — do not drop the step. It is the only thing gating
   fmt / lint / docs.
@@ -414,10 +437,16 @@ that makes the bump safe.
 
 ## Next-agent boot guide
 
-1.0.0 shipped, and 1.1.x / 1.2.0 have been maintenance releases on top of it. The
-surface is still frozen ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new
-verbs / save fields / zone fields / env knobs — so **M8 (Joshua) is the next real
-milestone**, and it is the thing that earns the right to extend the surface.
+1.0.0 shipped; 1.1.x–1.5.x were maintenance, and **the whole 1.6.x line is an
+audit sweep** — sixteen releases of fixes across three passes, with a fourth pass
+(1.7.x) now open. The surface is still frozen
+([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
+zone fields / env knobs.
+
+**Your next work is 1.7.0**, not a milestone: see
+[`roadmap.md`](roadmap.md#open-issues--8) for the 8 open findings and the release
+they are batched into. 2.0.0 (starting with M14) is gated behind 1.7.0, 1.7.1 and
+a clean sweep re-run. Joshua is post-1.0 backlog, not next.
 
 ### Before you touch anything
 

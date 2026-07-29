@@ -26,10 +26,12 @@ attrs / room / inventory; survives a `kill -9`), and presence-gated zone resets.
 0.9.0 was a security sweep and 0.9.1 froze the public surface
 ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)). The **1.6.x line is an audit
 sweep** — 1.6.0 audited the tree and the fixes ran through 1.6.15, with two
-re-run sweeps along the way. The line closes once a re-run comes back with no
-critical or high findings; see the
-[roadmap](docs/development/roadmap.md#what-is-left) for what is left and
-[current state](docs/development/state.md) for the live snapshot.
+re-run sweeps along the way. A third sweep has since run and found **8 more
+items, two of them high**, now open as **1.7.x**. The sweep line closes once a
+re-run comes back with nothing critical or high; see the
+[roadmap](docs/development/roadmap.md#open-issues--8) for every open finding with
+its impact and fix size, and [current state](docs/development/state.md) for the
+live snapshot.
 
 ## Quick Start
 

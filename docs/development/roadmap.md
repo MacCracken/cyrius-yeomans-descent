@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-29 (v1.6.12)
+> **Last Updated**: 2026-07-29 (v1.6.15, gate sweep complete)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -19,22 +19,21 @@ Everything not yet done, in the order it should happen. Nothing below is
 "probably fine" — each item links to a full write-up with impact, reachability,
 ownership and fix size.
 
-| # | Release | Items | Contains | Blocks 2.0? |
+| # | Next | Items | Contains | Blocks 2.0? |
 |---|---|---|---|---|
-| ~~1~~ | [~~**1.6.13**~~](#1613--shipped--2026-07-29) | ~~3~~ | ✅ **shipped** — carry cap, pre-auth timeout, config whitespace | — |
-| ~~2~~ | [~~**1.6.14**~~](#1614--shipped--2026-07-29) | ~~5~~ | ✅ **shipped** — epoll layout, class-ID terminator, stat clamps, dead symbols | — |
-| ~~3~~ | [~~**1.6.15**~~](#1615--shipped--2026-07-29) | ~~1~~ | ✅ **shipped** — README + architecture doc reconciled with the code | — |
-| 4 | [**re-run sweep**](#the-gate--what-closes-the-1x-line) | — | **The gate.** Closes the 1.x line if it returns no critical or high findings | **yes** |
-| 5 | **2.0.0** | 3 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death | — |
-| 6 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
+| 1 | [**1.7.0**](#170--the-tick-budget-becomes-a-budget) | 2 | The tick budget becomes a budget — both line budgets re-derived, and the bench that should have caught them | **yes** |
+| 2 | [**1.7.1**](#171--bound-what-the-reconnect-rate-sets) | 2 | Bound what the reconnect rate sets — the per-connection arena loss, the unrotated audit log | **yes** |
+| 3 | [**1.7.2**](#172--the-carry-cap-becomes-a-bound) | 1 | The carry cap becomes a bound — enforce it on load, then sweep the class | no |
+| 4 | [**1.7.3**](#173--cover-the-guards-that-predate-the-mutation-habit) | 3 | Cover the guards that predate the mutation habit | no |
+| 5 | [**gate re-run**](#the-gate--what-closes-the-1x-line) | — | Closes the 1.x line if it returns no critical or high findings | **yes** |
+| 6 | **2.0.0** | 3 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death | — |
+| 7 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
-**Every open issue from the 1.6.0 sweep is now closed.** The only thing left
-before 2.0 is the gate itself: a re-run sweep that comes back with no critical or
-high findings. One item remains blocked upstream (libro 2.8.5) and is not
-schedulable here.
-
-**Blocked, not schedulable here:** one issue is upstream in libro and needs a
-**2.8.5** release. Descent's own share of it is already zero.
+**Every issue the 1.6.0 sweep and its two re-runs produced is closed** — 1.6.0
+through 1.6.15. The **third (gate) sweep is done and did not come back clean**:
+it found 8 open items, two of them high, listed below and batched into 1.7.0–1.7.3.
+So 1.7.0 and 1.7.1 now block 2.0, which the previous version of this table said
+1.7.x would not.
 
 **The minimum credible 2.0 is M14 + M15 + M16** — the contract, the content
 ceiling, and progression. Everything from M17 on can slip without embarrassing
@@ -42,124 +41,211 @@ the release.
 
 ---
 
-## Open issues — all closed
+## Open issues — 8
 
-**Reconciled against the original 1.6.0 sweep output on 2026-07-29.** All 56 raw
-/ 44 verified findings from that sweep have been matched against the current
-tree. This is the complete set of what is known to be wrong — not a summary and
-not a selection.
+From the third (gate) sweep, 2026-07-29, run against 1.6.15. Worst first. Every
+item says what breaks, whether it can happen to a running server today, whose
+code it is, and how big the fix is — in that order, before any label.
 
-**Why the reconciliation was needed.** The 1.6.5 roadmap said *"44 survived
-adversarial verification. Twenty-two are closed. Twelve remain."* Those numbers
-do not subtract. The batch plan was written by grouping what was to hand rather
-than by reconciling against the verified set, so real findings were never
-tracked — and some of what the later re-run sweeps "discovered" had been in the
-original output all along. **Never write a remaining-work count that is not
-derived from the source list.**
+### 1.7.0 — the tick budget becomes a budget
 
-### Never tracked — from the 1.6.0 sweep, missed by the batch plan
+**A. Both per-tick line budgets are sized against the wrong worst case, and the
+server blocks for 252 ms in one pass — 5× the drift budget.** *(high)*
 
-These were verified real in the original sweep and never made it onto any batch.
+- **What breaks.** [ADR 0001](../adr/0001-tick-based-combat.md) allows 50 ms of
+  p99 tick drift. One pass with every budget at its cap costs **252 ms** —
+  **504% of that**, and 10% of the entire 2.5 s tick. Everyone's combat round,
+  regen, and prose stalls for a quarter second.
+- **Can it happen today? Yes, and it needs no account.** Sixteen connections each
+  sending two wrong passphrases does it. The attacker needs one name that
+  exists — a wrong passphrase against a *real* name is the expensive path,
+  because that is the one that pays a full `ed25519_verify`.
+- **Whose code.** Ours. `DRAIN_LINES_MAX` and `EVENT_LINES_MAX` in
+  [`src/server.cyr`](../../src/server.cyr).
+- **Fix size.** Two constants, and a comment that states a false premise. Small.
+- **Measured** (`alloc_used` + `clock_now_ns`, 16 sessions in `PHASE_PASS`
+  against a real record):
 
-- **#21 — a hoarding player stops saving, permanently.** The worst of them, and
-  it is item 1 below.
-- **#43 — no pre-auth timeout.** 1.6.3 added `MAX_SESSIONS`, which was half of
-  this finding; the other half — a *separate, shorter* timeout for sessions that
-  have not authenticated — was never implemented. An unauthenticated socket
-  holds an fd and a session slot for the full 5-minute idle window. Item 2.
-- **#38 — config values are not whitespace-trimmed.** A stray CR in a zone file
-  makes a value unparseable, and an unparseable value silently takes the default.
-  1.6.7 fixed the *signed* half of this finding and 1.6.12's notes deferred the
-  *strictness* half to M14-D; the **trim** was never done. Item 3.
-- **#31 / #32 — the README and the architecture doc are wrong.** Item 8.
-- **#30 — dead symbols with comments claiming they are live.** Item 9.
+  | | cost | of the 50 ms budget |
+  |---|---|---|
+  | `drain_pending_rx` at cap (tick side) | 121 ms | 243% |
+  | `event_batch_step` at cap (**before** the tick check) | 121 ms | 242% |
+  | `save_sweep` at cap (4 × 1.21 ms) | 4 ms | |
+  | `sweep_idle` at cap (4 × 1.21 ms) | 4 ms | |
+  | **one pass, all budgets at cap** | **252 ms** | **504%** |
 
----
+- **Why it survived three sweeps.** The `DRAIN_LINES_MAX` comment does the
+  arithmetic against the wrong line: it budgets `16 × ~1.08 ms (the costliest
+  unauthenticated line, a keypair derivation) = ~17 ms`. A keypair derivation is
+  not the costliest unauthenticated line — a wrong-passphrase verify is, at
+  **7.46 ms**, seven times more, and it is reachable in `PHASE_PASS` with nothing
+  but a name. `EVENT_LINES_MAX` names the right cost ("~8.1 ms for a
+  wrong-passphrase verify") and then never multiplies it out. The `EVENT_LINES_MAX`
+  half is the worse of the two because it is spent *before* the tick check, so it
+  can swallow a tick whole.
 
----
+**B. No instrument gates the aggregate, which is why A survived.** *(high — it is
+the reason A exists)*
 
-### 1.6.13 — shipped ✅ 2026-07-29
+- **What breaks.** `bench_combat` gates the combat tick against 50 ms.
+  `bench_persist` reasons about 4 saves against it in a comment. **Nothing sums a
+  whole pass, and nothing benches the login path at all** — so a budget can be
+  mis-derived by 7× and every gate stays green.
+- **Whose code.** Ours.
+- **Fix size.** Small — the probe that produced the table above becomes a bench
+  that fails when one pass at cap exceeds 50 ms.
+- **Test story for the release.** The bench gates the aggregate; unit tests assert
+  each budget constant against the measured worst-case line cost, so the next
+  edit that widens a budget has to move a number a test is watching.
 
-The carry cap (a hoarding player silently stopped saving), the pre-auth timeout,
-and config whitespace trimming. All three came from the 1.6.0 sweep and none had
-ever been tracked. Detail in the 1.6.13 CHANGELOG entry.
+### 1.7.1 — bound what the reconnect rate sets
 
----
+**C. 1640 bytes of memory are permanently lost per failed connection attempt —
+563 MB/hour at 100 reconnects/s, and it never comes back.** *(high)*
 
-### 1.6.14 — shipped ✅ 2026-07-29
+- **What breaks.** RSS climbs and never falls. The bump allocator has **no free at
+  all**; on overflow `lib/alloc.cyr` mmaps a fresh 256 MB chunk, so there is no
+  ceiling to hit — it grows until the kernel refuses and `alloc()` starts
+  returning 0.
+- **Can it happen today? Yes, unauthenticated.** Connect, give any name, fail the
+  passphrase confirm five times, disconnect, repeat. Nothing needs to exist on
+  disk first.
+- **Whose code — split, and the split matters.** 1416 of the 1640 bytes are inside
+  libro's `filestore_append`, which is upstream and `lib/` is off-limits. The
+  other 224 are ours. **But the event *count* is entirely ours**: we choose to
+  emit one `audit_event` per connection, and nothing bounds reconnects. 1.6.12
+  cut this 5× by logging once per session instead of once per attempt; it did not
+  bound it. The code comment at
+  [`src/persist.cyr:958`](../../src/persist.cyr:958) says so outright — *"E3
+  bounded the attempts per CONNECTION; it did not bound reconnects, and nothing
+  else did either."*
+- **Fix size.** Real but contained, and entirely in our code: a per-peer rate
+  limit or a coalescing window on `audit_event`, so a flood still writes a
+  warning that names it without buying arena per connection. The upstream 1416 B
+  needs a libro issue filed separately; it stops mattering once the count is
+  bounded.
+- **Measured.** 200 connect/fail/drop cycles, `alloc_used()` delta: 328000 bytes,
+  exactly 1640 per cycle — one audit event's worth, confirming the rest of the
+  connection lifecycle reclaims correctly. 1 GB of RSS after 654,720 attempts,
+  ~109 minutes at 100/s.
 
-The dormant tail: per-arch epoll layout (an ARM build would have read session
-pointers from the wrong bytes), the per-connection event allocation that fix
-removed, the class-id terminator, the rest of the 1.6.7 sign sweep, and two dead
-functions. Detail in the 1.6.14 CHANGELOG entry.
+**D. `data/audit.libro` is never rotated.** *(medium)*
 
-Two of the flagged "dead symbols" were **kept**: `mt_level` and `g_zone_name` are
-authored zone-format fields frozen by ADR 0007 §5 with named future consumers
-(M16, M18). Their comments were the thing that was wrong.
+- **What breaks.** ~360 bytes of disk per event, forever. There is no rotation
+  code anywhere in the tree. C's flood is a disk flood too.
+- **Can it happen today?** Yes, but it is operator-visible growth rather than
+  something exploitable on its own.
+- **Whose code.** Ours, and it needs a *decision*, not just a patch:
+  [ADR 0006](../adr/0006-persistence-shape.md) makes the log an append-only
+  SHA-256 hash chain, so rotation has to carry the head hash into the new segment
+  or the chain breaks and the tamper-evidence is gone.
+- **Fix size.** An ADR plus the implementation it picks. **If the chosen design
+  changes the on-disk audit format this moves to 2.0** — but the decision itself
+  is 1.7.1 work and is not deferred.
+- **Test story for the release.** N connect/fail cycles leave arena growth
+  bounded, and the audit trail still names the flood; a rotation round-trip
+  verifies the chain across a segment boundary.
 
----
+### 1.7.2 — the carry cap becomes a bound
 
-### 1.6.15 — shipped ✅ 2026-07-29
+**E. The 100-item carry cap is not enforced when a character loads.** *(medium)*
 
-The README was five releases stale and the architecture overview documented a
-combat model, two attributes and two verbs that were never built. Every claim
-checked against source; detail in the 1.6.15 CHANGELOG entry.
+- **What breaks.** [`_restore_inv`](../../src/persist.cyr:629) walks the whole
+  saved id list with no cap, so a record can restore **~4000 items** — 40× the
+  cap. `SLURP_CAP` is 8192 bytes and a one-character id plus a comma is two
+  bytes. `MAX_INV` is checked at all three *acquisition* sites (`get`,
+  `get from`, `give`) and at none on the load path, so the 1.6.13 cap is
+  bypassable by the one route that skips those checks.
+- **Can it happen today? Not remotely** — it needs the save file, either
+  filesystem access to `data/players/` or the player's own key. That second one
+  is not hypothetical: per
+  [ADR 0004](../adr/0004-identity-and-authentication.md) the identity is derived
+  from the passphrase and the server never holds the key, so a player who obtains
+  their own record (a backup, a shared host, a restore workflow) can sign a valid
+  one. This project's standing position — recorded when `hp` had exactly this
+  shape — is that **a valid signature is not field validity**. Every numeric
+  field on this path is `_clamp`ed for that reason. The inventory list is the one
+  that is not.
+- **Whose code.** Ours.
+- **Fix size.** A counter and a bound in one function, plus an audit line when it
+  truncates. Small.
+- **This is the fifth appearance of one defect** — *a per-item cap is not a bound
+  on a loop that walks many items.* The previous four were each fixed by capping
+  one neighbour of the open hole. So this release does the **class sweep** as
+  well as the instance: every per-item cap in the tree, checked against every
+  loop that walks those items.
+- **Test story for the release.** A crafted 4000-entry record loads exactly
+  `MAX_INV` items and logs the truncation; the class sweep's findings each get an
+  assertion.
 
----
+### 1.7.3 — cover the guards that predate the mutation habit
 
-### Blocked on upstream — not schedulable here
+Mutation testing became routine at 1.6.7. The guards landed before it were never
+put through it. These three items are that gap.
 
-#### Repeated failed logins burn memory that is never given back
+**F. The `passwd` secret-key wipe is untested.** *(medium)*
 
+- **What breaks.** Deleting the `memset` in
+  [`sess_cand_clear`](../../src/persist.cyr:1078) breaks **no test**. The
+  freelist reuses blocks **without zeroing**, so a freed candidate block still
+  holding a derived Ed25519 secret key can be handed straight to the next
+  `fl_alloc` of that size class.
+- **Can it happen today? No** — the guard is present and correct. The risk is that
+  a future edit removes it and nothing says so.
+- **Whose code.** Ours. **Fix size.** Small.
 
+**G. The double-login refusal is untested at its call site.** *(medium)*
 
-**What breaks.** Every audit event costs ~1.6 kB from the bump allocator, which
-has no `free`. 1.6.12 cut this to one event per connection instead of five, but
-the per-event cost itself is inside libro's `filestore_append`, which rebuilds a
-string builder on every append.
+- **What breaks.** Replacing the `session_already_online` check in `login_on_pass`
+  with a constant false breaks **no test**. The predicate has a test; the refusal
+  does not. Two sessions on one character means two writers to one save record —
+  the inventory duplication 1.6.6 fixed.
+- **Can it happen today? No** — the guard is present. Coverage hole, two call
+  sites: [`src/persist.cyr:863`](../../src/persist.cyr:863) and
+  [`:1027`](../../src/persist.cyr:1027).
+- **Whose code.** Ours. **Fix size.** Small.
 
-**Can it happen today?** **Yes, slowly.** Bounded per connection, unbounded
-across reconnects. It needs sustained CPU saturation to matter, and the server is
-already unusable from CPU at that point — so the distinctive harm is that memory
-does not come back when the attack stops. A restart clears it.
+**H. The coverage check that found F and G was a sample, not a sweep.** *(tracked
+so it is not mistaken for complete)*
 
-**Whose.** **Upstream — libro.** `CLAUDE.md` forbids touching `lib/`. Descent's
-own contribution is already zero.
+- Six of the ~17 guards that 1.6.0–1.6.6 landed were mutation-tested. Two came
+  back uncovered — F and G. **The other ~11 have not been checked.** Stated
+  explicitly because "2 uncovered" otherwise reads as a finished audit. Finishing
+  it is this release's main body of work.
+- **Test story for the release.** Every pre-1.6.7 guard has a mutation that fails
+  when the guard is reverted.
 
-**Fix size.** Needs a **libro 2.8.5** release, same shape as the 1.6.1 chain fix.
-Not ours to land.
+### What the sweep checked and found clean
 
----
-
----
-
-### Deferred by design, not forgotten
-
-Two config-validation gaps are deliberately left open because fixing them would
-reject zone files that load today, and ADR 0007 §5 freezes the zone format for
-all of 1.x. Both are folded into **M14-D**, where a format version gives them
-something to hang off:
-
-- **Unparseable config values silently take the default** instead of erroring, so
-  a typo'd field reads as "absent".
-- **`parse_uint` has no overflow check** (`v * 10 + d`), so an absurd literal
-  wraps to an arbitrary in-range value rather than being rejected. The
-  `reset_secs` clamp makes that *harmless*, not *correct*.
-
+- **No fix has been undone.** All **49** guards the 1.6.x CHANGELOG claims are
+  still present in source, verified mechanically rather than by reading.
+- **The save/load trust boundary holds.** Every numeric field on the load path is
+  `_clamp`ed, the room index is validated with a fallback, and the class id is
+  bounds-checked — E above is the one field that escaped.
+- **No bump allocation outside boot.** Every `alloc()` in `src/` is a boot-time
+  loader or a one-time-init singleton, except the audit path in C.
 
 ---
 
 ## The gate — what closes the 1.x line
 
 **The 1.x line closes when a re-run sweep comes back with no critical or high
-findings.** That has not happened. It is item 4 in [What is left](#what-is-left)
-and it is the only item that blocks 2.0.
+findings.** That has not happened. It is item 5 in
+[What is left](#what-is-left), and it plus 1.7.0 and 1.7.1 are what block 2.0.
 
-Two re-runs have been done and both found serious defects the previous pass had
-missed — a remote crash on `examine` (found at 1.6.9) and an unbounded event
-batch costing 4.12 s of blocked loop (found at 1.6.12). Everything both produced
-is fixed. The bar stays where it is because the evidence so far is that each pass
-finds real things.
+Three sweeps have been done and **all three found serious defects the previous
+pass had missed** — a remote crash on `examine` (found at 1.6.9), an unbounded
+event batch costing 4.12 s of blocked loop (found at 1.6.12), and now a 252 ms
+pass at 504% of the drift budget plus an unbounded per-connection arena loss
+(the gate sweep, [open issues](#open-issues--8) A and C). The first two are
+fixed; the third sweep's findings are 1.7.0–1.7.3.
+
+The bar stays where it is because the evidence is consistent: every pass so far
+has found real things, and each one found them in a place the previous pass had
+no instrument for. 1.6.9 built the first benches that touched save, login and
+loaders, and re-run #2 immediately found defects there. The gate sweep found A
+because it was the first time anything summed a whole tick pass. Expect the next
+re-run to find whatever 1.7.0's bench does not yet measure.
 
 ### How the sweep went — for context, not for tracking
 
@@ -176,6 +262,7 @@ severity, so each release had one coherent theme and one test story:
 | **1.6.10** | re-run #1's critical + highs | disconnect on the tick path, drain budget, creation caps |
 | **1.6.11** | re-run #1's tail | `@who` bounds, key wipes, loader unpublish, `put` round-trip |
 | **1.6.12** | re-run #2's critical | the event batch, both loops, `passwd` |
+| **1.6.13–15** | re-run #2's tail, then docs | the carry cap, the pre-auth timeout, README/overview vs code |
 
 **Two lessons the sweep cost real releases to learn.**
 
@@ -183,11 +270,22 @@ severity, so each release had one coherent theme and one test story:
 appearance of one defect — *a per-item cap is not a bound on a loop that walks
 many items* — after three releases each capped a neighbour of the open hole.
 `grep -n ident_derive src/` and "every loop that dispatches lines" were always
-the whole answer.
+the whole answer. **The gate sweep found a fifth** ([issue
+E](#172--the-carry-cap-becomes-a-bound)), which is why 1.7.2 sweeps the class
+rather than patching the instance.
 
 *A finding count is not a measure of what is broken.* It measures the instruments
 you had. 1.6.9 built the first benchmarks that ever touched the save, login and
-loader paths, and re-run #2 immediately found things there.
+loader paths, and re-run #2 immediately found things there. The gate sweep's worst
+finding is itself an instrument gap ([issue
+B](#170--the-tick-budget-becomes-a-budget)): a budget was mis-derived by 7× and
+stayed green for eight releases because nothing measured a whole tick pass.
+
+*A comment is not a bound.* Two of the eight open issues were **documented in the
+source and still open** — the false arithmetic on `DRAIN_LINES_MAX`, and
+`persist.cyr:958` stating in as many words that reconnects are unbounded. Writing
+the limitation down is not fixing it, and a reader who trusts the comment reads
+the first one as a completed piece of reasoning.
 
 ---
 
@@ -393,7 +491,9 @@ unblocked, and from [Out of scope](#out-of-scope), which is a decision against.*
 - **Crafting** — needs currency, shops and item modifiers underneath it.
 - **Quests** — needs a state machine per player, which is a schema conversation, and a lot of authored content.
 - **Skills separate from levels** — a second progression axis; not worth it until the first one is proven.
-- **aarch64** — B4 must be fixed before any ARM target runs, but no target is planned.
+- **aarch64** — no longer blocked: the epoll-layout defect that made this unsafe
+  was fixed in 1.6.14 and CI builds `--aarch64`. Deferred only because no ARM
+  target is planned, so nobody has run the suite on one.
 - Everything in the v1.0 **Out of scope** list below still stands, except that PvP and MUD protocol extensions move from "not our problem" to "post-2.0, on merit".
 
 ---
