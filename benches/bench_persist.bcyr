@@ -62,6 +62,11 @@ var g_fail = 0;
 
 # Report one operation as time-per-op AND bump-bytes-per-op, and check both
 # against their budget. `label` is a cstr; `n` is the batch size.
+#
+# The PASS/FAIL line is driven by a LOCAL flag, never by `g_fail`. `g_fail` is
+# sticky by design — it is the process exit status — so reading it here would
+# silently swallow the verdict of every op after the first failure, and a reader
+# could not tell "passed" from "not reported".
 fn report_op(label, ns_total, bytes_total, n, budget_us, bytes_max): i64 {
     var per_ns = ns_total / n;
     var per_by = bytes_total / n;
@@ -70,15 +75,17 @@ fn report_op(label, ns_total, bytes_total, n, budget_us, bytes_max): i64 {
     print(" us/op  (budget ", 17); print_num(budget_us); println(" us)");
     print("    bump : ", 12); print_num(per_by);
     print(" bytes/op  (max ", 17); print_num(bytes_max); println(")");
+    var bad = 0;
     if (per_ns / 1000 >= budget_us) {
         println("    RESULT: FAIL (over time budget)");
-        g_fail = 1;
+        bad = 1;
     }
     if (per_by > bytes_max) {
         println("    RESULT: FAIL (bump arena per op above ceiling)");
-        g_fail = 1;
+        bad = 1;
     }
-    if (g_fail == 0) { println("    RESULT: PASS"); }
+    if (bad == 0) { println("    RESULT: PASS"); }
+    if (bad == 1) { g_fail = 1; }
     return 0;
 }
 
