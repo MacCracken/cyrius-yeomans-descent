@@ -51,7 +51,7 @@ MUD rather than a well-built room-crawler.
 | **1.6.4** | `passwd` candidate isolation + the M13 assist made real | ✅ 2026-07-28 |
 | **1.6.5** | Loaders publish only on success · `player_save` failures no longer silent | ✅ 2026-07-28 |
 | **1.6.6** | Sweep batch A — state integrity | ✅ 2026-07-28 |
-| **1.6.7** | Sweep batch B — content + parser correctness | planned |
+| **1.6.7** | Sweep batch B — content + parser correctness | ✅ 2026-07-28 |
 | **1.6.8** | Sweep batch C — resource & timing hygiene | planned |
 | **1.6.9** | Sweep batch D — coverage + docs, then close the sweep | planned |
 | **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
@@ -91,7 +91,8 @@ embarrassing the release.
 ## Sweep backlog — the remaining 1.6.x batches
 
 The 1.6.0 audit produced 56 findings; 44 survived adversarial verification.
-Twenty-two are closed across 1.6.0–1.6.5. **Twelve remain**, grouped below into
+Twenty-two are closed across 1.6.0–1.6.5, and batches A and B close nine more.
+**Nine remain**, grouped below into
 four batches by the kind of work rather than by severity, so each release has one
 coherent theme and one coherent test story.
 
@@ -115,22 +116,26 @@ All three landed; see the 1.6.6 CHANGELOG entry.
   hash is not read back at boot, so each run starts a fresh linkage — the
   tamper-evidence claim only holds within a single process lifetime.
 
-### 1.6.7 — Batch B: content + parser correctness
+### 1.6.7 — Batch B: content + parser correctness ✅ shipped
 
-Things the game says it does and does not.
+All four landed; see the 1.6.7 CHANGELOG entry. Things the game said it did and
+did not.
 
-- **The `N.X` qualifier is parsed everywhere and honoured nowhere.**
-  `qual_parse` correctly returns `QUAL_NTH` with a count; `cmd_get` / `cmd_drop`
-  read only `QUAL_ALL` and hand the base noun to `ilist_find_kw`, which returns
-  the head-most match. `get 2.ration` takes the first. `cmd_kill` never calls
-  `qual_parse` at all.
-- **Five item verbs still answer the M2-era placeholder** — `put` / `give` /
-  `wear` / `remove` / `wield` parse fully and then reply with the stub.
-- **`toml_int` silently substitutes the default** for any unparseable value, so a
-  typo'd zone field reads as "absent" rather than as an error. (Related to
-  backlog **B7**, the signed-value gap — fix them together.)
-- **`bash` and `emp` print their status prose after a killing blow**, describing a
-  mob that is already dead.
+- **The `N.X` qualifier was parsed everywhere and honoured nowhere.** Both scans
+  are now ordinal-aware and `qual_single` folds a token down to (base noun,
+  ordinal) for every one-target verb.
+- **`put` and `give` answered the M2-era placeholder** — both implemented.
+  `wear` / `remove` / `wield` remain unimplemented but now say *why*: there are
+  no equipment slots, which is **M17 (2.1.0)**, not a 1.x gap.
+- **`toml_int` now accepts a sign**, closing backlog **B7**.
+- **`bash` and `emp` no longer print their status prose over a corpse.**
+
+**Carried forward, deliberately:** the finding also asked that `toml_int` treat
+an unparseable value as an *error* rather than silently substituting the
+default. It still substitutes. Rejecting a value would reject zone files that
+load today, and the zone-file format is frozen by ADR 0007 §5 for all of 1.x —
+strictness needs a format version to hang off. **Folded into M14 / ADR 0008**
+below, not into a later 1.6.x batch.
 
 ### 1.6.8 — Batch C: resource & timing hygiene
 
@@ -607,8 +612,8 @@ which the server never has, so **migration is lazy-at-login and additive only.**
 
 - **M14-A — ADR 0008.** Supersede 0007. Enumerate the new frozen-for-2.x surface: verb table, `@`-namespace, schema 2 field set, wire behaviour, zone format (with its own `format` stamp), env knobs. Record the no-offline-migration constraint as the reason schema 2 is designed to be the last bump of the line.
 - **M14-B — Schema 2.** Bump `SCHEMA_VERSION`; `v >= 2` reads the v2 path, else v1. Every v2 field is read-with-default so a v1 record upgrades silently on the next successful login. Unknown keys are ignored, never fatal.
-- **M14-C — Signed-integer support.** `toml_int` routes through `parse_uint` and returns the default on a negative, while the writer `_ai` uses `fmt_int_buf`, which emits a sign. Nothing v1 appears to go negative today, so this is latent — but the first signed field (an item `ac` modifier, a class whose AC improves with level) would silently read back its default. Add a signed reader before M16/M17 need it.
-- **M14-D — Zone format stamp.** A `format` key in the zone header plus a `WL_ERR_FORMAT`, so zone authors get a real error instead of a misparse when the format moves again.
+- **M14-C — Signed-integer support.** ✅ **Pulled forward into 1.6.7** (batch B). `toml_int` accepts a leading `-`; the writer already emitted one. Additive and behaviour-preserving for every value that parsed before, so it did not need to wait for the contract change. M16/M17 can assume signed fields read back.
+- **M14-D — Zone format stamp, and strict field parsing.** A `format` key in the zone header plus a `WL_ERR_FORMAT`, so zone authors get a real error instead of a misparse when the format moves again. **This is also where `toml_int` gets to be strict** — carried forward from 1.6.7 batch B, which fixed the signed gap but deliberately left the lenient fallback in place: a typo'd field still reads as "absent" and silently takes the default. Rejecting it would reject zone files that load today, and ADR 0007 §5 freezes the zone format for all of 1.x, so strictness has nothing to hang off until the format carries a version. Once it does: an unparseable value under `format >= 2` is a load error, and under an absent/`1` stamp it keeps the 1.x fallback.
 - **M14-E — `validate` argv verb.** Offline zone/save validation, outside the command surface. Also the natural home for an authored-prose 0xFF check (M10's gate covers player bytes, not authored files).
 
 **Gate:** a 1.2.0 save loads, upgrades to schema 2 on login, and round-trips; a schema-3 record is refused with the "newer server" message; ADR 0008 is Accepted and 0007 marked Superseded.

@@ -148,7 +148,9 @@ fn cmd_kill(s, pa): i64 {
     if (world_room_count() == 0) { session_appendtx_cstr(s, "There is nothing here to fight.\r\n"); return 0; }
     if (parsed_has_dobj(pa) == 0) { session_appendtx_cstr(s, "Kill what?\r\n"); return 0; }
     var di = parsed_dobj(pa);
-    var m = mob_in_room_by_kw(load64(s + SS_ROOM), tok_ptr(pa, di), tok_len(pa, di));
+    var np[8]; var nl[8];
+    var nth = qual_single(pa, di, &np, &nl);
+    var m = mob_in_room_by_kw_nth(load64(s + SS_ROOM), load64(&np), load64(&nl), nth);
     if (m == 0) {
         session_appendtx_cstr(s, "You see no ");
         session_appendtx_tok(s, pa, di);

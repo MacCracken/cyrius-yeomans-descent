@@ -4,6 +4,104 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.7] — 2026-07-28
+
+**Sweep batch B — content + parser correctness.** Four findings where the game
+said it did something and did not. Nothing here is a crash or a leak; all four
+are the server lying to the player.
+
+### Fixed
+
+- **The `N.X` qualifier was parsed everywhere and honoured nowhere.**
+  `qual_parse` has returned `QUAL_NTH` with a count since M2-E, and every caller
+  threw the count away: `cmd_get` and `cmd_drop` read only `QUAL_ALL` and handed
+  the *base* noun to `ilist_find_kw`, which returns the head-most match, and
+  `cmd_kill` never called `qual_parse` at all. So `get 2.ration` took the first
+  ration; `kill 2.scavver` searched for a mob whose keywords are literally
+  spelled "2.scavver", found none, and answered "You see no 2.scavver here to
+  attack" with two of them standing in the room.
+
+  Both scans are now ordinal-aware — `ilist_find_kw_nth` (objects) and
+  `mob_in_room_by_kw_nth` (mobs) — and `qual_single` folds a token down to
+  (base noun, ordinal) for every verb that acts on one thing: `get`, `drop`,
+  `put`, `give`, `examine`, `kill`, and the container half of `get X from Y`.
+  Unqualified nouns resolve to ordinal 1, which is exactly the old behaviour,
+  so this is additive against the frozen 1.x surface (ADR 0007 §1). `all.X` maps
+  to the first match for these verbs, since none of them has a plural form; the
+  mass verbs keep reading `QUAL_ALL` from `qual_parse` directly.
+- **`put` and `give` answered a placeholder from M2.** Both parsed fully and then
+  replied *"but the Under-Grid is empty — items arrive at M3"* — which stopped
+  being true when M3 shipped, and read as a broken server for four releases
+  afterwards. Both are implemented.
+
+  `put` is the exact inverse of `get X from Y`, and like that verb it lets any
+  object hold things: 1.x objects carry no container flag, so the two halves
+  agree rather than one of them enforcing a rule the other does not. Nesting is
+  capped at one level — a container that already holds something cannot go into
+  another. That reads as a game rule ("empty it first"), but it is load-bearing:
+  `obj_free` walks `OI_CONTENTS` recursively, so unbounded nesting is unbounded
+  stack and a cycle would not terminate at all. Depth 1 makes both impossible by
+  construction rather than by argument, and an explicit self-containment guard
+  covers the one-object cycle directly.
+
+  `give` hands an object to a player in the same room and flushes the recipient
+  in the same tick, the way `tell` does — an item that arrives silently and only
+  surfaces on the next command reads as a lost item.
+- **`wear` / `remove` / `wield` now say why they cannot.** These are still
+  unimplemented, but for a real reason: there are no equipment slots to wear
+  anything into, objects carry no slot or wear-flag field, and adding one is a
+  zone-format change the frozen 1.x surface does not permit — the loadout system
+  is M17 (2.1.0). They now resolve the noun for real and answer honestly, so a
+  player carrying a jacket learns the verb is unfinished rather than that their
+  item vanished.
+- **`bash` and `emp` printed their status prose after a killing blow.** Both set
+  the stun, struck, and then unconditionally added "It reels, stunned." / "Its
+  servos lock up." — describing a mob that had already collapsed two lines
+  earlier. `ability_strike` now returns 1 when the blow kills and both callers
+  gate their follow-up on it. Verified *not* a use-after-free: every ability sets
+  the stun **before** the strike and none touches the instance afterwards.
+
+### Changed
+
+- **`toml_int` accepts a leading `-`.** It routed every value through
+  `parse_uint`, which has no concept of a sign and returns -1 for anything it
+  cannot read — which `toml_int` folded into the default. An authored `ac = -3`
+  did not mean "AC minus three", it meant "AC 8, the default", silently. Nothing
+  in the frozen v1 schema reaches a negative today, which is why it stayed
+  latent, but the save writer has always *emitted* signs, so a negative could be
+  written and never read back. Closes backlog **B7**.
+
+  **Deliberately still lenient about garbage.** The batch-B finding also asked
+  that an unparseable value be an error rather than a silent default. It is not,
+  and this release does not change that: rejecting a value would reject zone
+  files that load today, and the zone-file format is frozen by ADR 0007 §5 for
+  all of 1.x. Strictness needs a format version to hang off — that is the 2.0
+  conversation (M14 / ADR 0008), and it is recorded there.
+
+### Documentation
+
+- **`help` advertises the qualifier.** It has worked in the parser since M2-E and
+  nothing has ever told a player it exists.
+- **`docs/guides/commands.md` documented all five item verbs as working**, which
+  is how three of them went four releases without anyone noticing they answered a
+  placeholder. `put` and `give` now match the guide; the `wear` / `remove` /
+  `wield` row says plainly that they are not implemented in 1.x and why, and the
+  intro no longer claims nouns resolve against "worn/wielded slots" that do not
+  exist. The qualifier and container-nesting rules are written down.
+
+### Testing
+
+- 448 → **500 assertions**; new `item-verbs` group covering the ordinal on both
+  scans and end to end through `drop` / `kill` / `examine`, `put`'s cycle and
+  nesting guards, `get X from Y` round-tripping what `put` stored, `give`'s
+  transfer and same-tick notification, the equipment verbs' honest answer, the
+  kill-report return, and `toml_int`'s sign handling.
+- Ten mutations, each reverting one guard; every one fails between 1 and 8
+  assertions.
+- Live two-client run against a real `serve`: `put`, `give` (transfer, sender
+  echo, recipient notified), `wear`, and `examine 2.scavver` / `kill 2.scavver`
+  in the two-scavver room, with `examine 3.scavver` correctly not found.
+
 ## [1.6.6] — 2026-07-28
 
 **Sweep batch A — state integrity.** Three findings that could corrupt,

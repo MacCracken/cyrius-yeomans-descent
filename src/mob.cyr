@@ -119,11 +119,34 @@ fn mi_name_ptr(m): i64    { return mt_name_ptr(mi_tpl(m)); }
 # Template name length, for the (ptr, len) appends in room listings and combat prose.
 fn mi_name_len(m): i64    { return mt_name_len(mi_tpl(m)); }
 
-# Read an int field from a TOML pairs vec, or `def` if absent / non-numeric.
+# Read an int field from a TOML pairs vec, or `def` if absent / unparseable.
+#
+# H12 (1.6.7, closes backlog B7) — accepts a leading '-'. `parse_uint` has no
+# concept of sign and returns -1 for anything it cannot read, which this used to
+# fold into `def`: an authored `ac = -3` did not mean "AC minus three", it meant
+# "AC 8, the default", silently. The save writer has always emitted signs
+# (`_ai` → `fmt_int_buf`), so a negative value could be written and never read
+# back — nothing in the frozen v1 schema reaches a negative today, which is why
+# it stayed latent, but the first genuinely signed field would have failed
+# silently.
+#
+# Deliberately still LENIENT about garbage: a value that is not a number at all
+# falls back to `def` rather than failing the load. Making it strict would reject
+# zone files that load today, and the zone format is frozen by ADR 0007 §5 for
+# all of 1.x — that belongs to the 2.0 format-version conversation.
 fn toml_int(pairs, key, def): i64 {
     var v = toml_get(pairs, key);
     if (v == 0) { return def; }
-    var n = parse_uint(str_data(v), str_len(v));
+    var p = str_data(v);
+    var len = str_len(v);
+    if (len <= 0) { return def; }
+    if ((load8(p) & 0xFF) == 45) {          # '-'
+        if (len == 1) { return def; }
+        var mag = parse_uint(p + 1, len - 1);
+        if (mag < 0) { return def; }
+        return 0 - mag;
+    }
+    var n = parse_uint(p, len);
     if (n < 0) { return def; }
     return n;
 }
@@ -345,15 +368,27 @@ fn mob_remove(m): i64 {
     return 0;
 }
 
-# Find a mob in `room_idx` whose keywords the typed noun prefixes, or 0.
-fn mob_in_room_by_kw(room_idx, noun_ptr, noun_len): i64 {
+# The `nth` (1-based) mob in `room_idx` whose keywords the typed noun prefixes,
+# or 0 if the room holds fewer than `nth` of them. Scan order is the room's
+# occupant list — the order `look` lists them, so "kill 2.drone" attacks the
+# second drone printed.
+fn mob_in_room_by_kw_nth(room_idx, noun_ptr, noun_len, nth): i64 {
     if (room_idx < 0) { return 0; }
+    if (nth < 1)      { return 0; }
+    var seen = 0;
     var m = room_mob_head(room_at(room_idx));
     while (m != 0) {
-        if (kw_matches(noun_ptr, noun_len, mt_kw_ptr(mi_tpl(m))) == 1) { return m; }
+        if (kw_matches(noun_ptr, noun_len, mt_kw_ptr(mi_tpl(m))) == 1) {
+            seen = seen + 1;
+            if (seen == nth) { return m; }
+        }
         m = mi_next(m);
     }
     return 0;
+}
+# Find a mob in `room_idx` whose keywords the typed noun prefixes, or 0.
+fn mob_in_room_by_kw(room_idx, noun_ptr, noun_len): i64 {
+    return mob_in_room_by_kw_nth(room_idx, noun_ptr, noun_len, 1);
 }
 
 # === world_spawn_all — populate every room from its `mobs` spawn list. ===

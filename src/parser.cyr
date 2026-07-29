@@ -711,6 +711,31 @@ fn qual_parse(pa, ti, out_kind, out_n, out_ptr, out_len): i64 {
     return QUAL_NONE;
 }
 
+# === qual_single — fold a qualified token down for a ONE-target verb. ===
+#
+# H12 (1.6.7) — qual_parse has returned QUAL_NTH since M2-E and every caller
+# threw the ordinal away: `get 2.canister` searched for a keyword literally
+# spelled "2.canister", matched nothing, and answered "There is nothing like
+# that here" while the second canister sat in plain sight. The qualifier was
+# parsed everywhere and honoured nowhere.
+#
+# Writes the base noun to (out_ptr, out_len) and returns the 1-based ordinal to
+# take. Unqualified nouns return 1, which is exactly the old first-match
+# behaviour — that is what makes this additive rather than a wire change.
+#
+# `all.X` also returns 1 here: verbs that act on one entity (kill, examine, the
+# container half of `get X from Y`) have no plural form, so they take the first
+# match rather than erroring. The mass verbs read QUAL_ALL from qual_parse
+# directly and never come through here.
+fn qual_single(pa, ti, out_ptr, out_len): i64 {
+    var kind[8]; var num[8]; var bp[8]; var bl[8];
+    qual_parse(pa, ti, &kind, &num, &bp, &bl);
+    store64(out_ptr, load64(&bp));
+    store64(out_len, load64(&bl));
+    if (load64(&kind) == QUAL_NTH) { return load64(&num); }
+    return 1;
+}
+
 # === resolve_nth — the Nth (1-based) scope match in scan order. ===
 #
 # Returns the scope index, or RES_NOTFOUND if there are fewer than `nth`

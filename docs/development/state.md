@@ -3,14 +3,44 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-28 (v1.6.6 — sweep batch A shipped; B–D remain)
+> **Last refresh**: 2026-07-28 (v1.6.7 — sweep batches A–B shipped; C–D remain)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.6.6 tree.
+> tests, boot guide) describes the **current** 1.6.7 tree.
 
 ## Version
+
+**1.6.7** — sweep batch B, content + parser correctness, 2026-07-28. **500
+assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
+
+- **The `N.X` qualifier was parsed everywhere and honoured nowhere.** `qual_parse`
+  has returned `QUAL_NTH` since M2-E and every caller dropped the count, so
+  `get 2.ration` took the first and `kill 2.scavver` searched for a mob whose
+  keywords are spelled "2.scavver". Both scans are ordinal-aware now
+  (`ilist_find_kw_nth`, `mob_in_room_by_kw_nth`) and `qual_single` folds a token
+  down for every one-target verb. Unqualified nouns still resolve to ordinal 1,
+  so it is additive against the frozen surface.
+- **`put` and `give` answered the M2 placeholder** — *"the Under-Grid is empty —
+  items arrive at M3"* — four releases after M3 shipped. Both implemented.
+  `put` nests one level deep on purpose: `obj_free` recurses through
+  `OI_CONTENTS`, so depth 1 plus a self-containment guard makes unbounded stack
+  and cycles impossible by construction.
+- **`wear` / `remove` / `wield` now say why they cannot.** Still unimplemented —
+  there are no equipment slots, and adding a wear-flag field is a zone-format
+  change 1.x cannot make. That is **M17 (2.1.0)**, and the verbs now say so
+  instead of claiming the world is empty.
+- **`bash` and `emp` described a corpse.** Both printed their stun prose after a
+  killing blow. `ability_strike` reports the kill; both callers gate on it.
+  Verified *not* a UAF — every ability sets the stun before the strike.
+- **`toml_int` accepts a sign** (closes backlog **B7**, and **M14-C** early).
+
+**Carried forward on purpose:** the batch-B finding also asked that `toml_int`
+reject garbage instead of silently defaulting. It does not, and 1.6.x will not
+change that — rejecting a value rejects zone files that load today, and ADR 0007
+§5 freezes the zone format for all of 1.x. Strictness needs a format version to
+hang off; folded into **M14-D**, not a later 1.6.x batch.
 
 **1.6.6** — sweep batch A, state integrity, 2026-07-28. **448 assertions**;
 `cyrius audit` exits 0; `--agnos` warning-free.
@@ -44,9 +74,8 @@ mutation that fails to fail is a signal about the test, not the code.
   kept the old pubkey. Now checked, with a rollback of the live ident block, and
   the rest audit their failures.
 
-**Next: the sweep is not finished.** Twelve findings remain, batched into
-**1.6.6–1.6.9** (state integrity → content/parser → resource & timing →
-coverage + docs). See [`roadmap.md`](roadmap.md#sweep-backlog--the-remaining-16x-batches).
+**Next: the sweep is not finished.** Nine findings remain, batched into
+**1.6.8–1.6.9** (resource & timing → coverage + docs). See [`roadmap.md`](roadmap.md#sweep-backlog--the-remaining-16x-batches).
 **2.0 / M14 does not start until 1.6.9 lands** and a re-run sweep produces no
 critical or high findings.
 
@@ -417,7 +446,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **448** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **500** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,

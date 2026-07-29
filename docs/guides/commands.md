@@ -5,8 +5,8 @@ the 1.x line ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — type `help`
 in-world for the short version.
 
 Commands are parsed verb-first; most take a noun resolved against your
-inventory, your worn/wielded slots, and the current room. Matching is by
-keyword prefix (`get rat` finds `a ration`).
+inventory and the current room. Matching is by keyword prefix (`get rat` finds
+`a ration`). There are no equipment slots in 1.x — see the note under Items.
 
 ## Movement
 
@@ -30,13 +30,25 @@ keyword prefix (`get rat` finds `a ration`).
 |---|---|---|
 | `get <obj>` | `get sword`, `get all`, `get all.ration`, `get 2.cell`, `get <obj> from <container>` | Pick up an object (or loot a corpse). |
 | `drop <obj>` | `drop sword`, `drop all` | Drop an object into the room. |
-| `put <obj> in <container>` | | Place an object into a container. |
-| `give <obj> to <player>` | | Hand an object to someone. |
-| `wear` / `remove` / `wield <obj>` | | Equip / unequip gear. |
+| `put <obj> in <container>` | `put cell in crate`, `put 2.cell in crate` | Place a carried object into a container in the room or in your hands. |
+| `give <obj> to <player>` | `give notice to Kiran` | Hand an object to someone standing in the same room. They are told immediately. |
+| `wear` / `remove` / `wield <obj>` | | **Not implemented in 1.x.** They resolve the noun and tell you so. |
 
 **Qualifiers** work on any noun: `all` (everything in scope), `all.X` (every X),
-`N.X` (the Nth X in scan order — `kill 2.drone`). **Prepositions**: `in on to
+`N.X` (the Nth X in scan order — `kill 2.drone`, `drop 3.ration`). Scan order is
+the order `look` and `inventory` print. For verbs that act on one thing — `kill`,
+`examine`, `put`, `give`, and the container half of `get X from Y` — `all.X`
+means the first X, since they have no plural form. **Prepositions**: `in on to
 from at with`.
+
+**Containers nest one level deep.** A container that already holds something
+cannot go inside another one; empty it first. Nothing can be put inside itself.
+
+**On `wear` / `remove` / `wield`:** these parse, and they resolve your noun, but
+there is nothing to equip *into* — objects carry no slot or wear-flag field, and
+adding one would change the zone-file format, which ADR 0007 §5 freezes for all
+of 1.x. The loadout system is **M17 (v2.1.0)**. Until then the verbs say that
+rather than pretending.
 
 ## Combat
 

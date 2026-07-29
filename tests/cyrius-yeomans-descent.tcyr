@@ -1881,6 +1881,318 @@ fn test_state_integrity(): i64 {
     return 0;
 }
 
+# Pop every object off the list at `slot`, freeing each — leaves the room or
+# inventory exactly as empty as the group found it.
+fn _drain_ilist(slot): i64 {
+    var o = load64(slot);
+    while (o != 0) {
+        var nxt = oi_next(o);
+        store64(slot, nxt);
+        obj_free(o);
+        o = nxt;
+    }
+    return 0;
+}
+# First space-delimited word of an object's keyword blob, copied into `dst` and
+# NUL-terminated. The blob is multi-word ("scrip fistful credits money"); feeding
+# all of it to the parser would make the extra words look like more tokens, so
+# every command these tests build uses just the first.
+fn _kw1(src, dst): i64 {
+    var i = 0;
+    var done = 0;
+    while (done == 0) {
+        var c = load8(src + i) & 0xFF;
+        if (c == 0)  { done = 1; continue; }
+        if (c == 32) { done = 1; continue; }
+        store8(dst + i, c);
+        i = i + 1;
+    }
+    store8(dst + i, 0);
+    return dst;
+}
+# Is `o` on the intrusive list headed at `slot`?
+fn _on_ilist(slot, o): i64 {
+    var c = load64(slot);
+    while (c != 0) {
+        if (c == o) { return 1; }
+        c = oi_next(c);
+    }
+    return 0;
+}
+
+# === H12 (1.6.7) — Batch B: the qualifier, the placeholder verbs, zone ints. ===
+fn test_item_verbs(): i64 {
+    test_group("item-verbs");
+    assert(world_room_count() > 0, "item-verbs: needs a loaded world (fixture ordering)");
+    assert(g_obj_tpl_count >= 2, "item-verbs: needs at least two object templates");
+
+    var room_slot = room_at(0) + RM_OBJ_HEAD;
+    _drain_ilist(room_slot);
+
+    # --- B1: the N.X ordinal. qual_parse has returned QUAL_NTH since M2-E and
+    # nothing read it, so `get 2.scrip` searched for a keyword literally spelled
+    # "2.scrip" and answered "There is nothing like that here" with the second
+    # one in plain sight.
+    var pa = parser_new();
+    var qp[8]; var ql[8];
+    var kwbuf = alloc(64);
+    var kwbuf2 = alloc(64);
+
+    parse_lit(pa, "get 2.scrip");
+    assert_eq(qual_single(pa, parsed_dobj(pa), &qp, &ql), 2, "2.scrip → ordinal 2");
+    assert_eq(load64(&ql), 5, "and the base noun drops the ordinal");
+
+    parse_lit(pa, "get scrip");
+    assert_eq(qual_single(pa, parsed_dobj(pa), &qp, &ql), 1, "an unqualified noun → ordinal 1");
+    assert_eq(load64(&ql), 5, "whole token is the base");
+
+    # A singular verb has no plural form, so all.X takes the first match.
+    parse_lit(pa, "get all.scrip");
+    assert_eq(qual_single(pa, parsed_dobj(pa), &qp, &ql), 1, "all.scrip → first match");
+    assert_eq(load64(&ql), 5, "with the base after the dot");
+
+    # Three identical items on one list: the ordinal must pick them apart in
+    # list order — the order look / inventory print, which for ilist_push is
+    # most-recently-pushed first.
+    var tpl = ot_at(0);
+    var head[8]; store64(&head, 0);
+    var o1 = item_new(tpl); ilist_push(&head, o1);
+    var o2 = item_new(tpl); ilist_push(&head, o2);
+    var o3 = item_new(tpl); ilist_push(&head, o3);
+    var kw = _kw1(oi_kw_ptr(o1), kwbuf);
+    var kwl = strlen(kw);
+    assert_eq(ilist_find_kw_nth(load64(&head), kw, kwl, 1), o3, "1. is the list head");
+    assert_eq(ilist_find_kw_nth(load64(&head), kw, kwl, 2), o2, "2. is the second match");
+    assert_eq(ilist_find_kw_nth(load64(&head), kw, kwl, 3), o1, "3. is the third match");
+    assert_eq(ilist_find_kw_nth(load64(&head), kw, kwl, 4), 0, "past the end → nothing");
+    assert_eq(ilist_find_kw_nth(load64(&head), kw, kwl, 0), 0, "a zero ordinal → nothing");
+    assert_eq(ilist_find_kw(load64(&head), kw, kwl), o3,
+              "the unqualified lookup is still first-match");
+
+    # End to end through a real command: drop 2.<kw> must move the SECOND one
+    # and leave the other two carried.
+    var s = _mk_sess("Ordinal", 7);
+    store64(s + SS_ROOM, 0);
+    store64(s + SS_PHASE, PHASE_CMD);
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_INV, load64(&head));
+
+    var cmd = alloc(256);
+    var co = _str_into(cmd, 0, "drop 2.");
+    co = _str_into(cmd, co, kw);
+    _tx_reset(s);
+    parser_parse(pa, cmd, co);
+    cmd_drop(s, pa);
+    assert_eq(_on_ilist(room_slot, o2), 1, "drop 2.<kw> dropped the second one");
+    assert_eq(_on_ilist(s + SS_INV, o2), 0, "and it left the inventory");
+    assert_eq(_on_ilist(s + SS_INV, o3), 1, "the first is still carried");
+    assert_eq(_on_ilist(s + SS_INV, o1), 1, "and so is the third");
+
+    # An ordinal past the end must not silently fall back to the first.
+    _tx_reset(s);
+    co = _str_into(cmd, 0, "drop 9.");
+    co = _str_into(cmd, co, kw);
+    parser_parse(pa, cmd, co);
+    cmd_drop(s, pa);
+    assert_eq(_on_ilist(s + SS_INV, o3), 1, "9.<kw> with two carried drops nothing");
+    assert_eq(_tx_is(s, "You aren't carrying that.\r\n"), 1, "and says so");
+
+    _drain_ilist(room_slot);
+    _drain_ilist(s + SS_INV);
+
+    # --- B2: put. Four releases after M3 landed, `put` still answered "the
+    # Under-Grid is empty — items arrive at M3".
+    var box = item_new(ot_at(1));
+    ilist_push(room_slot, box);
+    var coin = item_new(ot_at(0));
+    ilist_push(s + SS_INV, coin);
+    var bkw = _kw1(oi_kw_ptr(box), kwbuf);
+    var ckw = _kw1(oi_kw_ptr(coin), kwbuf2);
+
+    co = _str_into(cmd, 0, "put ");
+    co = _str_into(cmd, co, ckw);
+    co = _str_into(cmd, co, " in ");
+    co = _str_into(cmd, co, bkw);
+    _tx_reset(s);
+    parser_parse(pa, cmd, co);
+    cmd_put(s, pa);
+    assert_eq(_on_ilist(box + OI_CONTENTS, coin), 1, "put moved the item into the container");
+    assert_eq(_on_ilist(s + SS_INV, coin), 0, "and out of the inventory");
+    # ... and `get X from Y` takes it back — the two halves must agree.
+    co = _str_into(cmd, 0, "get ");
+    co = _str_into(cmd, co, ckw);
+    co = _str_into(cmd, co, " from ");
+    co = _str_into(cmd, co, bkw);
+    _tx_reset(s);
+    parser_parse(pa, cmd, co);
+    cmd_get(s, pa);
+    assert_eq(_on_ilist(s + SS_INV, coin), 1, "get ... from takes it back out");
+    assert_eq(_on_ilist(box + OI_CONTENTS, coin), 0, "leaving the container empty");
+
+    # Nothing may hold itself: that is a cycle, and obj_free walks OI_CONTENTS
+    # recursively — it would never terminate.
+    co = _str_into(cmd, 0, "put ");
+    co = _str_into(cmd, co, ckw);
+    co = _str_into(cmd, co, " in ");
+    co = _str_into(cmd, co, ckw);
+    _tx_reset(s);
+    parser_parse(pa, cmd, co);
+    cmd_put(s, pa);
+    assert_eq(_tx_is(s, "It won't hold itself.\r\n"), 1, "a container cannot hold itself");
+    assert_eq(oi_contents(coin), 0, "and nothing went in");
+
+    # Nesting is capped at one level, so the recursion depth is bounded.
+    var sack = item_new(ot_at(1));
+    ilist_push(s + SS_INV, sack);
+    ilist_push(sack + OI_CONTENTS, item_new(ot_at(0)));   # sack is now non-empty
+    co = _str_into(cmd, 0, "put ");
+    co = _str_into(cmd, co, _kw1(oi_kw_ptr(sack), alloc(64)));
+    co = _str_into(cmd, co, " in ");
+    co = _str_into(cmd, co, bkw);
+    _tx_reset(s);
+    parser_parse(pa, cmd, co);
+    cmd_put(s, pa);
+    assert_eq(_tx_is(s, "It's full — empty it first.\r\n"), 1, "a full container will not nest");
+    assert_eq(_on_ilist(s + SS_INV, sack), 1, "and it stays where it was");
+
+    _tx_reset(s);
+    parse_lit(pa, "put scrip");
+    cmd_put(s, pa);
+    assert_eq(_tx_is(s, "Put it in what?\r\n"), 1, "put with no container asks for one");
+
+    _drain_ilist(s + SS_INV);
+    _drain_ilist(room_slot);
+
+    # --- B2: give. Hands an object to a player standing in the same room.
+    var giver = _mk_sess("Giver", 5);
+    store64(giver + SS_ROOM, 0); store64(giver + SS_PHASE, PHASE_CMD);
+    store64(giver + SS_FD, 0 - 1);
+    var taker = _mk_sess("Taker", 5);
+    store64(taker + SS_ROOM, 0); store64(taker + SS_PHASE, PHASE_CMD);
+    store64(taker + SS_FD, 0 - 1);   # deliver_to writes to a bad fd, never a real one
+    var saved_head = g_session_head;
+    store64(giver + SS_NEXT, taker); store64(taker + SS_NEXT, 0);
+    g_session_head = giver;
+
+    var gift = item_new(ot_at(0));
+    ilist_push(giver + SS_INV, gift);
+    co = _str_into(cmd, 0, "give ");
+    co = _str_into(cmd, co, _kw1(oi_kw_ptr(gift), kwbuf));
+    co = _str_into(cmd, co, " to Taker");
+    _tx_reset(giver); _tx_reset(taker);
+    parser_parse(pa, cmd, co);
+    cmd_give(giver, pa);
+    assert_eq(_on_ilist(taker + SS_INV, gift), 1, "give moved the item to the recipient");
+    assert_eq(_on_ilist(giver + SS_INV, gift), 0, "and out of the giver's hands");
+    assert_eq(_contains(load64(taker + SS_TX_BUF), load64(taker + SS_TX_LEN), "gives you"), 1,
+              "the recipient is told, in the same tick");
+
+    # No such player in the room: the item must not evaporate.
+    var keep = item_new(ot_at(0));
+    ilist_push(giver + SS_INV, keep);
+    _tx_reset(giver);
+    co = _str_into(cmd, 0, "give ");
+    co = _str_into(cmd, co, _kw1(oi_kw_ptr(keep), kwbuf));
+    co = _str_into(cmd, co, " to Nobody");
+    parser_parse(pa, cmd, co);
+    cmd_give(giver, pa);
+    assert_eq(_on_ilist(giver + SS_INV, keep), 1, "an unresolvable recipient keeps the item put");
+
+    _tx_reset(giver);
+    parse_lit(pa, "give scrip");
+    cmd_give(giver, pa);
+    assert_eq(_tx_is(giver, "Give it to whom?\r\n"), 1, "give with no recipient asks for one");
+
+    g_session_head = saved_head;
+    _drain_ilist(giver + SS_INV);
+    _drain_ilist(taker + SS_INV);
+
+    # --- B2: wear / remove / wield. Still unimplemented — equipment slots are
+    # M17 — but they must say THAT, not "items arrive at M3", which stopped
+    # being true the moment M3 shipped.
+    var jacket = item_new(ot_at(0));
+    ilist_push(s + SS_INV, jacket);
+    co = _str_into(cmd, 0, "wear ");
+    co = _str_into(cmd, co, _kw1(oi_kw_ptr(jacket), kwbuf));
+    _tx_reset(s);
+    parser_parse(pa, cmd, co);
+    cmd_dispatch(s, pa, cmd, co);
+    assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "arrive at M3"), 0,
+              "wear no longer claims the world is empty");
+    assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "rig to hold it"), 1,
+              "it says why it cannot, instead");
+    _tx_reset(s);
+    parse_lit(pa, "wield sporkgun");
+    cmd_dispatch(s, pa, "wield sporkgun", 14);
+    assert_eq(_tx_is(s, "You aren't carrying that.\r\n"), 1,
+              "and it resolves the noun for real before answering");
+    _drain_ilist(s + SS_INV);
+
+    # --- B1, the other half: mobs. `kill 2.drone` went through a separate scan
+    # (mob_in_room_by_kw) that never saw a qualifier either, so a room holding
+    # three of the same template could only ever be fought one way — whichever
+    # one happened to head the occupant list.
+    if (g_mob_tpl_count > 0) {
+        var kt = mt_at(0);
+        var mkw = _kw1(mt_kw_ptr(kt), kwbuf);
+        var mkwl = strlen(mkw);
+        var k1 = mob_spawn(kt, 0);
+        var k2 = mob_spawn(kt, 0);
+        var k3 = mob_spawn(kt, 0);
+        assert_eq(mob_in_room_by_kw_nth(0, mkw, mkwl, 1), k3, "1. is the room's list head");
+        assert_eq(mob_in_room_by_kw_nth(0, mkw, mkwl, 2), k2, "2. is the second mob");
+        assert_eq(mob_in_room_by_kw_nth(0, mkw, mkwl, 3), k1, "3. is the third");
+        assert_eq(mob_in_room_by_kw_nth(0, mkw, mkwl, 4), 0, "past the end → nothing");
+        assert_eq(mob_in_room_by_kw(0, mkw, mkwl), k3, "the unqualified scan is still first-match");
+
+        co = _str_into(cmd, 0, "kill 2.");
+        co = _str_into(cmd, co, mkw);
+        _tx_reset(s);
+        store64(s + SS_TARGET, 0);
+        parser_parse(pa, cmd, co);
+        cmd_kill(s, pa);
+        assert_eq(load64(s + SS_TARGET), k2, "kill 2.<kw> engages the second one");
+
+        co = _str_into(cmd, 0, "examine 3.");
+        co = _str_into(cmd, co, mkw);
+        _tx_reset(s);
+        parser_parse(pa, cmd, co);
+        cmd_examine(s, pa);
+        assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "You see no"), 0,
+                  "examine 3.<kw> resolves rather than failing to find it");
+
+        store64(s + SS_TARGET, 0);
+        mob_remove(k1); mob_remove(k2); mob_remove(k3);
+    }
+
+    # --- B4: a killing blow ends the prose. bash / emp printed their status
+    # line ("It reels, stunned.") after the mob had already collapsed.
+    if (g_mob_tpl_count > 0) {
+        var mt = mt_at(0);
+        var m = mob_spawn(mt, 0);
+        mi_set_hp(m, 50);
+        _tx_reset(s);
+        assert_eq(ability_strike(s, m, 1, "You tap "), 0, "a survivable hit reports no kill");
+        mi_set_hp(m, 1);
+        _tx_reset(s);
+        assert_eq(ability_strike(s, m, 99, "You flatten "), 1, "a killing hit reports the kill");
+        _drain_ilist(room_slot);   # the corpse it left
+    }
+
+    # --- B3: signed ints in authored content. toml_int routed every value
+    # through parse_uint, which has no concept of a sign and returns -1 for
+    # anything it cannot read — so an authored `ac = -3` silently became the
+    # default and no zone file could ever express a negative.
+    assert_eq(toml_int(_pairs_of("ac = \"-3\"\n"), "ac", 8), 0 - 3, "a negative value parses");
+    assert_eq(toml_int(_pairs_of("ac = \"7\"\n"), "ac", 8), 7, "a positive value still parses");
+    assert_eq(toml_int(_pairs_of("ac = \"0\"\n"), "ac", 8), 0, "and zero is not the default");
+    assert_eq(toml_int(_pairs_of("ac = \"-\"\n"), "ac", 8), 8, "a bare sign falls back");
+    assert_eq(toml_int(_pairs_of("ac = \"-x\"\n"), "ac", 8), 8, "a signed non-number falls back");
+    assert_eq(toml_int(_pairs_of("hp = \"3\"\n"), "ac", 8), 8, "an absent key falls back");
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -2097,6 +2409,7 @@ fn main() {
     test_chpass_isolation();
     test_load_and_save_failure();
     test_state_integrity();
+    test_item_verbs();
 
     return assert_summary();
 }

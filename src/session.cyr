@@ -613,26 +613,54 @@ fn cmd_tell(s, pa, buf, len): i64 {
     return 0;
 }
 
-# An object verb (get / drop / kill / ...): reflect the parsed structure.
-# With no world yet (M3), every noun resolves to nothing — but the parse
-# is shown so the verb-noun machinery is visible end to end.
+# The equipment verbs (wear / remove / wield).
+#
+# H12 (1.6.7) — these used to answer "the Under-Grid is empty — items arrive at
+# M3", which stopped being true at M3 and read as a broken server for four
+# releases afterwards. They are still unimplemented, but for an honest reason:
+# there are no equipment slots to wear anything into. Objects carry no slot or
+# wear-flag field, and adding one is a zone-format change the frozen 1.x
+# surface (ADR 0007 §5) does not permit — the loadout system is M17 (2.1.0).
+#
+# So: resolve the noun for real, and say what is actually the case. A player who
+# types `wear jacket` while carrying a jacket learns the verb is unfinished, not
+# that their item vanished.
+fn cmd_equip_stub(s, pa, verb): i64 {
+    if (parsed_has_dobj(pa) == 0) {
+        session_appendtx_cstr(s, verb_name(verb));
+        session_appendtx_cstr(s, " what?\r\n");
+        return 0;
+    }
+    var di = parsed_dobj(pa);
+    var np[8]; var nl[8];
+    var nth = qual_single(pa, di, &np, &nl);
+    var o = ilist_find_kw_nth(load64(s + SS_INV), load64(&np), load64(&nl), nth);
+    if (o == 0) {
+        session_appendtx_cstr(s, "You aren't carrying that.\r\n");
+        return 0;
+    }
+    if (verb == VERB_REMOVE) {
+        session_appendtx_cstr(s, "You have nothing equipped — you are carrying ");
+        append_item_name(s, o);
+        session_appendtx_cstr(s, ", not wearing it.\r\n");
+        return 0;
+    }
+    session_appendtx_cstr(s, "You turn ");
+    append_item_name(s, o);
+    session_appendtx_cstr(s, " over in your hands. Nothing in the Under-Grid has a rig to hold it yet.\r\n");
+    return 0;
+}
+
+# Any remaining object verb with no implementation at all.
 fn cmd_object(s, pa, verb): i64 {
     if (parsed_has_dobj(pa) == 0) {
         session_appendtx_cstr(s, verb_name(verb));
         session_appendtx_cstr(s, " what?\r\n");
         return 0;
     }
-    session_appendtx_cstr(s, "You move to ");
+    session_appendtx_cstr(s, "You can't ");
     session_appendtx_cstr(s, verb_name(verb));
-    session_appendtx_cstr(s, " the ");
-    session_appendtx_tok(s, pa, parsed_dobj(pa));
-    if (parsed_has_iobj(pa) == 1) {
-        session_appendtx_cstr(s, " ");
-        session_appendtx_cstr(s, prep_name(parsed_prep(pa)));
-        session_appendtx_cstr(s, " the ");
-        session_appendtx_tok(s, pa, parsed_iobj(pa));
-    }
-    session_appendtx_cstr(s, ", but the Under-Grid is empty — items arrive at M3.\r\n");
+    session_appendtx_cstr(s, " that.\r\n");
     return 0;
 }
 
@@ -642,6 +670,9 @@ fn cmd_help_text(s): i64 {
     session_appendtx_cstr(s, "move    : n s e w u d (north ...)\r\n");
     session_appendtx_cstr(s, "look    : look(l) examine exits inventory(i) who\r\n");
     session_appendtx_cstr(s, "items   : get drop put give wear remove wield\r\n");
+    # H12 (1.6.7) — the qualifier resolves for real now, so advertise it. It has
+    # worked in the parser since M2-E and nothing has ever told a player it exists.
+    session_appendtx_cstr(s, "nouns   : all  all.x  2.x (the 2nd x in view)\r\n");
     session_appendtx_cstr(s, "fight   : kill flee\r\n");
     session_appendtx_cstr(s, "social  : say tell emote\r\n");
     session_appendtx_cstr(s, "session : quit save passwd help\r\n");
@@ -824,7 +855,9 @@ fn cmd_examine(s, pa): i64 {
         return 0;
     }
     # A mob in the room?
-    var m = mob_in_room_by_kw(load64(s + SS_ROOM), tok_ptr(pa, di), tok_len(pa, di));
+    var xp[8]; var xl[8];
+    var xnth = qual_single(pa, di, &xp, &xl);
+    var m = mob_in_room_by_kw_nth(load64(s + SS_ROOM), load64(&xp), load64(&xl), xnth);
     if (m != 0) {
         var tpl = mi_tpl(m);
         session_appendtx_cstr(s, ansi_mob());
@@ -843,8 +876,8 @@ fn cmd_examine(s, pa): i64 {
     # An object lying in the room, or one the player is carrying. Examining an
     # object renders its description — which for readables (the work-notice,
     # postings) IS the act of reading it.
-    var o = ilist_find_kw(room_obj_head(room_at(load64(s + SS_ROOM))), tok_ptr(pa, di), tok_len(pa, di));
-    if (o == 0) { o = ilist_find_kw(load64(s + SS_INV), tok_ptr(pa, di), tok_len(pa, di)); }
+    var o = ilist_find_kw_nth(room_obj_head(room_at(load64(s + SS_ROOM))), load64(&xp), load64(&xl), xnth);
+    if (o == 0) { o = ilist_find_kw_nth(load64(s + SS_INV), load64(&xp), load64(&xl), xnth); }
     if (o != 0) {
         session_appendtx_cstr(s, ansi_item());
         session_appendtx(s, oi_name_ptr(o), oi_name_len(o));
@@ -967,6 +1000,11 @@ fn cmd_dispatch(s, pa, buf, len): i64 {
 
     if (verb == VERB_GET)  { return cmd_get(s, pa); }
     if (verb == VERB_DROP) { return cmd_drop(s, pa); }
+    if (verb == VERB_PUT)  { return cmd_put(s, pa); }
+    if (verb == VERB_GIVE) { return cmd_give(s, pa); }
+    if (verb == VERB_WEAR)   { return cmd_equip_stub(s, pa, verb); }
+    if (verb == VERB_REMOVE) { return cmd_equip_stub(s, pa, verb); }
+    if (verb == VERB_WIELD)  { return cmd_equip_stub(s, pa, verb); }
 
     if (verb == VERB_SAY)   { return cmd_say(s, buf, len); }
     if (verb == VERB_TELL)  { return cmd_tell(s, pa, buf, len); }

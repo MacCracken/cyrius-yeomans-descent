@@ -145,15 +145,25 @@ fn ilist_remove(slot, o): i64 {
     }
     return 0;
 }
-# First item in the list whose keywords the noun prefixes, or 0.
-fn ilist_find_kw(head, np, nl): i64 {
+# The `nth` (1-based) item in the list whose keywords the noun prefixes, or 0
+# if the list holds fewer than `nth` matches. Scan order is list order, which
+# for ilist_push is most-recently-added first — the same order `look` and
+# `inventory` print, so "2." means the second one the player can see.
+fn ilist_find_kw_nth(head, np, nl, nth): i64 {
+    if (nth < 1) { return 0; }
+    var seen = 0;
     var o = head;
     while (o != 0) {
-        if (kw_matches(np, nl, oi_kw_ptr(o)) == 1) { return o; }
+        if (kw_matches(np, nl, oi_kw_ptr(o)) == 1) {
+            seen = seen + 1;
+            if (seen == nth) { return o; }
+        }
         o = oi_next(o);
     }
     return 0;
 }
+# First item in the list whose keywords the noun prefixes, or 0.
+fn ilist_find_kw(head, np, nl): i64 { return ilist_find_kw_nth(head, np, nl, 1); }
 
 # === world_load_objs — parse a `<zone>.objs.cyml` into templates. ===
 fn world_load_objs(path): i64 {
@@ -350,7 +360,7 @@ fn append_item_name(s, o): i64 {
 # qall=1 with noun_l==0 → everything (skipping corpses); qall=1 with a
 # noun → every match; qall=0 → the first match. `where` names the source
 # for the not-found message.
-fn get_from(s, from_slot, to_slot, qall, np, nl, where): i64 {
+fn get_from(s, from_slot, to_slot, qall, np, nl, nth, where): i64 {
     if (qall == 1) {
         var moved = 0;
         var o = load64(from_slot);
@@ -372,7 +382,7 @@ fn get_from(s, from_slot, to_slot, qall, np, nl, where): i64 {
         if (moved == 0) { session_appendtx_cstr(s, "There is nothing to take.\r\n"); }
         return 0;
     }
-    var o = ilist_find_kw(load64(from_slot), np, nl);
+    var o = ilist_find_kw_nth(load64(from_slot), np, nl, nth);
     if (o == 0) {
         session_appendtx_cstr(s, "There is nothing like that ");
         session_appendtx_cstr(s, where);
@@ -406,23 +416,27 @@ fn cmd_get(s, pa): i64 {
     if (load64(&kind) == QUAL_ALL) { qall = 1; }
     var np = load64(&bp);
     var nl = load64(&bl);
+    var nth = 1;
+    if (load64(&kind) == QUAL_NTH) { nth = load64(&num); }
 
     # get X from <container>
     if (parsed_prep(pa) == PREP_FROM) {
         if (parsed_has_iobj(pa) == 1) {
             var ii = parsed_iobj(pa);
-            var container = ilist_find_kw(load64(room_slot), tok_ptr(pa, ii), tok_len(pa, ii));
+            var cp[8]; var cl[8];
+            var cnth = qual_single(pa, ii, &cp, &cl);
+            var container = ilist_find_kw_nth(load64(room_slot), load64(&cp), load64(&cl), cnth);
             if (container == 0) {
                 session_appendtx_cstr(s, "You see no ");
                 session_appendtx_tok(s, pa, ii);
                 session_appendtx_cstr(s, " here.\r\n");
                 return 0;
             }
-            return get_from(s, container + OI_CONTENTS, inv_slot, qall, np, nl, "in there");
+            return get_from(s, container + OI_CONTENTS, inv_slot, qall, np, nl, nth, "in there");
         }
     }
     # get X from the room
-    return get_from(s, room_slot, inv_slot, qall, np, nl, "here");
+    return get_from(s, room_slot, inv_slot, qall, np, nl, nth, "here");
 }
 
 # === cmd_drop — drop <item> / drop all from inventory to the room. ===
@@ -458,13 +472,127 @@ fn cmd_drop(s, pa): i64 {
         if (moved == 0) { session_appendtx_cstr(s, "You have nothing to drop.\r\n"); }
         return 0;
     }
-    var o = ilist_find_kw(load64(inv_slot), np, nl);
+    var nth = 1;
+    if (load64(&kind) == QUAL_NTH) { nth = load64(&num); }
+    var o = ilist_find_kw_nth(load64(inv_slot), np, nl, nth);
     if (o == 0) { session_appendtx_cstr(s, "You aren't carrying that.\r\n"); return 0; }
     ilist_remove(inv_slot, o);
     ilist_push(room_slot, o);
     session_appendtx_cstr(s, "You drop ");
     append_item_name(s, o);
     session_appendtx_cstr(s, ".\r\n");
+    return 0;
+}
+
+# === cmd_put — put <item> [in <container>]. ===
+#
+# H12 (1.6.7) — `put` answered the M2-era placeholder ("the Under-Grid is empty
+# — items arrive at M3") for four releases after M3 landed. It is the exact
+# inverse of `get X from Y`, and like that verb it treats any object as able to
+# hold things: 1.x objects carry no container flag, so the two halves agree
+# rather than one of them inventing a rule the other does not enforce.
+#
+# Nesting is capped at one level — a container that already holds something
+# cannot itself go into another. That is a real game rule ("empty it first"),
+# but it is load-bearing: obj_free walks OI_CONTENTS recursively, so unbounded
+# nesting is unbounded stack, and a cycle would not terminate at all. Depth 1
+# makes both impossible by construction instead of by argument.
+fn cmd_put(s, pa): i64 {
+    if (parsed_has_dobj(pa) == 0) { session_appendtx_cstr(s, "Put what?\r\n"); return 0; }
+    if (parsed_has_iobj(pa) == 0) {
+        session_appendtx_cstr(s, "Put it in what?\r\n");
+        return 0;
+    }
+    if (world_room_count() == 0) { session_appendtx_cstr(s, "There is nothing here.\r\n"); return 0; }
+
+    var di = parsed_dobj(pa);
+    var inv_slot = s + SS_INV;
+    var room_slot = room_at(load64(s + SS_ROOM)) + RM_OBJ_HEAD;
+
+    var np[8]; var nl[8];
+    var nth = qual_single(pa, di, &np, &nl);
+    var o = ilist_find_kw_nth(load64(inv_slot), load64(&np), load64(&nl), nth);
+    if (o == 0) { session_appendtx_cstr(s, "You aren't carrying that.\r\n"); return 0; }
+
+    # The container: something in the room, or something else being carried.
+    var ii = parsed_iobj(pa);
+    var cp[8]; var cl[8];
+    var cnth = qual_single(pa, ii, &cp, &cl);
+    var c = ilist_find_kw_nth(load64(room_slot), load64(&cp), load64(&cl), cnth);
+    if (c == 0) { c = ilist_find_kw_nth(load64(inv_slot), load64(&cp), load64(&cl), cnth); }
+    if (c == 0) {
+        session_appendtx_cstr(s, "You see no ");
+        session_appendtx_tok(s, pa, ii);
+        session_appendtx_cstr(s, " here.\r\n");
+        return 0;
+    }
+    if (c == o) {
+        session_appendtx_cstr(s, "It won't hold itself.\r\n");
+        return 0;
+    }
+    if (oi_contents(o) != 0) {
+        session_appendtx_cstr(s, "It's full — empty it first.\r\n");
+        return 0;
+    }
+
+    ilist_remove(inv_slot, o);
+    ilist_push(c + OI_CONTENTS, o);
+    session_appendtx_cstr(s, "You put ");
+    append_item_name(s, o);
+    session_appendtx_cstr(s, " in ");
+    append_item_name(s, c);
+    session_appendtx_cstr(s, ".\r\n");
+    return 0;
+}
+
+# === cmd_give — give <item> [to <player>]. ===
+#
+# H12 (1.6.7) — the second half of the placeholder repair. Hands an object from
+# one inventory to another; the recipient must be a logged-in player standing in
+# the same room, which room_find_player already enforces (PHASE_CMD + same room,
+# viewer excluded so `give x to <self>` never resolves).
+#
+# The recipient is flushed immediately, exactly as `tell` does — an item that
+# arrives silently and only surfaces on the next command reads as a lost item.
+fn cmd_give(s, pa): i64 {
+    if (parsed_has_dobj(pa) == 0) { session_appendtx_cstr(s, "Give what?\r\n"); return 0; }
+    if (parsed_has_iobj(pa) == 0) {
+        session_appendtx_cstr(s, "Give it to whom?\r\n");
+        return 0;
+    }
+
+    var di = parsed_dobj(pa);
+    var inv_slot = s + SS_INV;
+    var np[8]; var nl[8];
+    var nth = qual_single(pa, di, &np, &nl);
+    var o = ilist_find_kw_nth(load64(inv_slot), load64(&np), load64(&nl), nth);
+    if (o == 0) { session_appendtx_cstr(s, "You aren't carrying that.\r\n"); return 0; }
+    if (oi_is_corpse(o) == 1) { session_appendtx_cstr(s, "You can't hand that over.\r\n"); return 0; }
+
+    var ii = parsed_iobj(pa);
+    var target = room_find_player(s, load64(s + SS_ROOM), tok_ptr(pa, ii), tok_len(pa, ii));
+    if (target == 0) {
+        session_appendtx_cstr(s, "There is no ");
+        session_appendtx_tok(s, pa, ii);
+        session_appendtx_cstr(s, " here.\r\n");
+        return 0;
+    }
+
+    ilist_remove(inv_slot, o);
+    ilist_push(target + SS_INV, o);
+
+    session_appendtx_cstr(s, "You give ");
+    append_item_name(s, o);
+    session_appendtx_cstr(s, " to ");
+    session_appendtx_prose(s, load64(target + SS_NAME_BUF), load64(target + SS_NAME_LEN));   # M10-C name
+    session_appendtx_cstr(s, ".\r\n");
+
+    session_appendtx_cstr(target, "\r\n");
+    session_appendtx_prose(target, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));        # M10-C name
+    session_appendtx_cstr(target, " gives you ");
+    append_item_name(target, o);
+    session_appendtx_cstr(target, ".\r\n");
+    deliver_to(target);
     return 0;
 }
 
