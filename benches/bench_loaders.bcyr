@@ -1,0 +1,148 @@
+# cyrius-yeomans-descent — the content loaders (1.6.9, batch D).
+#
+# The zone / object / mob loaders run exactly ONCE each, from `cmd_serve` at
+# boot (server.cyr:1136/1142/1153) — verified, not assumed. Nothing measured
+# them until now. They matter for two reasons that have nothing to do with
+# speed:
+#
+#   1. They are a TRUST BOUNDARY. Zone files are authored content, and 1.6.5
+#      found all four of them publishing their globals BEFORE validating, so a
+#      rejected file left a live half-table behind. This bench reloads each
+#      loader many times and asserts the published counts are identical every
+#      time — a loader that leaks state across loads shows up as drift.
+#   2. They allocate from the BUMP arena, which has no free — measured at
+#      ~285 kB for the rooms table alone. That is FINE today precisely because
+#      they are boot-only: it is a one-time startup cost, not a leak, and this
+#      bench should not be read as claiming otherwise. It stops being fine the
+#      moment zones become loadable at runtime, which is exactly what **M15 (the
+#      zone registry)** is. Measuring it now means M15 starts with the number in
+#      front of it rather than discovering it afterwards.
+#
+# Time budgets here are loose on purpose. Boot cost is not on the tick and a
+# tight budget would just be a flaky test on a slow CI box; the budget exists to
+# catch an order-of-magnitude regression, not to police microseconds.
+
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "lib/sakshi.cyr"
+include "lib/libro.cyr"
+
+include "src/telnet.cyr"
+include "src/parser.cyr"
+include "src/world.cyr"
+include "src/mob.cyr"
+include "src/session.cyr"
+include "src/item.cyr"
+include "src/combat.cyr"
+include "src/classes.cyr"
+include "src/persist.cyr"
+include "src/server.cyr"
+
+enum LoaderBench {
+    NLOAD = 20;
+    LOAD_BUDGET_US = 20000;   # 20 ms per full zone load — an order-of-magnitude gate
+}
+
+var g_lfail = 0;
+
+fn report_loader(label, ns_total, bytes_total, n): i64 {
+    var per_ns = ns_total / n;
+    print("  ", 2); print(label, strlen(label)); println("");
+    print("    time : ", 12); print_num(per_ns / 1000);
+    print(" us/load  (budget ", 19); print_num(LOAD_BUDGET_US); println(" us)");
+    print("    bump : ", 12); print_num(bytes_total / n); println(" bytes/load (never reclaimed)");
+    if (per_ns / 1000 >= LOAD_BUDGET_US) {
+        println("    RESULT: FAIL (over time budget)");
+        g_lfail = 1;
+    } else {
+        println("    RESULT: PASS");
+    }
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    println("loader load:");
+
+    # --- Rooms. Two-pass (pass 2 resolves exits), so it is the most expensive
+    # and the one whose failure path is hardest to get right (H9 / 1.6.5).
+    if (world_load_rooms(DP_ROOMS) != WL_OK) { println("  rooms: initial load failed"); return 1; }
+    var want_rooms = g_room_count;
+    var want_start = g_start_room;
+    var want_reset = g_zone_reset_secs;
+
+    var b0 = alloc_used();
+    var t0 = clock_now_ns();
+    var i = 0;
+    var stable = 1;
+    while (i < NLOAD) {
+        if (world_load_rooms(DP_ROOMS) != WL_OK) { stable = 0; i = NLOAD; continue; }
+        if (g_room_count != want_rooms)          { stable = 0; }
+        if (g_start_room != want_start)          { stable = 0; }
+        if (g_zone_reset_secs != want_reset)     { stable = 0; }
+        i = i + 1;
+    }
+    report_loader("world_load_rooms (two-pass, exits resolved)",
+                  clock_now_ns() - t0, alloc_used() - b0, NLOAD);
+    if (stable != 1) {
+        println("    RESULT: FAIL (published state drifted across reloads)");
+        g_lfail = 1;
+    }
+
+    # --- Objects.
+    if (world_load_objs(DP_OBJS) <= 0) { println("  objs: initial load failed"); return 1; }
+    var want_objs = g_obj_tpl_count;
+    var b1 = alloc_used();
+    var t1 = clock_now_ns();
+    i = 0;
+    while (i < NLOAD) {
+        if (world_load_objs(DP_OBJS) <= 0)  { stable = 0; i = NLOAD; continue; }
+        if (g_obj_tpl_count != want_objs)   { stable = 0; }
+        i = i + 1;
+    }
+    report_loader("world_load_objs", clock_now_ns() - t1, alloc_used() - b1, NLOAD);
+
+    # --- Mobs.
+    if (world_load_mobs(DP_MOBS) < 0) { println("  mobs: initial load failed"); return 1; }
+    var want_mobs = g_mob_tpl_count;
+    var b2 = alloc_used();
+    var t2 = clock_now_ns();
+    i = 0;
+    while (i < NLOAD) {
+        if (world_load_mobs(DP_MOBS) < 0)   { stable = 0; i = NLOAD; continue; }
+        if (g_mob_tpl_count != want_mobs)   { stable = 0; }
+        i = i + 1;
+    }
+    report_loader("world_load_mobs", clock_now_ns() - t2, alloc_used() - b2, NLOAD);
+
+    # --- A REJECTED file must leave nothing published. This is the H9 (1.6.5)
+    # invariant, benched rather than only unit-tested because it is the one that
+    # a future loader edit is most likely to quietly break: the failure path is
+    # the path nobody exercises by hand.
+    var pre_rooms = g_room_count;
+    if (world_load_rooms("tests/fixtures/dangling.rooms.cyml") == WL_OK) {
+        println("  reject: a dangling-exit fixture loaded OK — the validator is not running");
+        g_lfail = 1;
+    }
+    if (g_room_count != 0) {
+        println("  reject: a REJECTED zone left a live room table behind");
+        g_lfail = 1;
+    }
+    if (world_load_rooms(DP_ROOMS) != WL_OK) { println("  reject: could not restore the real zone"); return 1; }
+    if (g_room_count != pre_rooms) {
+        println("  reject: the real zone did not come back identical");
+        g_lfail = 1;
+    }
+    println("  rejected-file invariant: nothing published, real zone restores");
+
+    if (stable != 1) {
+        println("  RESULT: FAIL (a loader is not idempotent across reloads)");
+        g_lfail = 1;
+    }
+    if (g_lfail != 0) { return 1; }
+    println("  RESULT: PASS");
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

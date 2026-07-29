@@ -3,14 +3,50 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-28 (v1.6.8 — sweep batches A–C shipped; D remains)
+> **Last refresh**: 2026-07-29 (v1.6.9 — batches A–D shipped; the re-run reopened the line, batch E filed)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.6.8 tree.
+> tests, boot guide) describes the **current** 1.6.9 tree.
 
 ## Version
+
+**1.6.9** — sweep batch D, coverage + the re-run, 2026-07-29. **581 assertions**;
+`cyrius audit` exits 0; 5/5 benches.
+
+- **`examine <anything>` was a remote crash** on a zone-less server — a
+  configuration the server explicitly supports and logs. `room_at(-1)` computes
+  `g_rooms + (-1 * RM_SIZE)`; every other room-touching verb checks
+  `world_room_count() == 0` first and `cmd_examine` did not. Reproduced live
+  (process dead), fixed, re-verified live (process alive, every variant answers).
+  **The 1.6.0 sweep missed this entirely.**
+- **1.6.8 delayed `say` by up to a full tick** — measured **2099 ms → 0 ms**.
+  H15's coalescing was right for the tick's quadratic burst and wrong for
+  commands, which arrive on the epoll path. The event path now drains the dirty
+  set too; no syscalls given back.
+- **`bench_persist` + `bench_loaders`** close the save / login / loader blind
+  spots, reporting **bump bytes per op** as well as ns/op. Both verified to fail
+  when what they guard is reverted. New number worth knowing: **a login costs
+  ~6× a save** (≈7.7 ms, ≈3.9 kB) — which is what makes the uncapped
+  creation-attempt path in batch E legible.
+- **Docs sweep.** `state.md` had been documenting `cyrius test src/test.cyr` as
+  CI's form — the exact bug 1.2.0 fixed. Plus 17 missing test groups, a 3×-stale
+  bench figure, a wrong struct size, and five source comments linking to a
+  roadmap anchor that no longer exists.
+
+**The 1.x line did NOT close.** The re-run's whole purpose was to test whether it
+could, and the answer is no: several findings survived adversarial verification,
+including two rated critical. They are filed as **batch E (1.6.10)** on the
+roadmap. The two fixed here are the ones that were a live crash and a live
+regression.
+
+**What the re-run actually established.** Not "the finding count fell" — the
+first sweep's count was never a measure of what was there, since it missed a
+remote crash on a first-class verb. What it established: every fix from batches
+A–C is still in place (the regression dimension re-checked each CHANGELOG claim
+from 1.6.0 onward), and the new findings cluster where the first sweep had no
+instrument. Batch D is where those instruments got built.
 
 **1.6.8** — sweep batch C, resource + timing hygiene, 2026-07-28. **573
 assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
@@ -121,8 +157,10 @@ mutation that fails to fail is a signal about the test, not the code.
   kept the old pubkey. Now checked, with a rollback of the live ident block, and
   the rest audit their failures.
 
-**Next: the sweep is not finished.** Four findings remain, all in **1.6.9**
-(bench/soak coverage, a docs sweep, and re-running the sweep itself). See [`roadmap.md`](roadmap.md#sweep-backlog--the-remaining-16x-batches).
+**Next: the sweep is not finished.** Batch E (**1.6.10**) carries what the
+1.6.9 re-run turned up — an unbounded per-tick drain budget, a `MAX_LOGIN_FAILS`
+cap that is not actually enforced, an uncapped character-creation path, and a
+duplicate-identity hole on CREATE that 1.6.6 closed only for login. See [`roadmap.md`](roadmap.md#sweep-backlog--the-remaining-16x-batches).
 **2.0 / M14 does not start until 1.6.9 lands** and a re-run sweep produces no
 critical or high findings.
 
@@ -425,7 +463,7 @@ src/
   mob.cyr        M4 mobs: templates (CYML kind=mob) + live instances,
                  room-occupant list, keyword lookup, dice parse, spawn;
                  M7 mob respawn (zone_reset_mobs — top-up to authored)
-  session.cyr    Session struct (328 B), login (M1-E) + class select (M5-A)
+  session.cyr    Session struct (376 B), login (M1-E) + class select (M5-A)
                  + world entry, dispatch (movement, render, examine sheet,
                  social, kill/flee, abilities, get/drop/inv), ANSI SGR,
                  combat + class + ability state (SS_HP..SS_STEALTH), g_epfd
@@ -449,7 +487,10 @@ src/
                  room broadcast / presence / who (M3-C/F), combat_tick_all,
                  persist_init + debounced save sweep + save-on-disconnect (M6),
                  M7 zone reset (maybe_zone_reset/presence gate/log) + YD_RESET_SECS
-  test.cyr       top-level test entrypoint (per cyrius.cyml [build].test)
+  test.cyr       [build].test entrypoint — a NO-OP STUB that only has to
+                 compile and exit 0. Real cases live in tests/*.tcyr. This
+                 stub is why `cyrius test src/test.cyr` silently passed for
+                 the whole 1.1.x line without running anything (fixed 1.2.0).
 
 data/
   classes.cyml                  the 4 player classes (M5-B)
@@ -460,13 +501,23 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (298 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (581 assertions, 31 groups)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
                                 fuzz/ (the toolchain runs fuzz/*.fcyr)
-  fixtures/                     zone-loader test fixtures (loop / dangling /
-                                wrongkind)
+  fixtures/                     loader fixtures. loop / dangling / wrongkind
+                                (zone rejection), longid.objs (a 32-byte
+                                template id, the only length at which the
+                                OT_ID/OI_TPL_ID cap mismatch is observable),
+                                badreset + zeroreset (degenerate reset_secs)
+
+benches/
+  bench_telnet.bcyr             per-byte IAC parser cost
+  bench_combat.bcyr             the combat tick, plus the 256-player
+                                co-located broadcast scenario (1.6.8)
+  bench_persist.bcyr            save + login: ns/op AND bump bytes/op (1.6.9)
+  bench_loaders.bcyr            boot loaders + the rejected-file invariant (1.6.9)
 
 fuzz/
   parser_fuzz.fcyr             M2-F parser fuzz harness (100k inputs);
@@ -493,7 +544,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **573** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **581** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -524,6 +575,30 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
   `apply_class`, `classes_upkeep` (energy regen cap, cooldown + buff
   decay, 0.6.1 out-of-combat HP regen), effective-stat buff helpers
 - **idle** — the `session_is_idle` threshold predicate
+- **persist / migration / freeze** (M6, M11) — save round-trip, wrong
+  passphrase, tampered record, schema gate (missing stamp = literal v1,
+  "too new" vs "tampered", signed-prefix splitting), record-writer bounds,
+  the ADR 0007 frozen-surface assertions
+- **reset** (M7) — mob/object top-up to the authored population, presence gate
+- **login-polish / security / chpass-isolation** — re-key flow, over-long
+  passphrase, forged record, `passwd` candidate isolation (1.6.4)
+- **wire-hygiene** (M10) — the escaping appender, player-authored bytes,
+  sanitized names, no lone IAC on the wire
+- **lifecycle / actor-tick** (M12, M13) — instance free paths, corpse decay,
+  MI_HOME vs MI_ROOM, the leash, the assist
+- **hardening / preauth-meter / accept-limits** (1.6.0-1.6.3) — hp-vs-maxhp
+  clamp, the dispatch cap and bare-CR guard, the session cap and accept backoff
+- **assist-real / failure-paths / state-integrity** (1.6.4-1.6.6) — the assist
+  that actually subtracts HP, loaders publishing only on success, `player_save`
+  failures no longer discarded, double-login refusal, template-id round trip,
+  audit-chain resume
+- **item-verbs** (1.6.7) — the `N.X` ordinal on both scans and end to end,
+  `put`/`give`, the equipment verbs' honest answer, signed `toml_int`
+- **reset-bounds / tick-schedule / tick-coalescing / tx-compaction / save-meter
+  / hex-identity** (1.6.8) — the reset clamp, the post-work reschedule (and the
+  guard against the *wrong* fix to it), one write per session per tick with no
+  truncation, partial-drain compaction, the metered autosave, and hex output
+  byte-identical to `lib/sigil_hex.cyr`
 
 Fuzz: `cyrius fuzz` → `fuzz/parser_fuzz.fcyr`, 100k random inputs +
 directed adversarial cases, all invariants hold (token/buffer bounds,
@@ -540,20 +615,43 @@ End-to-end smokes validated locally on Linux x86_64 at the 0.6.0 cut:
   with zero deaths (run at `YD_TICK_MS=200`)
 - 0.5.0 combat / loot + 0.4.0 walk / social smokes still hold (M5 additive)
 
-Benchmark: `cyrius bench` →
+Benchmark: `cyrius bench` → **5 benches, all gated** (each asserts a budget and
+exits non-zero on breach; a bench that only prints is a bench nobody reads).
+
 - `bench_telnet` — telnet_feed ≈ 6 ns/byte (mixed), ≈ 5 ns/byte (pure
   data), 16 M iterations, stable since 0.2.0
 - `bench_combat` (M4-H) — 32 players × 64 mobs through 120 real ticks,
-  including per-tick `classes_upkeep`; **p99 ≈ 1427 µs** (max 1513 µs) against
-  the 50 ms drift budget. Combat is O(engaged combatants) per tick.
+  including per-tick `classes_upkeep`; **p99 ≈ 525 µs** against the 50 ms drift
+  budget. Was ≈1427 µs before 1.6.8 coalesced the tick's writes.
   This bench had **stopped compiling** before 1.2.0 (it included `server.cyr`
   without the persist prelude → `undefined variable 'DP_ROOMS'`), so the older
   ≈57 µs figure in the 1.0.x notes is not comparable — it predates both the
   persist-inclusive compilation unit and the 6.4.83 codegen.
+- `bench_combat` broadcast scenario (1.6.8) — **256 players co-located in one
+  room**, the population `MAX_SESSIONS` actually accepts: **p99 ≈ 27 ms**.
+  Verified to FAIL at ≈81 ms with the coalescing reverted, so it is a guard and
+  not just a number.
+- `bench_persist` (1.6.9) — reports **bytes of bump arena per op** alongside
+  ns/op, because `alloc()` has no free and RSS cannot see it. `_build_record`
+  **0 B** (gated at a hard zero), `player_save` ≈1.26 ms / **1632 B** (gated at
+  1750 B; the residue is libro's, see below), `player_auth_load` ≈7.7 ms /
+  ≈3.9 kB. **A login is ~6× the cost of a save** — worth knowing before anyone
+  designs a reconnect storm.
+- `bench_loaders` (1.6.9) — boot-path loaders, plus the H9 invariant that a
+  **rejected** zone file leaves nothing published. Rooms ≈207 µs / ≈285 kB,
+  objs ≈49 µs, mobs ≈39 µs. The bump figures are a one-time boot cost today
+  because the loaders run exactly once, from `cmd_serve` — they become a
+  per-reload permanent cost at **M15 (zone registry)**, which is why they are
+  measured now.
 - (parser / world p99 baselines land at M9-C.)
 
-`cyrius test src/test.cyr` exits 0 (CI uses this explicit form — see
-`.github/workflows/ci.yml`; the pin reads from `cyrius.cyml`).
+**CI runs bare `cyrius test`, and must.** This line used to say the opposite —
+that CI used the explicit `cyrius test src/test.cyr` form — which is precisely
+the bug 1.2.0 fixed: `src/test.cyr` is a **no-op stub** that only has to compile
+and exit 0, so CI compiled it, passed, and the real suite never ran for the whole
+1.1.x line. The bare form runs both the `.tcyr` corpus and `[build].test`. See
+the comment block in `.github/workflows/ci.yml`, which spells out the same thing
+at the call site.
 
 ## Dependencies
 
@@ -620,21 +718,32 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** 1.2.0 (toolchain + dep upgrade, first clean audit) closed.
-The tree builds, `cyrius audit` exits 0, and 298 tests + 3 benches pass.
+**No active cycle.** The tree builds, `cyrius audit` exits 0, and **581
+assertions + 5 benches** pass.
 
-**The 1.x line is closed** — M10–M13 plus the 1.6.0 hardening sweep. The tree
-builds on both targets, `cyrius audit` exits 0, and 385 assertions pass.
+**The 1.x line is NOT closed.** M10–M13, the 1.6.0 hardening sweep, and sweep
+batches A–D (1.6.6–1.6.9) are all shipped, and every one of the original 44
+verified findings is closed and re-verified as still closed. But batch D's last
+item was to **re-run the sweep**, and it found a remotely-triggerable crash the
+first pass had missed (`examine` on a zone-less server) plus a regression 1.6.8
+had introduced. Both are fixed in 1.6.9; the remaining verified findings are
+**batch E (1.6.10)** on the roadmap, including two rated critical.
 
-**One item is parked for upstream:** descent's in-memory libro audit chain grows
-without bound. `audit_event` appends on every login/save/security event and
-`g_audit_chain` is never read — durability is `filestore_append`. libro cannot
-bound it: `chain_new()` sets capacity 0 so auto-rotate never fires, there is no
-capacity constructor, `chain_apply_retention` redistributes without releasing,
-and libro has one `fl_free` in ~4,400 lines nowhere near the entry path. Needs a
-libro mode that frees, or descent dropping the in-memory chain.
+The revised exit criterion: batch E landed, `cyrius audit` green, and a re-run
+producing no critical or high findings. **2.0 / M14 does not start before that.**
 
-Next is **2.0.0**, starting with **M14 — ADR 0008 + save schema v2**. Everything
+**One item is parked for upstream:** ~1632 bytes of bump arena per save (and
+~3.9 kB per login), inside libro's `chain_append` / `filestore_append` —
+`filestore_append` rebuilds a `str_builder` from scratch on every append, and
+`hasher_new` / `sha256_init` never `fl_free`. `alloc()` has no free, so it is
+permanent. Needs a **libro 2.8.5**, the same shape as the 1.6.1 fix. Descent's
+own share went to zero in 1.6.8 and `bench_persist` now gates it, so a
+reintroduced descent-side allocation trips the audit gate rather than a soak.
+(The *previous* parked item — the unbounded in-memory audit chain — was closed
+upstream in libro 2.8.4 and consumed in 1.6.1.)
+
+Next is **batch E (1.6.10)**, then **2.0.0** starting with **M14 — ADR 0008 +
+save schema v2**. Everything
 else in the 2.0 line routes through it. Before touching it, read the critical
 path in [`roadmap.md`](roadmap.md#critical-path); the binding constraint is that
 records are signed with a key re-derived from the player's passphrase, which the
@@ -717,7 +826,7 @@ guard these.
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test                                      # 298 assertions, all pass
+cyrius test                                      # 581 assertions, all pass
 ./build/cyrius-yeomans-descent serve 4000
 # new name → passphrase (echo-suppressed) → class → play; `save`/`passwd`/`quit`,
 # reconnect → restored + "last seen". kill -9 after a save → restart → no loss.
@@ -732,7 +841,7 @@ zone, force a reset, read counters/logs). Most hooks already exist:
 `@stats`/`@who`/`@reset` (server.cyr `render_*`, behind `YD_ADMIN`),
 `g_session_head` for sessions, `g_zone_last_reset_ms = 0` to force a reset, the
 libro audit chain + reset log. The real work is the control channel + operator
-auth (replacing the `YD_ADMIN` gate) — see [roadmap M8](roadmap.md#m8--joshua-management-interface-v090).
+auth (replacing the `YD_ADMIN` gate) — see [roadmap M18](roadmap.md#milestones--the-20-line). (This linked to an M8 anchor that no longer exists; the operator work was renumbered to M18 and Joshua moved to the backlog.)
 
 ### Open ADRs
 

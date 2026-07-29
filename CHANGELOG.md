@@ -4,6 +4,148 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.9] — 2026-07-29
+
+**Sweep batch D — coverage, and the re-run.** The last planned batch: close the
+bench/soak blind spots, reconcile the documentation, and re-run the audit sweep
+against the repaired tree to see whether the 1.x line can close.
+
+**It cannot yet.** The re-run found a remotely-triggerable crash that the
+original sweep missed entirely, plus a regression this line itself introduced in
+1.6.8. Both are fixed here. The remaining verified findings are carried into a
+new batch rather than rushed — see *Where this leaves the 1.x line* below.
+
+### Fixed
+
+- **`examine <anything>` killed the server outright when no zone was loaded.**
+  A remote crash any logged-in player could fire, in a configuration the server
+  explicitly supports and announces (`world: no zone loaded — running roomless`).
+
+  `room_at` is documented "no bounds check — callers hold valid indices" and
+  computes `g_rooms + i * RM_SIZE`. On a zone-less server `g_rooms` is 0 and
+  every session sits at `SS_ROOM = -1`, so that arithmetic yields **-240** and
+  dereferencing it takes the process down. `look`, `get`, `drop`, `kill` and
+  `exits` all check `world_room_count() == 0` first. `cmd_examine` was the only
+  verb that did not.
+
+  Reproduced live before the fix: `look`, `get` and `kill` each answered
+  politely, then `examine thing` returned nothing and the process was gone.
+  Verified fixed against the same server — every `examine` variant answers and
+  the process stays up.
+
+  The guard covers the **room lookup only**, not the whole command, so a carried
+  object and `examine me` still work without a world. `session_room_ok` checks
+  the index rather than just the count, because the count alone does not tell
+  you the session's own room is in range.
+
+  This is the finding that matters most about the re-run: it was reachable the
+  whole time, and the 1.6.0 sweep did not see it.
+- **1.6.8 made `say` take up to a full tick to reach anyone.** H15 turned every
+  room broadcast into a dirty flag drained at the end of `advance_tick`. That is
+  right for the tick, where E combatants each broadcast to E−1 others and the
+  write count is quadratic. It is wrong for **commands**, which arrive on the
+  epoll path: `say`, `emote`, arrivals, departures and `kill`'s lunge all marked
+  their listeners and then waited for the next tick boundary.
+
+  **Measured: 2099 ms.** Against a 2.5 s tick, a listener waited nearly a full
+  tick to hear someone speak. With the fix, **0 ms** — both numbers taken from
+  the same two-client harness against a real `serve`, one binary each side.
+
+  `dispatch_session` now drains the dirty set at the end of the event path. No
+  syscall cost is given back: one command marks at most the room's population,
+  which is exactly how many writes it always issued. Only the tick's own burst
+  is coalesced, which is where the 2E²−E came from.
+
+### Added
+
+- **`bench_persist`** — the save and login paths, which nothing measured before,
+  and which is where two of the three batch-C findings lived. Reports **bytes of
+  bump arena per op** alongside ns/op, because `alloc()` has no free and RSS
+  cannot see it. `_build_record` **0 B** (gated at a hard zero), `player_save`
+  ≈1.26 ms / **1632 B** (gated at 1750), `player_auth_load` ≈7.7 ms / ≈3.9 kB.
+
+  **A login costs ~6× a save.** That number was not known before this release
+  and it immediately mattered — see the carried-forward findings below.
+- **`bench_loaders`** — the boot loaders, plus the H9 (1.6.5) invariant that a
+  *rejected* zone file leaves nothing published. Rooms ≈207 µs / ≈285 kB, objs
+  ≈49 µs, mobs ≈39 µs.
+
+  The bump figures are a one-time boot cost **today**, because the loaders run
+  exactly once each from `cmd_serve` — verified, not assumed. They become a
+  per-reload permanent cost at **M15 (zone registry)**, which is the reason to
+  have the number now rather than after.
+- Both new benches are **gated and verified as guards**, not just printed:
+  reverting `_fhex` trips the persist bench's bump ceiling, and reverting the H9
+  loader fix trips the loader bench's rejected-file check.
+
+### Changed
+
+- **Documentation sweep.** The worst offender: `state.md` documented
+  `cyrius test src/test.cyr` as the form CI uses — which is precisely the bug
+  1.2.0 fixed, since `src/test.cyr` is a no-op stub and that form ran nothing
+  for the whole 1.1.x line. Corrected, and `src/test.cyr` is now described as
+  the stub it is.
+
+  Also: the test-group list stopped at M5 and was missing 17 of 30 groups; the
+  `bench_combat` figure was stale by 3×; the session struct was listed at 328 B
+  (it is 376); the fixtures list was three short; the "in flight" section
+  carried two contradictory and both-stale paragraphs; and the parked-upstream
+  item still described the audit-chain bound that libro 2.8.4 closed in 1.6.1.
+- **Source comments reconciled with the roadmap.** Five comments referenced
+  "M8 / Joshua", and two carried a `roadmap.md#m8-…` link to an anchor that no
+  longer exists — Joshua moved to the backlog and the operator work is M18.
+  Every roadmap anchor referenced from `src/` and the docs now resolves,
+  checked mechanically.
+
+### Where this leaves the 1.x line
+
+**Not closed.** The re-run put eight findings through adversarial verification —
+two independent lenses each, one instructed to refute and one to reproduce — and
+**all eight survived; none was refuted.** One is critical: `MAX_LOGIN_FAILS` is
+not actually enforced, because `SS_QUIT` is only honoured on the epoll event
+path. That is a 1.6.2 fix which does not do what its own CHANGELOG entry says,
+which is worse than a missing fix — it was believed done for seven releases.
+
+They are filed as **batch E (1.6.10)** on the roadmap, with the verifiers'
+corrected severities rather than the finders' claims. One filed finding was a
+false positive (`render_who` bounds its room index both ways, not just from
+below) and is recorded as such rather than quietly dropped.
+
+**One of them is ours, from 1.6.7.** The zone reset re-mints an authored object
+whenever `_obj_id_present` cannot see it, and that scan walks `oi_next` without
+descending `OI_CONTENTS`. Before `put` existed, hiding an object from it
+required carrying the object to another room. Now it can be hidden in place.
+Reproduced live in `market.stalls`: `get optic` → `put optic in shard` →
+`@reset` → **`objs +1`**, a duplicate on the floor with the original still in
+the shard, repeatable once per reset cycle with no ceiling. Filed with both
+halves of the fix, since the older relocate-driver is still open too.
+
+**On the question the roadmap asked** — did the finding count fall? It is not
+answerable as posed, and pretending otherwise would be the wrong lesson. The
+first sweep's 44 was never a measure of what was there: it missed a remote crash
+on a first-class command verb. What the re-run does establish is narrower and
+more useful — every fix from batches A–C is still in place, and the new findings
+cluster precisely where the first sweep had no instrument. Batch D is where
+those instruments got built, which is why the second pass could see them.
+
+### Testing
+
+- 573 → **581 assertions**; new `roomless-safety` group.
+- Three mutations on the crash guard; **two of them fail by segfault**, which is
+  the correct failure mode for a crash regression.
+- **Soak**: 240 session lifecycles of connect → login → move → kill → loot →
+  save → quit. Tick drift p99 stayed at **1 ms** throughout (budget 50 ms).
+
+  RSS grew **linearly**, ~9.2 kB per session lifecycle, and a second soak
+  discriminated why: **240 connections that never authenticate moved RSS by
+  +8 kB total.** So the growth is entirely on the authenticate/save path — the
+  known libro bump leak, at a rate matching `bench_persist`'s per-op figures —
+  and nothing else leaks.
+
+  Worth recording: the soak script's first verdict function called that
+  "PLATEAU". It tested `second_half <= first_half`, which steady linear growth
+  satisfies. Fixed to require the second half to actually decay.
+
 ## [1.6.8] — 2026-07-28
 
 **Sweep batch C — resource & timing hygiene.** Five findings about what the

@@ -2742,6 +2742,77 @@ fn test_hex_identity(): i64 {
     return 0;
 }
 
+# === H18 (1.6.9) — `examine` on a zone-less server was a remote crash. ===
+fn test_roomless_safety(): i64 {
+    test_group("roomless-safety");
+
+    # The predicate first: it checks the INDEX, not just the count. The count
+    # alone does not tell you the session's own room is in range.
+    var s = _mk_sess("Roomless", 8);
+    store64(s + SS_ROOM, 0 - 1);
+    assert_eq(session_room_ok(s), 0, "an unplaced session (-1) is not in a valid room");
+    store64(s + SS_ROOM, 0);
+    assert_eq(session_room_ok(s), 1, "room 0 of a loaded zone is valid");
+    store64(s + SS_ROOM, g_room_count);
+    assert_eq(session_room_ok(s), 0, "one past the last room is not");
+    store64(s + SS_ROOM, g_room_count + 1000);
+    assert_eq(session_room_ok(s), 0, "and neither is far past it");
+
+    # The crash itself. On a server whose zone failed to load, g_rooms is 0 and
+    # every logged-in session sits at SS_ROOM = -1 — so `room_at(-1)` computes
+    # g_rooms + (-1 * RM_SIZE) = -240 and dereferencing it killed the process.
+    # Reproduced live before the fix: `look`, `get`, `kill` and `exits` all
+    # answered politely and `examine thing` took the server down.
+    #
+    # This test SEGFAULTS the whole binary if the guard is removed, which is
+    # exactly the right failure mode for a crash regression.
+    var saved_count = g_room_count;
+    var saved_rooms = g_rooms;
+    g_room_count = 0;
+    g_rooms = 0;
+    store64(s + SS_ROOM, 0 - 1);
+    store64(s + SS_PHASE, PHASE_CMD);
+
+    var pa = parser_new();
+    _tx_reset(s);
+    parse_lit(pa, "examine thing");
+    cmd_examine(s, pa);
+    assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "You see no"), 1,
+              "examine answers instead of dereferencing a room that does not exist");
+
+    # `examine me` must still work with no zone — it needs no room at all.
+    _tx_reset(s);
+    parse_lit(pa, "examine me");
+    cmd_examine(s, pa);
+    assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "You are"), 1,
+              "and the character sheet still renders without a world");
+
+    # A CARRIED object is still examinable without a room: the guard covers the
+    # room lookup only, not the whole command.
+    g_room_count = saved_count;
+    g_rooms = saved_rooms;
+    var carried = item_new(ot_at(0));
+    g_room_count = 0;
+    g_rooms = 0;
+    store64(s + SS_INV, carried);
+    var ckw = _kw1(oi_kw_ptr(carried), alloc(64));
+    var cmd = alloc(128);
+    var co = _str_into(cmd, 0, "examine ");
+    co = _str_into(cmd, co, ckw);
+    _tx_reset(s);
+    parser_parse(pa, cmd, co);
+    cmd_examine(s, pa);
+    assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "You see no"), 0,
+              "an item in hand is examinable with no zone loaded");
+
+    g_room_count = saved_count;
+    g_rooms = saved_rooms;
+    store64(s + SS_INV, 0);
+    obj_free(carried);
+    assert(g_room_count > 0, "the world is restored for the groups that follow");
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -2965,6 +3036,7 @@ fn main() {
     test_tx_compaction();
     test_save_meter();
     test_hex_identity();
+    test_roomless_safety();
 
     return assert_summary();
 }

@@ -9,8 +9,11 @@
 # rejecting dangling references so a bad exit graph fails at boot, not
 # mid-walk.
 #
-# Loading happens once at startup (and on a Joshua reload at M8), never in
-# the tick — disk I/O can't block the single-thread loop (ADR 0003).
+# Loading happens exactly once, at startup, never in the tick — disk I/O can't
+# block the single-thread loop (ADR 0003). Runtime reloading is **M15 (the zone
+# registry)**, not the operator interface; when it lands, note that these loaders
+# take ~285 kB of BUMP arena per load and `alloc()` has no free (see
+# benches/bench_loaders.bcyr, which measures exactly that).
 #
 # M3-B scope: rooms only. Mob / object templates (kind = "mob" / "obj",
 # their own files) land with the entities that consume them (M4/M5).

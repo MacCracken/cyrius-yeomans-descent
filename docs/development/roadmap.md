@@ -53,7 +53,7 @@ MUD rather than a well-built room-crawler.
 | **1.6.6** | Sweep batch A — state integrity | ✅ 2026-07-28 |
 | **1.6.7** | Sweep batch B — content + parser correctness | ✅ 2026-07-28 |
 | **1.6.8** | Sweep batch C — resource & timing hygiene | ✅ 2026-07-28 |
-| **1.6.9** | Sweep batch D — coverage + docs, then close the sweep | planned |
+| **1.6.9** | Sweep batch D — coverage + docs; re-run sweep reopened the line | ✅ 2026-07-29 |
 | **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
 | **2.1.0** | M17 — equipment slots + item modifiers · M18 — operator identity + control channel | planned |
 | **2.2.0** | M19 — threat, aggression, resistance · M20 — currency and shops | planned |
@@ -82,22 +82,28 @@ embarrassing the release.
 
 **1.6.5 shipped** — the two flagged as worth pulling forward: four content loaders that published global state before validating it (a rejected file left a live half-world while telling the operator the load had failed), and `player_save` failures discarded at four of five call sites, including the `passwd` commit that claimed success while the record kept the old key. **431 assertions.**
 
-**Twelve sweep findings remain, batched into 1.6.6–1.6.9** — see *Sweep backlog* below. None is DoS-class or memory-unsafe. **2.0 work does not start until 1.6.9 lands.**
+**Batches A–D are shipped (1.6.6–1.6.9). The re-run sweep reopened the line** — it found a remote crash the first pass missed, so a **batch E (1.6.10)** is filed; see *Sweep backlog* below. **2.0 work does not start until batch E lands and a re-run comes back clean.**
 
-**Next is 2.0.0**, starting with **M14 — ADR 0008 + save schema v2**, the gate everything else routes through. Read the critical path above first: saves are signed with a key derived from the player's passphrase, which the server never holds, so **migration is lazy-at-login and additive only**. Pickup pointer in [`state.md`](state.md).
+**Next is batch E (1.6.10)** — what the 1.6.9 re-run sweep turned up, including two criticals. **Then 2.0.0**, starting with **M14 — ADR 0008 + save schema v2**, the gate everything else routes through. Read the critical path above first: saves are signed with a key derived from the player's passphrase, which the server never holds, so **migration is lazy-at-login and additive only**. Pickup pointer in [`state.md`](state.md).
 
 ---
 
 ## Sweep backlog — the remaining 1.6.x batches
 
-The 1.6.0 audit produced 56 findings; 44 survived adversarial verification.
-Twenty-two are closed across 1.6.0–1.6.5, and batches A, B and C close fourteen
-more. **Four remain** — all of them batch D — grouped below into
-four batches by the kind of work rather than by severity, so each release has one
-coherent theme and one coherent test story.
+The 1.6.0 audit produced 56 findings; 44 survived adversarial verification. All
+44 are closed across 1.6.0–1.6.9, grouped into batches A–D by the kind of work
+rather than by severity, so each release had one coherent theme and one coherent
+test story. The regression dimension of the 1.6.9 re-run re-checked every one
+against the current source and found none undone.
 
-**None is DoS-class or memory-unsafe** — those are all closed. **2.0 work does
-not start until 1.6.9 lands.**
+**Batch D's last item was to re-run the sweep, and that is what reopened the
+line.** The re-run found a remote crash on a first-class command verb that the
+original pass missed entirely, plus a regression 1.6.8 introduced. Both are
+fixed in 1.6.9; the rest are filed as **batch E (1.6.10)** below.
+
+The lesson is not "the count fell". It is that a finding count measures the
+instruments you had, and batch D is where the missing instruments got built —
+which is why the re-run saw things the first pass could not.
 
 ### 1.6.6 — Batch A: state integrity ✅ shipped
 
@@ -178,25 +184,123 @@ same mistakes are available to anyone reading the original wording.
   bounded growth in an append-only audit path, not a correctness bug — but it
   should be filed upstream before the sweep is declared closed.
 
-### 1.6.9 — Batch D: coverage, then close the sweep
+### 1.6.9 — Batch D: coverage, then close the sweep ✅ shipped (line NOT closed)
 
-- **Close the benchmark and soak blind spots this sweep exposed** — the existing
-  benches cover the combat tick and the telnet parser and nothing else, which is
-  why items in Batch C went unmeasured for so long. **Room broadcasts are now
-  covered** — 1.6.8 added a 256-player co-located scenario to
-  `bench_combat.bcyr`, verified to fail the budget without the fix. Still
-  uncovered: the **login path**, the **save path** (a `bench_save` reporting
-  bytes/save via `alloc_used()` alongside ns/op would make the libro-side leak
-  visible at the audit gate instead of in a soak) and the **loaders**.
-- **Documentation sweep** (CLAUDE.md Process step 6 requires it anyway): reconcile
-  `state.md`'s source-layout section, the stale M4 bench figure, and the comments
-  this sweep found contradicting their code.
-- **Re-run the full audit sweep** against the repaired tree and confirm the
-  finding count actually falls — a sweep that is never re-run proves only that
-  the first pass found things.
+All three items landed; see the 1.6.9 CHANGELOG entry.
 
-**Exit criterion for the 1.x line:** batches A–D landed, `cyrius audit` green,
-and a re-run sweep producing no critical or high findings. Then 2.0 / M14.
+- **Bench blind spots closed.** `bench_persist` (save + login, reporting **bump
+  bytes per op** as well as ns/op) and `bench_loaders` (boot loaders + the
+  rejected-file invariant). Both verified to FAIL when the thing they guard is
+  reverted. Room broadcasts were already covered in 1.6.8.
+- **Soak.** 240 session lifecycles; drift p99 held at 1 ms. RSS grew linearly at
+  ~9.2 kB per lifecycle, and a control soak (240 connections that never
+  authenticate: **+8 kB total**) pinned it to the authenticate/save path — the
+  known libro bump leak, and nothing else.
+- **Documentation sweep.** Worst offender: `state.md` documented the
+  `cyrius test src/test.cyr` form as what CI uses, which is the exact bug 1.2.0
+  fixed. Plus 17 missing test groups, a 3×-stale bench figure, a wrong struct
+  size, contradictory in-flight paragraphs, and five source comments pointing at
+  a roadmap anchor that no longer exists.
+- **Re-run sweep.** Done, and it is the reason this section does not say the
+  line is closed.
+
+**The exit criterion is NOT met.** The re-run found a **remotely-triggerable
+crash the original sweep missed entirely** — `examine <anything>` on a zone-less
+server dereferenced `room_at(-1)` and killed the process — plus a **regression
+this line introduced in 1.6.8**, where coalescing the tick's writes also delayed
+`say`/`emote`/movement by up to a full tick (measured at 2099 ms). Both are
+fixed in 1.6.9. Several further findings survived adversarial verification and
+are batched below.
+
+**What the re-run proves about the first sweep.** The 1.6.0 pass found 44
+verified findings and missed a remote crash sitting on a first-class command
+verb. So "the finding count fell" is not the right question — the first sweep's
+count was never a measure of what was there. What the re-run actually
+establishes is narrower and more useful: the fixes from batches A–C are still in
+place (the regression dimension re-checked every CHANGELOG claim from 1.6.0
+onward), and the newly-found issues cluster in areas the first sweep had no
+instrument for — which is exactly what batch D built.
+
+### 1.6.10 — Batch E: what the re-run turned up
+
+Filed from the 1.6.9 re-run against the 1.6.8/1.6.9 tree. **Not** a rewrite of
+the original 44 — those are closed, and the re-run's regression dimension
+re-checked every CHANGELOG claim from 1.6.0 onward and found none undone.
+
+Eight findings went to adversarial verification (two independent lenses each,
+one instructed to refute and one to reproduce). **All eight survived; none was
+refuted.** Severities below are the verifiers' corrected values, not the
+finders' claims.
+
+**Critical**
+
+- **`MAX_LOGIN_FAILS` is not actually enforced.** `SS_QUIT` is only honoured on
+  the epoll event path (`server.cyr:1084`), so the attempt cap does not close
+  the session it exists to close. A 1.6.2 fix that does not do what its
+  CHANGELOG says — which is worse than a missing fix, because it was believed
+  done. Both verifiers rated this critical.
+
+**High**
+
+- **`drain_pending_rx` has no aggregate budget** (`server.cyr:272`).
+  `RX_MAX_LINES` (8) is a *per-session* cap and the sweep drains every session
+  inside one tick, so the real bound is 8 × session count of arbitrary command
+  work per tick — **measured at 2.1 s in a single tick**. 1.6.2 capped the wrong
+  axis. Found independently by two dimensions.
+- **Character creation has no attempt cap at all** (`persist.cyr:889`).
+  `PHASE_NEWPASS` ↔ `PHASE_CONFIRMPASS` is unbounded pre-auth Ed25519 work.
+  `bench_persist`, added in 1.6.9, is what makes the cost legible: **≈7.7 ms and
+  ≈3.9 kB of non-reclaimable bump arena per attempt.**
+- **No duplicate-identity check on character CREATION** (`persist.cyr:889`).
+  1.6.6's H11 refused a second *login* for an existing character; two sessions
+  can still create the same name concurrently, and the second silently wins.
+- **Every failed login permanently consumes ~3.8 kB of bump arena**
+  (`persist.cyr:630`). `alloc()` has no free, so failed attempts are a permanent
+  cost. Compounds the two items above.
+
+**Medium**
+
+- **Objects that leave their authored room are never reclaimed, and the reset
+  re-mints them** (`item.cyr:642`). `_obj_id_present` scans only the top-level
+  list of the room being topped up, so an authored id that is anywhere else
+  reads as "missing" and a fresh instance is minted. Nothing ever frees a
+  non-corpse object lying in a room — `obj_free` is reached only from corpse
+  decay and from a disconnecting player's inventory.
+
+  **1.6.7 added a second, easier driver for this, and it is ours.** Before
+  `put` existed the only way to hide an object from the check was to carry it to
+  another room; now it can be hidden *in place*, because `_obj_id_present` walks
+  `oi_next` and never descends `OI_CONTENTS`. Reproduced live in
+  `market.stalls`: `get optic` → `put optic in shard` → `@reset` → **`objs +1`**,
+  a duplicate optic on the floor with the original still inside the shard.
+  Repeat for one per cycle, unbounded.
+
+  Fix both halves together: have the presence scan descend `OI_CONTENTS` (closes
+  the 1.6.7 driver) and give the reset a reclaim half to match its spawn half
+  (closes the original relocate driver). Note this violates v2.0 criterion #9
+  ("object counts return to a bounded steady state under soak"), and the
+  existing soak never drops or relocates an authored object, which is why it
+  passes today.
+- Comments in `room_broadcast` / `room_say_broadcast` still assert an immediate
+  flush and drop-on-error; 1.6.8 changed both.
+- A stunned mob that is not the player's current target never sheds its stun.
+- `put X in <carried container>` is accepted but X cannot be retrieved, and the
+  save record does not describe the nesting (1.6.7).
+
+**Low / nit** — `session_appendtx_tok` echoes typed bytes with the raw appender;
+class `hp` / `energy` unclamped after the 1.6.7 sign change; the killing blow
+skips the condition line and prompt; `qual_single`'s comment misdescribes bare
+`all`; `session_free` releases the Ed25519 secret-key block without wiping it.
+
+**Closed in 1.6.9, listed for the record:** the `examine` remote crash (high,
+both verifiers) and 1.6.8's `say` latency regression.
+
+**One filed finding was a false positive** and is recorded rather than silently
+dropped: `render_who` was reported as bounding the room index only from below.
+It bounds it both ways (`rm >= 0` **and** `rm < world_room_count()`).
+
+**Revised exit criterion for the 1.x line:** batch E landed, `cyrius audit`
+green, and a re-run sweep producing no critical or high findings. Then 2.0 / M14.
 
 ---
 

@@ -1,0 +1,184 @@
+# cyrius-yeomans-descent — the persistence path (1.6.9, batch D).
+#
+# The 1.6.0 sweep's worst misses were all on paths no bench touched. Two of the
+# three Batch C findings lived here and went unmeasured for eight releases: the
+# autosave sweep signed every dirty session inline in the tick (332 ms at
+# MAX_SESSIONS, 664% of the ADR 0001 budget), and every save handed out ~1.9 kB
+# of bump arena that `alloc()` can never reclaim.
+#
+# So this bench reports TWO numbers per operation: time, and **bytes of bump
+# arena consumed**. The second one is the point. `alloc()` has no free, so a
+# per-operation allocation is a permanent one, and RSS cannot see it — the
+# 1.6.0 CHANGELOG already records a 260 s soak that moved +624 kB against a
+# +636 kB baseline, i.e. pure noise. `alloc_used()` is the only honest
+# instrument, and putting it at the audit gate means the next regression shows
+# up in CI rather than in a soak nobody runs.
+#
+# Budgets are asserted, not just printed. A bench that only prints is a bench
+# nobody reads.
+
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "lib/sakshi.cyr"
+include "lib/libro.cyr"
+
+include "src/telnet.cyr"
+include "src/parser.cyr"
+include "src/world.cyr"
+include "src/mob.cyr"
+include "src/session.cyr"
+include "src/item.cyr"
+include "src/combat.cyr"
+include "src/classes.cyr"
+include "src/persist.cyr"
+include "src/server.cyr"
+
+enum PersistBench {
+    NSAVE = 40;        # saves per measured batch
+    NAUTH = 20;        # logins per measured batch — ident_derive dominates
+    # --- Budgets ---
+    # One save must stay well inside the metered sweep's slice. SAVE_BATCH_MAX
+    # is 4 saves per tick, so 4 x this must sit comfortably under the 50 ms p99
+    # drift budget; 5 ms each would already be 40% of the whole budget.
+    SAVE_BUDGET_US   = 5000;
+    # Bump arena per save. Zero is not achievable here — most of it is inside
+    # libro's chain_append / filestore_append, which CLAUDE.md forbids touching
+    # (it needs an upstream release). 1.6.8 removed descent's own 248 B and
+    # measured 1632 B remaining. The ceiling is set above that with headroom for
+    # libro drift, but far below the 1880 B it was before, so a reintroduced
+    # descent-side allocation trips it.
+    SAVE_BYTES_MAX   = 1750;
+    # _build_record is descent's own code end to end. It must allocate NOTHING.
+    # A hard zero, deliberately: it is immune to libro or str.cyr moving by a
+    # few bytes in a way a ceiling would not be.
+    RECORD_BYTES_MAX = 0;
+    # A login derives the Ed25519 keypair from the passphrase (ADR 0004), which
+    # is the expensive half. It happens once per connection, off the tick, so
+    # the budget is generous — it exists to catch an order-of-magnitude change.
+    AUTH_BUDGET_US   = 20000;
+}
+
+var g_fail = 0;
+
+# Report one operation as time-per-op AND bump-bytes-per-op, and check both
+# against their budget. `label` is a cstr; `n` is the batch size.
+fn report_op(label, ns_total, bytes_total, n, budget_us, bytes_max): i64 {
+    var per_ns = ns_total / n;
+    var per_by = bytes_total / n;
+    print("  ", 2); print(label, strlen(label)); println("");
+    print("    time : ", 12); print_num(per_ns / 1000);
+    print(" us/op  (budget ", 17); print_num(budget_us); println(" us)");
+    print("    bump : ", 12); print_num(per_by);
+    print(" bytes/op  (max ", 17); print_num(bytes_max); println(")");
+    if (per_ns / 1000 >= budget_us) {
+        println("    RESULT: FAIL (over time budget)");
+        g_fail = 1;
+    }
+    if (per_by > bytes_max) {
+        println("    RESULT: FAIL (bump arena per op above ceiling)");
+        g_fail = 1;
+    }
+    if (g_fail == 0) { println("    RESULT: PASS"); }
+    return 0;
+}
+
+# A session with a real derived identity, ready to save.
+fn make_identity(name, nlen, pass, plen, seed): i64 {
+    var s = fl_alloc(SS_SIZE);
+    memset(s, 0, SS_SIZE);
+    var nmb = fl_alloc(NAME_CAP);
+    memcpy(nmb, name, nlen);
+    store64(s + SS_NAME_BUF, nmb);
+    store64(s + SS_NAME_LEN, nlen);
+    var salt = alloc(SALT_LEN);
+    var i = 0;
+    while (i < SALT_LEN) { store8(salt + i, seed + i); i = i + 1; }
+    var blk = sess_ident(s);
+    memcpy(blk, salt, SALT_LEN);
+    ident_derive(salt, pass, plen, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 1000000);
+    store64(s + SS_ROOM, 0 - 1);
+    store64(s + SS_HP, 20); store64(s + SS_MAXHP, 20);
+    store64(s + SS_CLASS, 0);
+    store64(s + SS_AUTHED, 1);
+    return s;
+}
+
+fn main(): i64 {
+    alloc_init();
+    persist_init();
+
+    println("persist load:");
+
+    var s = make_identity("BenchHero", 9, "benchpassphrase", 15, 40);
+
+    # Warm every lazy init (the filestore opens on first append) so the first
+    # measured iteration is not paying for one-time setup.
+    player_save(s);
+
+    # --- _build_record: serialize + sign, no filesystem. Descent's own code.
+    var b0 = alloc_used();
+    var t0 = clock_now_ns();
+    var i = 0;
+    while (i < NSAVE) { _build_record(s); i = i + 1; }
+    var rec_ns = clock_now_ns() - t0;
+    var rec_by = alloc_used() - b0;
+    report_op("_build_record (serialize + Ed25519 sign)",
+              rec_ns, rec_by, NSAVE, SAVE_BUDGET_US, RECORD_BYTES_MAX);
+
+    # --- player_save: the whole thing — record, tmp write, rename, audit append.
+    var b1 = alloc_used();
+    var t1 = clock_now_ns();
+    i = 0;
+    while (i < NSAVE) { player_save(s); i = i + 1; }
+    var sav_ns = clock_now_ns() - t1;
+    var sav_by = alloc_used() - b1;
+    report_op("player_save (record + fsync-less write + rename + audit)",
+              sav_ns, sav_by, NSAVE, SAVE_BUDGET_US, SAVE_BYTES_MAX);
+
+    # What the metered sweep actually costs in one tick, stated in the terms
+    # ADR 0001 cares about. Before 1.6.8 this line read "all of them".
+    print("    sweep slice: ", 17); print_num(SAVE_BATCH_MAX);
+    print(" saves/tick = ", 14); print_num((sav_ns / NSAVE) * SAVE_BATCH_MAX / 1000000);
+    println(" ms of the 50 ms budget");
+
+    # --- The login path: derive the keypair, then load + verify the record.
+    # This is per-connection work and the reason a pre-auth flood was expensive
+    # enough to matter (1.6.2).
+    var b2 = alloc_used();
+    var t2 = clock_now_ns();
+    i = 0;
+    while (i < NAUTH) {
+        var probe = fl_alloc(SS_SIZE);
+        memset(probe, 0, SS_SIZE);
+        var pn = fl_alloc(NAME_CAP);
+        memcpy(pn, "BenchHero", 9);
+        store64(probe + SS_NAME_BUF, pn);
+        store64(probe + SS_NAME_LEN, 9);
+        if (player_auth_load(probe, "benchpassphrase", 15) != 1) {
+            println("  auth: record failed to verify — bench invalid");
+            return 1;
+        }
+        # The ident block is allocated lazily by sess_ident on the load path,
+        # so it has to be released too — a bench that leaks per iteration is
+        # measuring its own leak on top of the one it is reporting.
+        var ib = load64(probe + SS_IDENT);
+        if (ib != 0) { memset(ib, 0, IDENT_LEN); fl_free(ib); }   # wipe: this held the secret key
+        fl_free(pn);
+        fl_free(probe);
+        i = i + 1;
+    }
+    var auth_ns = clock_now_ns() - t2;
+    var auth_by = alloc_used() - b2;
+    # No bump ceiling asserted on the login path yet: it is dominated by the same
+    # libro/str allocations as the save, and pinning a number before the upstream
+    # fix lands would just encode today's libro version. Printed, not gated.
+    report_op("player_auth_load (derive keypair + verify signature)",
+              auth_ns, auth_by, NAUTH, AUTH_BUDGET_US, 999999);
+
+    if (g_fail != 0) { return 1; }
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

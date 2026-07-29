@@ -99,7 +99,8 @@ var g_epfd = 0;
 # 0.9.1 surface freeze — the @-admin namespace (@stats/@who/@reset) is gated
 # behind YD_ADMIN (default off): unguarded admin verbs are a production-surface
 # concern. Full operator auth (which replaces this env gate) is tracked as
-# [roadmap M8](../docs/development/roadmap.md#m8--joshua-management-interface-deferred--post-10).
+# [roadmap M18](../docs/development/roadmap.md#m17m23--the-2x-tail) — renumbered
+# from the old M8, whose anchor this used to link to and which no longer exists.
 # cmd_serve sets this from the env at startup. Declared here (ahead of
 # server.cyr) so cmd_on_line / cmd_help_text can read it.
 var g_admin_enabled = 0;
@@ -139,6 +140,26 @@ enum SessConst {
     SAVE_SWEEP_MIN_MS = 300000;
     # Consecutive failed passphrase attempts before the session is closed.
     MAX_LOGIN_FAILS = 5;
+}
+
+# Is this session standing in a room that actually exists? (H18, 1.6.9.)
+#
+# `room_at` is documented "no bounds check — callers hold valid indices", and it
+# computes `g_rooms + i * RM_SIZE`. On a server with no zone loaded g_rooms is 0
+# and SS_ROOM is -1 (session_new's "unplaced"; session_enter_world and
+# session_resume_world both early-return when there are no rooms), so that
+# arithmetic yields -240 and dereferencing it takes the whole process down.
+#
+# Every command verb that touches the room guards on `world_room_count() == 0`
+# — except one, which is how `examine <anything>` became a remote crash any
+# logged-in player could fire (see cmd_examine). This checks the INDEX rather
+# than just the count, because the count alone does not tell you the session's
+# own room is in range.
+fn session_room_ok(s): i64 {
+    var room = load64(s + SS_ROOM);
+    if (room < 0) { return 0; }
+    if (room >= world_room_count()) { return 0; }
+    return 1;
 }
 
 # Has this session saved too recently for another `save` verb to do real work?
@@ -973,7 +994,15 @@ fn cmd_examine(s, pa): i64 {
     # An object lying in the room, or one the player is carrying. Examining an
     # object renders its description — which for readables (the work-notice,
     # postings) IS the act of reading it.
-    var o = ilist_find_kw_nth(room_obj_head(room_at(load64(s + SS_ROOM))), load64(&xp), load64(&xl), xnth);
+    # H18 (1.6.9) — this line was the crash. Unguarded, it reached
+    # room_at(-1) on a zone-less server and killed the process; `look`, `get`,
+    # `drop`, `kill` and `exits` all check first, and examine did not.
+    # Guarding only the ROOM half deliberately: a carried object needs no room,
+    # so inventory still answers.
+    var o = 0;
+    if (session_room_ok(s) == 1) {
+        o = ilist_find_kw_nth(room_obj_head(room_at(load64(s + SS_ROOM))), load64(&xp), load64(&xl), xnth);
+    }
     if (o == 0) { o = ilist_find_kw_nth(load64(s + SS_INV), load64(&xp), load64(&xl), xnth); }
     if (o != 0) {
         session_appendtx_cstr(s, ansi_item());

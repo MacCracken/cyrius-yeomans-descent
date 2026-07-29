@@ -370,7 +370,9 @@ fn zone_has_player(): i64 {
     return 0;
 }
 
-# M7-E reset event log — one line Joshua reads at M8.
+# M7-E reset event log — one line per reset, for an operator to read. (The
+# consumer was specced as "Joshua at M8"; Joshua is now backlog and the operator
+# channel is M18. The log line stands on its own either way.)
 fn zone_reset_log(mobs, objs): i64 {
     print("[", 1);
     print_num(get_epoch_secs());
@@ -644,9 +646,10 @@ fn tick_step(epfd, next_tick, now, tick_ms): i64 {
 
 # === Observability (M1-H). =================================================
 #
-# A small set of counters the `@stats` admin verb surfaces (and that
-# Joshua consumes at M8): live connections, sessions logged in, ticks
-# since boot, and the p99 of recent tick-scheduling drift.
+# A small set of counters the `@stats` admin verb surfaces: live connections,
+# sessions logged in, ticks since boot, and the p99 of recent tick-scheduling
+# drift. (An operator consumer for these is M18; the old "Joshua at M8" framing
+# is backlog — see the roadmap.)
 
 enum ObsConst { DRIFT_RING_CAP = 512; }
 
@@ -739,11 +742,13 @@ fn render_stats(s): i64 {
 }
 
 # === 0.8.3 — operator read-only verbs (@who, @reset). ====================
-# Groundwork for the M8 Joshua interface. Since 0.9.1 the whole @-namespace
+# Groundwork for the operator interface. Since 0.9.1 the whole @-namespace
 # (@stats/@who/@reset) is gated behind the YD_ADMIN env knob, default off —
 # see `apply_idle_env` below and session.cyr's `g_admin_enabled`. Replacing
 # that env gate with real operator authentication is tracked as
-# [roadmap M8](../docs/development/roadmap.md#m8--joshua-management-interface-deferred--post-10).
+# [roadmap M18](../docs/development/roadmap.md#m17m23--the-2x-tail), which is
+# deliberately independent of Joshua (now backlog). This used to link to an M8
+# anchor that no longer exists.
 
 # @who — every in-world session (name + the room it's standing in).
 fn render_who(s): i64 {
@@ -1071,6 +1076,23 @@ fn dispatch_session(epfd, s, events, now_ms): i64 {
     if ((events & EPOLLIN) != 0) {
         alive = session_on_readable(s, now_ms);
     }
+    # H19 (1.6.9) — deliver to everyone this command touched, NOW.
+    #
+    # H15 turned every room broadcast into a dirty flag drained at the end of
+    # advance_tick. That is right for the TICK, where E combatants each
+    # broadcast to E-1 others and the write count is quadratic. It is wrong for
+    # commands, which arrive on this path: `say`, `emote`, arrivals, departures
+    # and `kill`'s lunge all mark their listeners and then waited for the next
+    # tick boundary — up to the full 2.5 s (ADR 0001) before anyone heard you
+    # speak. Immediate before 1.6.8; a regression introduced by the coalescing.
+    #
+    # No syscall cost is given back: one command marks at most the room's
+    # population, which is exactly how many writes it always issued. Only the
+    # tick's own burst is coalesced, which is where the 2E^2 - E came from.
+    #
+    # Placed before the drop checks below so a departing player's goodbye still
+    # reaches onlookers even when this session is about to be torn down.
+    flush_dirty_sessions();
     if (alive == 0) { return 0; }
     var ok = flush_session(epfd, s);
     if (ok == 0) { return 0; }
