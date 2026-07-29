@@ -167,6 +167,20 @@ fn ilist_find_kw(head, np, nl): i64 { return ilist_find_kw_nth(head, np, nl, 1);
 
 # === world_load_objs — parse a `<zone>.objs.cyml` into templates. ===
 fn world_load_objs(path): i64 {
+    # F6 (1.6.11) — unpublish FIRST, before anything can fail.
+    #
+    # H9 (1.6.5) moved the zeroing below the allocation so an in-loop rejection
+    # could not leave a live half-table. It did not cover the three returns
+    # ABOVE it — WL_ERR_IO, WL_ERR_EMPTY, WL_ERR_OVERCAP — so a missing or
+    # empty file left the PREVIOUS table published while the caller was told the
+    # load failed. Measured: after loading a nonexistent objs file the count was
+    # still 10, mobs still 4, classes still 4. Only world_load_rooms was safe,
+    # because it routes all eight of its returns through _wl_rooms_fail.
+    #
+    # Hoisting it here is the same guarantee with less machinery: there is no
+    # error return before this line, so every one of them now unpublishes.
+    g_obj_tpl_count = 0;
+
     var r = cyml_parse_file_r(path);
     if (is_ok(r) == 0) { return WL_ERR_IO; }
     var doc = result_unwrap(r);
@@ -187,7 +201,7 @@ fn world_load_objs(path): i64 {
     # placeholders") actually true.
     g_obj_tpls = alloc(n * OT_SIZE);
     memset(g_obj_tpls, 0, n * OT_SIZE);
-    g_obj_tpl_count = 0;   # published on success only
+    g_obj_tpl_count = 0;   # (already zeroed at entry — F6; kept for clarity)
 
     var i = 0;
     while (i < n) {
@@ -426,6 +440,17 @@ fn cmd_get(s, pa): i64 {
             var cp[8]; var cl[8];
             var cnth = qual_single(pa, ii, &cp, &cl);
             var container = ilist_find_kw_nth(load64(room_slot), load64(&cp), load64(&cl), cnth);
+            # F11 (1.6.11) — fall back to a CARRIED container, exactly as
+            # cmd_put already does when it resolves its destination.
+            #
+            # cmd_put's own comment calls itself "the exact inverse of
+            # `get X from Y`", and it was not: put accepted a carried container
+            # and get only ever searched the room, so anything put into a bag in
+            # your own hands could never be taken out again. Making the lookup
+            # symmetric is what that comment always claimed.
+            if (container == 0) {
+                container = ilist_find_kw_nth(load64(inv_slot), load64(&cp), load64(&cl), cnth);
+            }
             if (container == 0) {
                 session_appendtx_cstr(s, "You see no ");
                 session_appendtx_tok(s, pa, ii);

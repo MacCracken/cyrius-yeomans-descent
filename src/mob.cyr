@@ -205,6 +205,20 @@ fn parse_dice(s, out_n, out_d, out_mod): i64 {
 # === world_load_mobs — parse a `<zone>.mobs.cyml` into templates. ===
 # Returns the template count (>= 0), or a negative WL_ERR_* code.
 fn world_load_mobs(path): i64 {
+    # F6 (1.6.11) — unpublish FIRST, before anything can fail.
+    #
+    # H9 (1.6.5) moved the zeroing below the allocation so an in-loop rejection
+    # could not leave a live half-table. It did not cover the three returns
+    # ABOVE it — WL_ERR_IO, WL_ERR_EMPTY, WL_ERR_OVERCAP — so a missing or
+    # empty file left the PREVIOUS table published while the caller was told the
+    # load failed. Measured: after loading a nonexistent objs file the count was
+    # still 10, mobs still 4, classes still 4. Only world_load_rooms was safe,
+    # because it routes all eight of its returns through _wl_rooms_fail.
+    #
+    # Hoisting it here is the same guarantee with less machinery: there is no
+    # error return before this line, so every one of them now unpublishes.
+    g_mob_tpl_count = 0;
+
     var r = cyml_parse_file_r(path);
     if (is_ok(r) == 0) { return WL_ERR_IO; }
     var doc = result_unwrap(r);
@@ -225,7 +239,7 @@ fn world_load_mobs(path): i64 {
     # placeholders") actually true.
     g_mob_tpls = alloc(n * MT_SIZE);
     memset(g_mob_tpls, 0, n * MT_SIZE);
-    g_mob_tpl_count = 0;   # published on success only
+    g_mob_tpl_count = 0;   # (already zeroed at entry — F6; kept for clarity)
 
     var i = 0;
     while (i < n) {
@@ -319,7 +333,13 @@ fn mob_spawn(tpl, room_idx): i64 {
     memset(m, 0, MI_SIZE);
     g_mob_live = g_mob_live + 1;   # M12-D
     store64(m + MI_TPL, tpl);
-    store64(m + MI_HP, mt_hp(tpl));
+    # F9 (1.6.11) — an authored `hp = -1` used to spawn a mob that is already
+    # dead (combat tests hp <= 0), which then dies to the first swing and drops
+    # a corpse. Same sweep as the class stats above; same reason it is a clamp
+    # and not a rejection.
+    var mhp = mt_hp(tpl);
+    if (mhp < 1) { mhp = 1; }
+    store64(m + MI_HP, mhp);
     store64(m + MI_ROOM, room_idx);
     store64(m + MI_HOME, room_idx);   # M13 — wander changes MI_ROOM, never this
     store64(m + MI_ACTED, 0);

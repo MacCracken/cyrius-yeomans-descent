@@ -319,7 +319,18 @@ fn combat_round(s): i64 {
         session_appendtx_num(s, dmg);
         session_appendtx_cstr(s, " damage.\r\n");
         cb_player_act(s, m, " strikes ", ".\r\n");
-        if (mi_hp(m) <= 0) { mob_died(s, m); combat_flush(s); return 0; }
+        if (mi_hp(m) <= 0) {
+            # F10 (1.6.11) — the killing blow gets the same tail as every other
+            # exit. This returned without the condition line or the prompt, so
+            # the one round a player most wants to read ended with no HP, no
+            # energy and no `>` — every other exit from combat_round emits both,
+            # as do mob_swing and ability_tail.
+            mob_died(s, m);
+            session_append_condition(s);
+            session_send_cmd_prompt(s);
+            combat_flush(s);
+            return 0;
+        }
     } else {
         session_appendtx_cstr(s, ansi_miss());
         session_appendtx_cstr(s, "You swing at ");

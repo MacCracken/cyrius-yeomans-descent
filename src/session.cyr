@@ -255,9 +255,25 @@ fn session_free(s): i64 {
     fl_free(load64(s + SS_TX_BUF));
     fl_free(load64(s + SS_LINE_BUF));
     fl_free(load64(s + SS_NAME_BUF));
-    if (load64(s + SS_IDENT) != 0) { fl_free(load64(s + SS_IDENT)); }
+    if (load64(s + SS_IDENT) != 0) {
+        memset(load64(s + SS_IDENT), 0, IDENT_LEN);   # F5 — the LIVE secret key
+        fl_free(load64(s + SS_IDENT));
+    }
     # H8 — a session dropped mid-`passwd` must not leak its candidate key.
-    if (load64(s + SS_IDENT_CAND) != 0) { fl_free(load64(s + SS_IDENT_CAND)); }
+    # F5 (1.6.11) — WIPE before free. lib/freelist.cyr hands a freed block to
+    # the next fl_alloc of that size class without zeroing it, and both of
+    # these hold Ed25519 secret keys: SS_IDENT the live one for the whole
+    # session, SS_IDENT_CAND up to two derived candidates mid-`passwd`.
+    #
+    # The 1.6.4 entry claims the candidate is "wiped and freed on commit, on
+    # both rewinds, and in session_free". Three of those four were true:
+    # sess_cand_clear does memset-then-free and is called on commit and both
+    # rewinds; this site did a bare fl_free. SS_IDENT was never wiped at all
+    # and was never claimed to be — which is worse, since it is the live key.
+    if (load64(s + SS_IDENT_CAND) != 0) {
+        memset(load64(s + SS_IDENT_CAND), 0, CAND_LEN);
+        fl_free(load64(s + SS_IDENT_CAND));
+    }
     fl_free(s);
     return 0;
 }
@@ -640,7 +656,19 @@ var g_parser = 0;
 # Append token `i` of the parser (its lowercased form) to the tx queue.
 fn session_appendtx_tok(s, pa, i): i64 {
     if (i < 0) { return 0; }
-    session_appendtx(s, tok_ptr(pa, i), tok_len(pa, i));
+    # F4 (1.6.11) — a parser token is PLAYER-TYPED, so it goes through the
+    # sanitizing appender. M10-A's rule, stated above session_appendtx_prose, is
+    # "use this for anything a player typed; session_appendtx for server literals
+    # and authored zone prose" — and this was handing raw token bytes to the raw
+    # appender.
+    #
+    # It matters because telnet_feed decodes `IAC IAC` into a literal 0xFF data
+    # byte (correct RFC 854, and the suite asserts it), session_push_line_byte
+    # drops only b < 32, so a 0xFF survives into the token. Every not-found reply
+    # then echoed it bare: "I don't understand ...", "You see no ...", and the
+    # same in kill / put / give — a lone IAC on the wire, which is exactly the
+    # defect M10 exists to prevent.
+    session_appendtx_prose(s, tok_ptr(pa, i), tok_len(pa, i));
     return 0;
 }
 
@@ -1350,7 +1378,14 @@ fn session_is_idle(s, now_ms, timeout_ms): i64 {
 #
 # Returns 1 if the session should stay alive, 0 if it should be torn
 # down (clean EOF or socket error).
-fn session_on_readable(s, now_ms): i64 {
+# G1 (1.6.12) — the caller supplies the line budget and learns what was spent.
+#
+# `session_on_readable(s, now_ms)` remains, delegating with the full
+# RX_MAX_LINES slice, so nothing that only handles one session changes. The
+# event loops use this form because they walk MANY sessions per pass and have to
+# spend a budget across the whole walk — see the EVENT_LINES_MAX block in
+# server.cyr for why a per-session cap was never a bound on a loop.
+fn session_on_readable_max(s, now_ms, maxlines, out_fired): i64 {
     var rx = load64(s + SS_RX_BUF);
     var len = load64(s + SS_RX_LEN);
     var fd = load64(s + SS_FD);
@@ -1392,6 +1427,13 @@ fn session_on_readable(s, now_ms): i64 {
     #endif
     store64(s + SS_RX_LEN, len);
     if (len > 0) { store64(s + SS_LAST_MS, now_ms); }
-    session_consume_rx(s);
+    session_consume_rx_max(s, maxlines, out_fired);
     return alive;
+}
+
+# One session, the full RX_MAX_LINES slice — the H5 (1.6.2) dispatch cap,
+# unchanged for every caller that is not walking a list.
+fn session_on_readable(s, now_ms): i64 {
+    var fired[8];
+    return session_on_readable_max(s, now_ms, RX_MAX_LINES, &fired);
 }

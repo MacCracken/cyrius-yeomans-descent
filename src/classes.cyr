@@ -77,6 +77,20 @@ fn class_name_len(idx): i64 { return load64(cl_at(idx) + CL_NAME_LEN); }
 
 # === world_load_classes — parse data/classes.cyml into the class table. ===
 fn world_load_classes(path): i64 {
+    # F6 (1.6.11) — unpublish FIRST, before anything can fail.
+    #
+    # H9 (1.6.5) moved the zeroing below the allocation so an in-loop rejection
+    # could not leave a live half-table. It did not cover the three returns
+    # ABOVE it — WL_ERR_IO, WL_ERR_EMPTY, WL_ERR_OVERCAP — so a missing or
+    # empty file left the PREVIOUS table published while the caller was told the
+    # load failed. Measured: after loading a nonexistent objs file the count was
+    # still 10, mobs still 4, classes still 4. Only world_load_rooms was safe,
+    # because it routes all eight of its returns through _wl_rooms_fail.
+    #
+    # Hoisting it here is the same guarantee with less machinery: there is no
+    # error return before this line, so every one of them now unpublishes.
+    g_class_count = 0;
+
     var r = cyml_parse_file_r(path);
     if (is_ok(r) == 0) { return WL_ERR_IO; }
     var doc = result_unwrap(r);
@@ -97,7 +111,7 @@ fn world_load_classes(path): i64 {
     # placeholders") actually true.
     g_classes = alloc(n * CL_SIZE);
     memset(g_classes, 0, n * CL_SIZE);
-    g_class_count = 0;   # published on success only
+    g_class_count = 0;   # (already zeroed at entry — F6; kept for clarity)
 
     var i = 0;
     while (i < n) {
@@ -151,15 +165,32 @@ fn apply_class(s, idx): i64 {
     store64(s + SS_DEX, cl_dex(c));
     store64(s + SS_CON, cl_con(c));
     store64(s + SS_TEC, cl_tec(c));
-    store64(s + SS_MAXHP, cl_hp(c));
-    store64(s + SS_HP, cl_hp(c));
+    # F9 (1.6.11) — clamp on the CREATION path, matching the load path exactly.
+    #
+    # H12 (1.6.7) taught toml_int to read a leading '-', and H13 clamped the one
+    # caller it audited (reset_secs). These were not swept. `hp` and `energy`
+    # flow from data/classes.cyml straight into SS_MAXHP / SS_MAXENERGY here,
+    # while player_auth_load clamps those same two fields to [1, 1000000] and
+    # [0, 1000000] — the invariant was asserted where a record is READ and
+    # absent where a character is MADE. An authored `hp = -5` produced a player
+    # who was dead on arrival.
+    #
+    # Clamped rather than rejected: ADR 0007 §5 freezes the class file format
+    # for 1.x, so refusing a file that loads today is the compatibility break
+    # that section exists to prevent. `ac` and `hit` are deliberately left
+    # unclamped — a negative AC is meaningful in THAC0 and is precisely what H12
+    # existed to enable.
+    var chp = _clamp(cl_hp(c), 1, 1000000);       # forward ref → persist.cyr
+    store64(s + SS_MAXHP, chp);
+    store64(s + SS_HP, chp);
     store64(s + SS_AC, cl_ac(c));
     store64(s + SS_HIT, cl_hit(c));
     store64(s + SS_NDICE, load64(c + CL_NDICE));
     store64(s + SS_DSIZE, load64(c + CL_DSIZE));
     store64(s + SS_DMOD,  load64(c + CL_DMOD));
-    store64(s + SS_MAXENERGY, cl_energy(c));
-    store64(s + SS_ENERGY, cl_energy(c));
+    var cen = _clamp(cl_energy(c), 0, 1000000);   # F9 — same bound as the load path
+    store64(s + SS_MAXENERGY, cen);
+    store64(s + SS_ENERGY, cen);
     store64(s + SS_CD0, 0);
     store64(s + SS_CD1, 0);
     store64(s + SS_CD2, 0);

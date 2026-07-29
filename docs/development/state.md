@@ -3,14 +3,95 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.6.10 — batches A–E shipped; 1.6.11 tail + one more re-run remain)
+> **Last refresh**: 2026-07-29 (v1.6.12 — re-run #2 closed; the gate is still a clean re-run)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.6.10 tree.
+> tests, boot guide) describes the **current** 1.6.12 tree.
 
 ## Version
+
+**1.6.12** — re-run #2's findings; the unmetered-work CLASS, 2026-07-29. **706
+assertions**; `cyrius audit` exits 0; 5/5 benches.
+
+The second re-run found a **critical** and a **high**, and both were the same
+defect this line had already fixed three times on neighbouring paths:
+
+> **A per-item cap is not a bound on a loop that walks many items.**
+
+H5 (1.6.2) capped one session per readable event; E1/E2 (1.6.10) capped the
+tick-side drain; F7 (1.6.11) capped the idle reap. **Nothing ever capped the
+event batch** — the path that runs first and most often — and nothing capped
+`passwd`, structurally identical to the two login paths that were capped.
+
+- **The epoll event batch** *(critical)* drained 64 events × 8 lines with the
+  tick-deadline check outside the loop: **4.12 s per batch**, 164% of the whole
+  tick interval, from 6.6 kB of input. And ADR 0003's two loops had diverged —
+  the agnos sweep had no per-pass cap of any kind (~16.5 s at MAX_SESSIONS).
+  Both now call one extracted `event_batch_step`. Measured **559 ms → 17 ms**.
+- **`passwd`** *(high)* derived a keypair per attacker line, unbounded: 1000
+  lines = 1103 ms with the counter still at zero. Capped, but it abandons the
+  re-key rather than disconnecting — the session is a real player.
+- **Attacker-paced audit events** aggregated to one per session: ~755 kB/s of
+  unreclaimable arena cut 5×, flood signal intact, `passwd.fail` unchanged.
+
+**The gate is still open.** Two re-runs, two sets of serious findings the
+previous pass missed. The line closes when a re-run comes back with no critical
+or high findings; that has not happened, and the evidence so far says each pass
+finds real defects.
+
+**Method note worth carrying.** The fix for a repeated defect is to enumerate
+the class, not to patch the report. `grep -n ident_derive src/` lists every
+expensive-line path; "every loop that dispatches lines" lists every place a cap
+must be aggregate rather than per-item. Both were one command away, and three
+releases asked neither.
+
+**Testing note.** Six of thirteen mutations needed the test rewritten first, and
+the reasons rhyme with the bug: the first `event-budget` test **reimplemented
+the batch arithmetic** rather than calling it, so three mutations passed unseen;
+`EVENT_LINES_MAX` is exactly 2× `RX_MAX_LINES`, so a loop test only ever
+exercises a full slice; asserting the budget *delta* cannot see a step that
+charges a flat 1 per session; and the audit probe read 4096 bytes of an 8.3 MB
+store, making every comparison equal — it now refuses to assert if the read
+saturates.
+
+**1.6.11** — the sweep tail, plus a corrected record, 2026-07-29. **669
+assertions**; `cyrius audit` exits 0; 5/5 benches.
+
+- **`render_who` was NOT a false positive, and 1.6.9 said it was.** The reviewer
+  checked `cmd_who` — a different function three hundred lines away that has
+  always bounded both ends — and published the refutation. `render_who` (the
+  `@who` verb) tested only `room >= 0` before dereferencing. Fixed; the claim is
+  corrected in place rather than deleted.
+- **`world_start_room()` named room 0 in a zero-room world** — a valid-looking
+  index into a null table, which every `room >= 0` guard downstream believed.
+- **Three loaders left a stale table published** on their pre-alloc error paths.
+  Measured: after a nonexistent objs file the count was still 10, mobs 4,
+  classes 4 — while the caller was told the load failed.
+- **Secret keys went back to the freelist unwiped** — the live `SS_IDENT` block
+  and the `passwd` candidate. The 1.6.4 entry claimed the candidate was wiped in
+  four places; three of the four were true.
+- **The idle reap was a second unmetered signing site** in the same tick H16
+  metered, reachable without an attacker (a restart puts everyone on one
+  deadline).
+- **`put X in <carried bag>` was one-way and then silent data loss** — the save
+  never walked container contents and `obj_free` recursed through them.
+- Plus: parser token lengths, the M10 sanitizer on echoed tokens, class/mob stat
+  clamps, the killing blow's missing prompt, and a **false justification**
+  removed from the H14 comment.
+
+**The line is not closed until the re-run says so.** Everything the 1.6.9 sweep
+produced is now fixed, but the bar is a fresh pass against the repaired tree
+coming back with no critical or high findings — and the reason that bar exists
+is that the first sweep declared itself finished while a remote crash sat on
+`examine`.
+
+**Testing note worth carrying.** Two harness bugs, both of which *truncated* the
+run instead of failing it: a session built by `_tx_sess` has `SS_FD = 0`, so
+`session_free` **closed stdin** and the suite simply stopped printing; the same
+session has `SS_TS = 0`, so `telnet_state_free` dereferenced null. A test that
+dies silently reads exactly like a test that passed.
 
 **1.6.10** — sweep batch E, the re-run's findings, 2026-07-29. **636
 assertions**; `cyrius audit` exits 0; 5/5 benches.
@@ -539,7 +620,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (636 assertions, 35 groups)
+  cyrius-yeomans-descent.tcyr   unit suite (706 assertions, 38 groups)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -582,7 +663,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **636** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **706** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -756,11 +837,11 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** The tree builds, `cyrius audit` exits 0, and **636
+**No active cycle.** The tree builds, `cyrius audit` exits 0, and **706
 assertions + 5 benches** pass.
 
 **The 1.x line is NOT closed.** M10–M13, the 1.6.0 hardening sweep, and sweep
-batches A–E (1.6.6–1.6.10) are all shipped, and every one of the original 44
+batches A–E plus two tails (1.6.6–1.6.12) are all shipped, and every one of the original 44
 verified findings is closed and re-verified as still closed. But batch D's last
 item was to **re-run the sweep**, and it found a remotely-triggerable crash the
 first pass had missed (`examine` on a zone-less server) plus a regression 1.6.8
@@ -782,7 +863,7 @@ reintroduced descent-side allocation trips the audit gate rather than a soak.
 (The *previous* parked item — the unbounded in-memory audit chain — was closed
 upstream in libro 2.8.4 and consumed in 1.6.1.)
 
-Next is **1.6.11** (the tail, then the re-run), then **2.0.0** starting with
+Next is the **re-run sweep** — the last gate — then **2.0.0** starting with
 **M14 — ADR 0008 + save schema v2**. Everything
 else in the 2.0 line routes through it. Before touching it, read the critical
 path in [`roadmap.md`](roadmap.md#critical-path); the binding constraint is that
@@ -866,7 +947,7 @@ guard these.
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test                                      # 636 assertions, all pass
+cyrius test                                      # 706 assertions, all pass
 ./build/cyrius-yeomans-descent serve 4000
 # new name → passphrase (echo-suppressed) → class → play; `save`/`passwd`/`quit`,
 # reconnect → restored + "last seen". kill -9 after a save → restart → no loss.

@@ -192,8 +192,17 @@ fn parser_tokenize(pa, buf, len): i64 {
             } else {
                 if (pa_is_delim(b) == 1) { done = 1; continue; }
             }
-            pa_emit_byte(pa, b);
-            emitted = emitted + 1;
+            # F3 (1.6.11) — count bytes STORED, not bytes attempted.
+            #
+            # pa_emit_byte returns 0 and stores nothing once the norm buffer is
+            # full — its own comment says so, and promises the token is "truncated
+            # rather than overrunning the buffer". The return was discarded and
+            # `emitted` advanced anyway, so the RECORDED length outran the stored
+            # bytes and tok_ptr + tok_len walked off the end of the allocation.
+            # The buffer was never overrun; the length was the thing that lied,
+            # and every consumer trusts it — tok_eq, qual_parse, kw_matches, and
+            # session_appendtx_tok, which copies straight into a player's tx.
+            emitted = emitted + pa_emit_byte(pa, b);
             i = i + 1;
         }
 

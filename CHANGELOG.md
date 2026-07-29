@@ -4,6 +4,227 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.12] — 2026-07-29
+
+**The class, not the instance.** The second re-run sweep found a **critical** and
+a **high**, and both are the same defect this line has now fixed three times on
+neighbouring paths without ever fixing the pattern. That is the story of this
+release, and it is worth stating before the fixes.
+
+The defect: *a per-item cap is not a bound on a loop that walks many items.*
+
+| release | capped | left open |
+|---|---|---|
+| H5 (1.6.2) | one session per readable event | the batch of events; creation; `passwd` |
+| E1/E2 (1.6.10) | the tick-side drain | the event-side batch; `passwd` |
+| F7 (1.6.11) | the idle reap | the event-side batch; `passwd` |
+| **G1/G2 (1.6.12)** | **the event batch, both loops, and `passwd`** | — |
+
+Each pass looked straight at the open one and fixed a neighbour. `grep -n
+ident_derive src/` and "every loop that dispatches lines" were always the whole
+answer, and this release finally asks those two questions instead of chasing
+reports.
+
+### Fixed
+
+- **The epoll event batch had no aggregate work budget.** *(critical, both
+  verifiers)* The dispatch loop drains up to `MAX_EPOLL_EVENTS` = 64 session
+  events, each allowed `RX_MAX_LINES` = 8 line dispatches, and the tick-deadline
+  check sits **outside** that loop — so the batch ran to completion whatever it
+  cost.
+
+  Measured on this tree: one event of 8 wrong-passphrase lines is **64 ms of CPU
+  for 104 bytes of input**, and a full batch is **4.12 s with no tick check in
+  between** — 8240% of the ADR 0001 budget and 164% of the whole tick interval,
+  so an entire combat tick is skipped. The unauthenticated creation variant needs
+  no account at all: I measured **559 ms → 17 ms** for that batch here, 1118% of
+  budget down to 34%.
+
+  `RX_MAX_LINES` is a per-session cap and this walks 64 sessions — which is
+  verbatim what E2 wrote about `drain_pending_rx` eight weeks of releases ago.
+- **…and ADR 0003's two loops had diverged, with the agnos one worse.** The
+  agnos poll loop sweeps **every** session on every ~20 ms pass with no
+  `MAX_EPOLL_EVENTS` analog of any kind: 256 × 64 ms = **~16.5 s per pass** at
+  `MAX_SESSIONS`. Both loops now call one extracted `event_batch_step`, so they
+  cannot disagree again — and that function is reachable from a test, which the
+  loops themselves are not.
+- **The in-world `passwd` re-key was unmetered.** *(high, both verifiers)*
+  `chpass_on_new` derives a fresh Ed25519 keypair on every in-range line and
+  `chpass_on_confirm` derives again to compare, rewinding on mismatch — so 100%
+  of attacker lines cost a full derivation and the cycle never terminated.
+  Measured: 1000 lines = 1103 ms of loop time, and afterwards `SS_FAILS` was
+  still 0 and the session still cycling.
+
+  Reachable by any authenticated player: create a character (free), type
+  `passwd`, alternate two lines forever. Capped now — but unlike creation it
+  does **not** disconnect: an authenticated player who fumbles is returned to the
+  prompt with their passphrase untouched and may try again. That still bounds the
+  work per invocation, which is the point.
+
+### Changed
+
+- **Attacker-paced audit events fire once per session, not once per attempt.**
+  Each `audit_event` costs 1640 bytes of bump arena `alloc()` can never reclaim
+  (1416 B of it inside libro's `filestore_append`, upstream and untouchable
+  here) plus ~360 B appended to a never-rotated `data/audit.libro`. On the
+  unauthenticated creation path that was 5 × per connection — measured **~755
+  kB/s of permanently-lost arena** at single-core saturation, and reconnects are
+  free, so E3's per-connection cap never bounded the aggregate.
+
+  `create.fail` and `login.fail` now write one entry, at the cap. The event
+  exists to make a flood **visible**, and every session that hammers the limit
+  still writes one `SEV_WARNING` naming it — what is given up is per-attempt
+  granularity on the two paths whose rate an *attacker* sets. The authenticated
+  `passwd.fail` keeps its per-attempt entry, because a real player sets that
+  rate. That is the whole trade, stated plainly: the dominant term remains
+  upstream in libro 2.8.5.
+
+### Testing
+
+- 669 → **706 assertions**; new `event-budget` and `passwd-meter` groups.
+- 13 mutations, all discriminating. **Six needed the test rewritten first**, and
+  the reasons rhyme with the bug:
+  - The first `event-budget` test **reimplemented the batch arithmetic** instead
+    of calling it, so three mutations to the real code passed unseen. Fixed by
+    extracting `event_batch_step` and driving that — the same seam `tick_step`
+    got in 1.6.8, for the same reason.
+  - `EVENT_LINES_MAX` is exactly 2 × `RX_MAX_LINES`, so a loop test only ever
+    exercises `take == 8` and cannot tell a budgeted step from one that always
+    takes a full slice. Now driven with budgets of 3 and 5 as well.
+  - Asserting the budget *delta* cannot see a step that charges a flat 1 per
+    session — that reaches the same total after servicing 16 sessions at a full
+    slice each, i.e. the exact thing the budget prevents. Now asserts the session
+    count too.
+  - The audit probe read 4096 bytes of an 8.3 MB append-only store, so every
+    length compare was equal and the check always passed. Now sized generously
+    and it **refuses to assert** if the read ever saturates.
+  - And `login.fail` was covered only for creation. Covering one of two
+    symmetric paths is the mistake this entire release is about.
+
+**Not closed.** The 1.x line still needs a re-run that comes back with no
+critical or high findings. Two re-runs have now each found serious defects the
+previous pass missed, which is evidence about the process, not just the code —
+so the bar stays where it is.
+
+## [1.6.11] — 2026-07-29
+
+**The tail of the re-run.** Batch E took the critical and the highs; this takes
+everything else the 1.6.9 sweep found, including one correction to the record.
+
+### Corrected
+
+- **`render_who` was NOT a false positive, and 1.6.9 said it was.** The finding
+  reported `render_who` bounding its room index only from below. I checked
+  `cmd_who` — a *different* function three hundred lines further down, which has
+  always bounded both ends — declared the finding a false positive, and wrote
+  that into the 1.6.9 CHANGELOG, `state.md` and the roadmap.
+
+  `render_who` (the `@who` admin verb) tested `room >= 0` and then dereferenced.
+  Now bounded at both ends, like `cmd_who`. Safe today only by an invariant held
+  elsewhere — SS_ROOM is -1 or valid, never stale-and-positive — which is exactly
+  the kind of accident that made `examine` a remote crash the moment it stopped
+  holding. The corrected record is in the roadmap; the original claim is left
+  visible rather than quietly edited away.
+
+### Fixed
+
+- **`world_start_room()` reported room 0 for a world with no rooms.**
+  `g_start_room` is 0 by default *and* after H9 zeroes it on a rejected load, so
+  a zone-less server named a valid-looking index into a null table — the most
+  dangerous kind, because every `room >= 0` guard downstream reads it as placed.
+  Returns -1 ("unplaced") now, which is already this codebase's word for it.
+- **Three loaders left a stale table published on a rejected load.**
+  `world_load_objs`, `world_load_mobs` and `world_load_classes` return
+  `WL_ERR_IO` / `WL_ERR_EMPTY` / `WL_ERR_OVERCAP` *above* the line H9 (1.6.5)
+  added, so those three paths never reached it. Measured: after loading a
+  nonexistent objs file the count was still 10, mobs still 4, classes still 4 —
+  while the caller was told the load failed. Only `world_load_rooms` was safe,
+  because it routes all eight returns through `_wl_rooms_fail`. The zeroing is
+  hoisted to function entry, where nothing can fail before it.
+- **A parser token could claim more bytes than were stored.** `pa_emit_byte`
+  stores nothing once the norm buffer is full and returns 0 — its own comment
+  promises the token is "truncated rather than overrunning the buffer" — and the
+  return was discarded while the length counter advanced anyway. The buffer was
+  never overrun; the *length* was, and every consumer trusts it, including
+  `session_appendtx_tok`, which copies straight into a player's tx queue.
+
+  Latent only because `LINE_CAP == NORM_CAP`. That equality is now recorded as
+  the load-bearing invariant it is, and the test drives the parser past it
+  directly, since no socket line can.
+- **Player-typed tokens were echoed with the raw appender.** M10-A's rule is
+  "use the prose appender for anything a player typed"; `session_appendtx_tok`
+  used the raw one. `telnet_feed` decodes `IAC IAC` into a literal 0xFF data
+  byte (correct RFC 854, and the suite asserts it), which survives into the
+  token — so every not-found reply echoed a lone IAC back onto the wire, which
+  is the exact defect M10 exists to prevent.
+- **Secret keys went back to the freelist unwiped.** `lib/freelist.cyr` hands a
+  freed block to the next `fl_alloc` of that size class *without zeroing it*.
+  `session_free` released both the live `SS_IDENT` block (Ed25519 secret key,
+  whole session) and the `SS_IDENT_CAND` block (up to two derived candidate keys
+  mid-`passwd`) with a bare `fl_free`.
+
+  The 1.6.4 entry states the candidate is "wiped and freed on commit, on both
+  rewinds, and in `session_free`". Three of those four were true. `SS_IDENT` was
+  never wiped and was never claimed to be — which is worse, since it is the live
+  key. Both wiped now.
+- **The idle reap was a second unmetered signing site.** `drop_session`'s first
+  act is an unconditional `player_save`, measured by H16 at 1.30 ms with 89% in
+  `ed25519_sign` — which is why H16 capped `save_sweep` at 4 per tick. But
+  `sweep_idle` could do 256 of them in one pass, in the same tick, spending the
+  same budget, and nothing bounded it. No attacker required: a restart puts
+  everyone on the same idle deadline, so they time out together. Same budget
+  shape, same non-starvation argument.
+- **Class and mob stats were unclamped where characters are made.** H12 (1.6.7)
+  taught `toml_int` to read a leading `-` and H13 clamped the one caller it
+  audited. `hp` and `energy` flow from `classes.cyml` into `SS_MAXHP` /
+  `SS_MAXENERGY` unbounded, while `player_auth_load` clamps those same two
+  fields — the invariant was asserted where a record is *read* and absent where
+  a character is *made*. An authored `hp = -5` produced a player dead on
+  arrival. `ac` and `hit` stay unclamped: a negative AC is meaningful in THAC0
+  and is precisely what H12 existed to enable.
+- **The killing blow printed no condition line and no prompt.** It returned
+  straight after `mob_died`, so the one round a player most wants to read ended
+  with no HP, no energy and no `>`. Every other exit from `combat_round` emits
+  both, as do `mob_swing` and `ability_tail`.
+- **`put X in <carried bag>` was a one-way trip, and then a data loss.**
+  `cmd_put` accepts a carried container; `cmd_get`'s `from` branch searched only
+  the room, so anything put into a bag in your own hands could never be taken
+  out — despite `cmd_put`'s own comment calling itself "the exact inverse of
+  `get X from Y`". Worse, `_build_record` walked only the top-level `SS_INV`
+  chain, so the contents were never written and `session_drop_inv` then
+  `obj_free`'d them recursively. Put your scrip in a sack, log out, gone.
+
+  The lookup is symmetric now, and the save descends one level. Contents are
+  **flattened** into the same comma-separated `inv` list rather than nested,
+  which keeps the frozen v1 field byte-compatible (ADR 0007 §3): the items come
+  back loose in your hands. Losing the arrangement beats losing the items;
+  representing nesting needs a schema change, i.e. 2.0.
+
+### Changed
+
+- **A false justification removed from the H14 comment.** It claimed moving the
+  drift sample "would double-count, because a tick that overruns already
+  surfaces as the *next* tick's lateness". That is false, and it contradicted
+  the H16 block 500 lines above it in the same file, which is right: the
+  schedule is absolute, so a sub-interval overrun is absorbed by the next
+  `epoll_wait` timeout and `@stats` reports 0 ms drift straight through it —
+  which is exactly how `save_sweep` spent 332 ms in a tick for eight releases
+  unseen. The conclusion stands (do not move the sample; the field is frozen),
+  but the reasoning did not, and a false justification is worse than none.
+
+### Testing
+
+- 636 → **669 assertions**; new `tail-guards` group.
+- 16 mutations, all discriminating. **Seven needed new tests first** — no
+  coverage existed for `render_who`, the killing blow, `get`-from-carried, the
+  save-side descent, the idle-reap budget, or either key wipe.
+- Two harness bugs found on the way, both worth writing down because both
+  silently truncated the run rather than failing it: a test session built by
+  `_tx_sess` has `SS_FD = 0`, so `session_free` **closed stdin** and the suite
+  simply stopped printing; and the same session has `SS_TS = 0`, so
+  `telnet_state_free` dereferenced null. Anything handed to `drop_session` now
+  goes through `_freeable_sess`.
+
 ## [1.6.10] — 2026-07-29
 
 **Sweep batch E — what the re-run turned up.** The 1.6.9 re-run put eight

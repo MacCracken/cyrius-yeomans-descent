@@ -134,7 +134,23 @@ fn room_at(i): i64 { return g_rooms + i * RM_SIZE; }
 fn world_room_count(): i64 { return g_room_count; }
 # Index new players spawn (and the dead respawn) into: the header's `start`
 # id when it resolved, else room 0 — also the fallback for a stale save.
-fn world_start_room(): i64 { return g_start_room; }
+# F2 (1.6.11) — -1 ("unplaced") when there are no rooms, never 0.
+#
+# This returned g_start_room unconditionally, and g_start_room is 0 both by
+# default and after H9 zeroes it on a rejected load. So on a zone-less server it
+# reported "room 0" of a zero-room world — a valid-LOOKING index into a null
+# table, which is the most dangerous kind. Every caller that stores it into
+# SS_ROOM then propagates the lie, and every downstream `room >= 0` guard
+# (session_show_room, render_who, _build_record) reads it as placed.
+#
+# -1 is already the codebase's word for unplaced: session_new uses it, and
+# session_enter_world / session_resume_world both early-return when there are no
+# rooms, so nothing regresses. This just stops the accessor from inventing a
+# room when the world has none.
+fn world_start_room(): i64 {
+    if (g_room_count == 0) { return 0 - 1; }
+    return g_start_room;
+}
 
 # Inline id bytes of `r` — not NUL-terminated; saves record the id, not
 # the index, so re-authoring a zone cannot teleport a returning player.

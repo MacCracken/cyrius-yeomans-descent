@@ -300,6 +300,12 @@ fn mobs_forget_session(s): i64 {
 # pointer is the H1 / M12-C use-after-free shape. Head bias is acceptable here
 # in a way it would not be for saves — a serviced session's remainder shrinks
 # every pass, so the head drains and moves on rather than staying eligible.
+# G1 (1.6.12) — lines dispatched across ONE event-loop pass, all sessions
+# together. Sized like DRAIN_LINES_MAX below: 16 x the costliest line an
+# attacker can queue (~8.1 ms for a wrong-passphrase verify) is the worst case,
+# and unlike the drain this budget is spent BEFORE the tick check, so it is the
+# one that decides whether a tick can be swallowed whole.
+enum EventBudget { EVENT_LINES_MAX = 16; }
 enum DrainConst {
     # 16 x ~1.08 ms (the costliest unauthenticated line, a keypair derivation)
     # = ~17 ms, about a third of the ADR 0001 50 ms p99 drift budget, and that
@@ -642,18 +648,43 @@ fn drop_session(epfd, s): i64 {
 # Called once per tick. Captures SS_NEXT before dropping, since
 # drop_session unlinks the node mid-walk. A best-effort goodbye line is
 # flushed before teardown (slowloris defense, ADR 0002 wire model).
+# F7 (1.6.11) — meter the idle reap, because every reap is a signature.
+#
+# drop_session's first act is an unconditional player_save for any authed
+# session, and H16 measured that at 1.30 ms with 89% of it in ed25519_sign. H16
+# then capped save_sweep at SAVE_BATCH_MAX = 4 per tick precisely because 256 of
+# them in one pass was 332 ms — 664% of the ADR 0001 budget.
+#
+# sweep_idle could do exactly that number of saves in exactly that one pass and
+# nothing bounded it. It runs from tick_step immediately after advance_tick, so
+# it is inside the same tick spending the same budget: a second, unmetered
+# signing site that the H16 work did not look at. No attacker needed — a server
+# restart puts everyone on the same idle deadline, so they time out together.
+#
+# Same budget shape and the same non-starvation argument H16 wrote down: a
+# session that misses a reap is strictly more overdue next tick, and its
+# deadline has already passed, so a few seconds of extra grace costs nothing.
+enum IdleReapConst { IDLE_REAP_MAX = 4; }
+# Disconnect up to IDLE_REAP_MAX sessions that have been silent past the timeout,
+# and return how many were reaped. Called once per tick from tick_step. See the
+# block above for why the cap is not optional.
 fn sweep_idle(epfd, now_ms): i64 {
+    var budget = IDLE_REAP_MAX;
+    var reaped = 0;
     var s = g_session_head;
     while (s != 0) {
+        if (budget == 0) { return reaped; }
         var nxt = load64(s + SS_NEXT);
         if (session_is_idle(s, now_ms, g_idle_timeout_ms) == 1) {
             session_appendtx_cstr(s, "\r\nIdle timeout — disconnecting.\r\n");
             session_drain(s);
             drop_session(epfd, s);
+            budget = budget - 1;
+            reaped = reaped + 1;
         }
         s = nxt;
     }
-    return 0;
+    return reaped;
 }
 
 # === H14 (1.6.8) — the tick schedule reads a clock from before the tick. ===
@@ -669,9 +700,22 @@ fn sweep_idle(epfd, now_ms): i64 {
 # `record_tick_drift(now - next_tick)` on a PRE-work sample is scheduling
 # lateness, which is what the ADR 0001 budget is about and what `@stats` prints.
 # Folding the tick's own execution time into it would make the metric worse and
-# change a frozen `@stats` field (ADR 0007 §41) — and it would double-count,
-# because a tick that overruns already surfaces as the *next* tick's lateness.
+# change a frozen `@stats` field (ADR 0007 §41).
 # So: a second sample, used only for the reschedule. The first one stays.
+#
+# F8 (1.6.11) — this used to add "and it would double-count, because a tick that
+# overruns already surfaces as the *next* tick's lateness". **That is false**,
+# and it contradicted the H16 block 500 lines above in this same file, which
+# says the opposite and is right: the schedule is absolute, so a sub-interval
+# overrun is absorbed by the next epoll_wait timeout and `@stats` reports 0 ms
+# drift straight through it. Any overrun shorter than one full interval is
+# invisible to the drift metric *by construction* — which is exactly how
+# save_sweep spent 332 ms in a tick for eight releases without being seen.
+#
+# The conclusion survives — do not move this sample; scheduling lateness is the
+# right definition and the field is frozen — but the reasoning did not, and a
+# false justification is worse than none. Measuring tick-BODY cost needs its own
+# counter, which is a new `@stats` field and therefore 2.0 (M14).
 #
 # Split out of the loops rather than patched in place because the loop body sits
 # behind a socket and a signalfd and is unreachable from any test harness — and
@@ -814,14 +858,29 @@ fn render_who(s): i64 {
     var n = 0;
     var p = g_session_head;
     while (p != 0) {
+        # F1 (1.6.11) — bound the index at BOTH ends before room_at.
+        #
+        # This tested only `room >= 0` and then dereferenced. `room_at` is
+        # documented "no bounds check — callers hold valid indices", so the
+        # guard has to be the caller's, and half a guard is not one. cmd_who
+        # three hundred lines below has always checked both ends; this is the
+        # `@who` admin verb and never did.
+        #
+        # Safe today only by accident of an invariant held elsewhere (SS_ROOM is
+        # -1 or valid, never stale-and-positive). That is exactly the kind of
+        # accident session_room_ok was introduced for in 1.6.9, and exactly what
+        # made `examine` a remote crash when the accident stopped holding.
         var room = load64(p + SS_ROOM);
         if (room >= 0) {
-            session_appendtx_cstr(s, "  ");
-            session_appendtx_prose(s, load64(p + SS_NAME_BUF), load64(p + SS_NAME_LEN));   # M10-C name
-            session_appendtx_cstr(s, " — ");
-            session_appendtx(s, room_title_ptr(room_at(room)), room_title_len(room_at(room)));
-            session_appendtx_cstr(s, "\r\n");
-            n = n + 1;
+            if (room < world_room_count()) {
+                session_appendtx_cstr(s, "  ");
+                session_appendtx_prose(s, load64(p + SS_NAME_BUF), load64(p + SS_NAME_LEN));   # M10-C name
+                session_appendtx_cstr(s, " — ");
+                var r = room_at(room);
+                session_appendtx(s, room_title_ptr(r), room_title_len(r));
+                session_appendtx_cstr(s, "\r\n");
+                n = n + 1;
+            }
         }
         p = load64(p + SS_NEXT);
     }
@@ -1151,13 +1210,17 @@ fn handle_signal(signal_fd): i64 {
 # === Per-session event dispatcher. ===
 #
 # Returns 1 to keep the session, 0 to drop it.
-fn dispatch_session(epfd, s, events, now_ms): i64 {
+# G1 (1.6.12) — the budgeted form. `dispatch_session` keeps its old signature
+# and spends a full slice; the event loops use this one and share a budget
+# across the whole batch.
+fn dispatch_session_max(epfd, s, events, now_ms, maxlines, out_fired): i64 {
     # EPOLLHUP (0x10) + EPOLLERR (0x8) both warrant a drop, but only
     # after we drain any in-flight read so the rx-side echo path runs
     # at least once. EPOLLIN still fires alongside HUP on most kernels.
     var alive = 1;
+    store64(out_fired, 0);
     if ((events & EPOLLIN) != 0) {
-        alive = session_on_readable(s, now_ms);
+        alive = session_on_readable_max(s, now_ms, maxlines, out_fired);
     }
     # H19 (1.6.9) — deliver to everyone this command touched, NOW.
     #
@@ -1184,6 +1247,33 @@ fn dispatch_session(epfd, s, events, now_ms): i64 {
     if (load64(s + SS_QUIT) == 1) { return 0; }
     if ((events & 0x18) != 0) { return 0; }   # HUP | ERR
     return 1;
+}
+
+# Service ONE session out of an event batch, charging a budget shared by the
+# whole pass. Returns the budget that remains; writes the keep/drop decision to
+# `out_keep`.
+#
+# G1 (1.6.12) — extracted so the two loops cannot disagree. ADR 0003 has an
+# epoll loop and an agnos poll loop, and the finding that produced this fix
+# noted they had already diverged: the epoll side at least had MAX_EPOLL_EVENTS
+# bounding the number of events, while the agnos side swept EVERY session on
+# every ~20 ms pass with no analog at all (~16.5 s per pass at MAX_SESSIONS).
+# One implementation, two callers, and it is reachable from a test — the loops
+# themselves sit behind a socket and a signalfd and are not.
+fn event_batch_step(epfd, s, events, now_ms, budget, out_keep): i64 {
+    var take = budget;
+    if (take > RX_MAX_LINES) { take = RX_MAX_LINES; }
+    if (take < 0) { take = 0; }
+    var fired[8];
+    store64(out_keep, dispatch_session_max(epfd, s, events, now_ms, take, &fired));
+    return budget - load64(&fired);
+}
+
+# The unbudgeted form: one session, a full slice. Kept for callers that are not
+# walking a list.
+fn dispatch_session(epfd, s, events, now_ms): i64 {
+    var fired[8];
+    return dispatch_session_max(epfd, s, events, now_ms, RX_MAX_LINES, &fired);
 }
 
 # Apply the YD_IDLE_MS env override to g_idle_timeout_ms, if set to a
@@ -1330,6 +1420,30 @@ fn cmd_serve(port): i64 {
         if (timeout_ms < 0) { timeout_ms = 0; }
         var n = sys_epoll_wait(epfd, events_buf, MAX_EPOLL_EVENTS, timeout_ms);
         if (n < 0) { continue; }   # EINTR-benign
+        # G1 (1.6.12) — ONE budget for the whole batch.
+        #
+        # This loop drains up to MAX_EPOLL_EVENTS = 64 session events, each of
+        # which was allowed RX_MAX_LINES = 8 dispatches. RX_MAX_LINES is a
+        # PER-SESSION cap and this walks 64 sessions, so the batch had no bound
+        # at all — which is verbatim the defect E2 (1.6.10) diagnosed and fixed
+        # for drain_pending_rx, in words that could be pasted here unchanged.
+        #
+        # Measured on this tree: one event of 8 wrong-passphrase lines is 64 ms
+        # of CPU for 104 bytes of input, and a full batch of 64 such events is
+        # **4.12 s with no tick-deadline check in between** — 8240% of the ADR
+        # 0001 budget and 164% of the entire tick interval, so a whole combat
+        # tick is skipped. The unauthenticated creation variant needs no account
+        # and costs 609 ms per batch.
+        #
+        # Three passes looked straight at this and each capped a neighbour: H5
+        # (1.6.2) capped ONE session per event, E1/E2 (1.6.10) capped the
+        # tick-side drain, F7 (1.6.11) capped the idle reap. Nothing capped the
+        # batch — the path that runs first and most often.
+        #
+        # Nothing is dropped by stopping early: epoll is level-triggered, so an
+        # unserviced socket re-fires immediately, and drain_pending_rx already
+        # exists to grind retained remainders down at its own metered rate.
+        var budget = EVENT_LINES_MAX;
         var i = 0;
         while (i < n) {
             var ev_off = i * EPOLL_EVENT_SIZE;
@@ -1342,8 +1456,9 @@ fn cmd_serve(port): i64 {
                 stop = handle_signal(sigfd);
             }
             if (data > TAG_SIGNAL) {
-                var keep = dispatch_session(epfd, data, ev_mask, clock_now_ms());
-                if (keep == 0) { drop_session(epfd, data); }
+                var keep[8];
+                budget = event_batch_step(epfd, data, ev_mask, clock_now_ms(), budget, &keep);
+                if (load64(&keep) == 0) { drop_session(epfd, data); }
             }
             i = i + 1;
         }
@@ -1373,11 +1488,17 @@ fn cmd_serve(port): i64 {
         handle_accept(0, lfd, clock_now_ms());
         # Non-blocking recv sweep over the active-session list. drop_session
         # unlinks the current node, so capture SS_NEXT before dispatch.
+        # G1 (1.6.12) — the agnos sweep gets the same budget, and needed it more:
+        # it walks EVERY session on every ~20 ms pass with no MAX_EPOLL_EVENTS
+        # analog at all, so at MAX_SESSIONS it was 256 x 64 ms = ~16.5 s per
+        # pass. ADR 0003's two loops had diverged here; this is the divergence.
+        var budget = EVENT_LINES_MAX;
         var s = g_session_head;
         while (s != 0) {
             var nxt = load64(s + SS_NEXT);
-            var keep = dispatch_session(0, s, EPOLLIN, clock_now_ms());
-            if (keep == 0) { drop_session(0, s); }
+            var keep[8];
+            budget = event_batch_step(0, s, EPOLLIN, clock_now_ms(), budget, &keep);
+            if (load64(&keep) == 0) { drop_session(0, s); }
             s = nxt;
         }
         var now = clock_now_ms();

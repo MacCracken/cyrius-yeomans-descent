@@ -55,6 +55,8 @@ MUD rather than a well-built room-crawler.
 | **1.6.8** | Sweep batch C — resource & timing hygiene | ✅ 2026-07-28 |
 | **1.6.9** | Sweep batch D — coverage + docs; re-run sweep reopened the line | ✅ 2026-07-29 |
 | **1.6.10** | Sweep batch E — the re-run's critical + highs | ✅ 2026-07-29 |
+| **1.6.11** | Sweep tail — the re-run's lows, plus a corrected record | ✅ 2026-07-29 |
+| **1.6.12** | Re-run #2 — the unmetered-work CLASS, both event loops + `passwd` | ✅ 2026-07-29 |
 | **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
 | **2.1.0** | M17 — equipment slots + item modifiers · M18 — operator identity + control channel | planned |
 | **2.2.0** | M19 — threat, aggression, resistance · M20 — currency and shops | planned |
@@ -83,9 +85,9 @@ embarrassing the release.
 
 **1.6.5 shipped** — the two flagged as worth pulling forward: four content loaders that published global state before validating it (a rejected file left a live half-world while telling the operator the load had failed), and `player_save` failures discarded at four of five call sites, including the `passwd` commit that claimed success while the record kept the old key. **431 assertions.**
 
-**Batches A–E are shipped (1.6.6–1.6.10).** The 1.6.9 re-run reopened the line — it found a remote crash the first pass missed — and batch E closed its critical, all four highs and both meaningful mediums. **What is left is 1.6.11 (the low/nit tail) and one more re-run; 2.0 does not start until that comes back clean.**
+**Batches A–E plus two tails are shipped (1.6.6–1.6.12).** Two re-run sweeps have each found serious defects the previous pass missed — a remote crash at 1.6.9, an unbounded event batch at 1.6.12. **The line closes when a re-run comes back with no critical or high findings, and that has not happened yet.**
 
-**Next is 1.6.11** — the low/nit tail from the re-run, then re-run the sweep once more. **Then 2.0.0**, starting with **M14 — ADR 0008 + save schema v2**, the gate everything else routes through. Read the critical path above first: saves are signed with a key derived from the player's passphrase, which the server never holds, so **migration is lazy-at-login and additive only**. Pickup pointer in [`state.md`](state.md).
+**Next is another re-run** — the gate. Everything re-run #2 produced is closed; what remains is a pass that comes back clean. **Then 2.0.0**, starting with **M14 — ADR 0008 + save schema v2**, the gate everything else routes through. Read the critical path above first: saves are signed with a key derived from the player's passphrase, which the server never holds, so **migration is lazy-at-login and additive only**. Pickup pointer in [`state.md`](state.md).
 
 ---
 
@@ -255,7 +257,8 @@ teeth are closed — see the 1.6.10 CHANGELOG entry.
   attempts — which 1.6.10 does on both the login and creation paths — caps total
   exposure to a small multiple per connection regardless, which is why this is
   no longer urgent. The descent-side half (`toml_parse`/`str_new` per attempt)
-  is fixable here and is filed for **1.6.11**.
+  is fixable here and remains open — bounding the attempts (1.6.10, both paths)
+  caps total exposure regardless, which is why it is no longer urgent.
 - The low/nit tail: `session_appendtx_tok` echoing raw typed bytes, class `hp` /
   `energy` unclamped after the 1.6.7 sign change, the killing blow skipping the
   condition line, `qual_single`'s comment on bare `all`, `session_free` not
@@ -273,12 +276,76 @@ high findings**. The 1.6.9 re-run is the reason that bar exists: the first sweep
 declared itself done while a remote crash sat on a first-class command verb, so a
 sweep that has not been re-run against the repaired tree has proved nothing.
 
-### 1.6.11 — the tail, then re-run
+### 1.6.11 — the tail ✅ shipped
 
-The low/nit findings above, the descent-side half of the failed-login allocation,
-and the accept-path predicates. Then re-run the sweep. If it comes back clean the
-line closes and 2.0 / M14 opens; if it does not, that is the answer and the tail
-gets another batch.
+Everything the 1.6.9 re-run found below the batch-E line, plus one correction to
+the record. See the 1.6.11 CHANGELOG entry.
+
+- **`render_who` was not a false positive.** 1.6.9 recorded it as one. The
+  reviewer checked `cmd_who` — a different function three hundred lines away
+  that has always bounded both ends — and published the refutation in the
+  CHANGELOG, `state.md` and here. `render_who` (the `@who` verb) tested only
+  `room >= 0` before dereferencing. Fixed, and the original claim is corrected
+  in place rather than deleted.
+- **`world_start_room()` named room 0 in a zero-room world** — now -1.
+- **Three loaders left a stale table published** on their pre-alloc error
+  returns; only `world_load_rooms` was safe. Zeroing hoisted to entry.
+- **A parser token could claim more bytes than were stored** (latent, held back
+  only by `LINE_CAP == NORM_CAP` — now recorded as the invariant it is).
+- **Player-typed tokens bypassed the M10 sanitizer**, putting a lone IAC on the
+  wire from any not-found reply.
+- **Secret keys went to the freelist unwiped** — both the live `SS_IDENT` block
+  and the `passwd` candidate, the latter contradicting an explicit 1.6.4 claim.
+- **The idle reap was a second unmetered signing site** in the same tick H16
+  metered.
+- **Class/mob stats unclamped on the creation path** — the 1.6.7 sign sweep,
+  finished.
+- **The killing blow printed no condition line and no prompt.**
+- **`put X in <carried bag>` was one-way, then silent data loss** on disconnect.
+- **A false justification** removed from the H14 comment.
+
+### 1.6.12 — the class, not the instance ✅ shipped
+
+The second re-run found a **critical** and a **high**, both the same defect this
+line had already fixed three times on neighbouring paths. See the 1.6.12
+CHANGELOG entry for the table; the short form is:
+
+> A per-item cap is not a bound on a loop that walks many items.
+
+H5 (1.6.2) capped one session per readable event. E1/E2 (1.6.10) capped the
+tick-side drain. F7 (1.6.11) capped the idle reap. **Nothing ever capped the
+event batch** — the path that runs first and most often — and nothing capped
+`passwd`, which is structurally identical to the two login paths that *were*
+capped. Each pass fixed a neighbour of the open hole.
+
+- **Event batch, both loops** *(critical)* — 4.12 s per batch with no tick check
+  in between, and the agnos loop had no per-pass cap of any kind (~16.5 s at
+  MAX_SESSIONS). One extracted `event_batch_step` now serves both, so ADR 0003's
+  loops cannot diverge again. Measured 559 ms → 17 ms on the unauthenticated
+  variant.
+- **`passwd` re-key** *(high)* — unbounded Ed25519 derivations per attacker
+  line; 1000 lines = 1103 ms with the counter still at zero.
+- **Attacker-paced audit events** aggregated to one per session, cutting ~755
+  kB/s of unreclaimable arena by 5×. The flood signal is preserved; the
+  authenticated `passwd.fail` keeps per-attempt granularity.
+
+**Method note, and the reason this section exists:** the fix for a repeated
+defect is to enumerate the class. `grep -n ident_derive src/` lists every
+expensive-line path; "every loop that dispatches lines" lists every place a cap
+must be aggregate. Both questions were always answerable in one command, and
+three releases answered neither.
+
+### The gate — still open
+
+Two re-runs, two sets of serious findings the previous pass missed. **The 1.x
+line closes when a re-run comes back with no critical or high findings**, and
+that has not happened. The evidence so far is that each pass finds real defects,
+so the bar stays.
+
+Carried and not urgent: the libro-side ~1.4 kB/event arena cost (upstream 2.8.5),
+an inventory cap (`_build_record` refuses every future save once the record
+overflows), and the low/nit tail from re-run #2 (unclamped str/dex/con/tec on the
+creation path, dice profile bounds, `epoll_event_new`'s 16 B per accept).
 
 ---
 

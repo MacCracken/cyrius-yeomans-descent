@@ -2739,6 +2739,69 @@ fn test_hex_identity(): i64 {
     var s2 = _mk_sess("HexHero", 7);
     assert_eq(player_auth_load(s2, "hexpassphrase", 13), 1,
               "and the record still verifies under its own signature");
+    # --- F7: the idle reap is metered. drop_session's first act is a full
+    # player_save (1.30 ms, 89% ed25519_sign), and H16 capped save_sweep at 4
+    # per tick for exactly that reason — sweep_idle could do 256 of them in one
+    # pass, in the same tick, and nothing bounded it. A restart puts everyone on
+    # the same deadline, so no attacker is needed.
+    var rh = g_session_head;
+    g_session_head = 0;
+    var n = IDLE_REAP_MAX + 3;
+    var j = 0;
+    while (j < n) {
+        var idl = _freeable_sess();
+        store64(idl + SS_LAST_MS, 0);          # long past the idle deadline
+        store64(idl + SS_NEXT, g_session_head);
+        g_session_head = idl;
+        j = j + 1;
+    }
+    assert_eq(_sess_list_len(), n, "all of them are on the list");
+    assert_eq(sweep_idle(0, g_idle_timeout_ms + 1000000), IDLE_REAP_MAX,
+              "one tick reaps at most IDLE_REAP_MAX sessions");
+    assert_eq(_sess_list_len(), n - IDLE_REAP_MAX, "and the rest are still connected");
+    # Not a stall — successive ticks drain the backlog.
+    var guard = 0;
+    while (_sess_list_len() > 0) {
+        sweep_idle(0, g_idle_timeout_ms + 1000000);
+        guard = guard + 1;
+        if (guard > 100) { g_session_head = 0; }
+    }
+    assert(guard <= 100, "successive ticks reap the whole backlog");
+    g_session_head = rh;
+
+    # --- F5: secret-key material is WIPED before it goes back to the freelist.
+    # lib/freelist.cyr hands a freed block to the next fl_alloc of that size
+    # class without zeroing it, and SS_IDENT holds the live Ed25519 secret key
+    # for the whole session. Reading the block after the free is exactly the
+    # exposure under test: it is freed-but-mapped, which is precisely what the
+    # next allocation would receive.
+    # _freeable_sess, not _tx_sess: session_free closes SS_FD (0 from a memset
+    # is stdin) and telnet_state_frees SS_TS (0 dereferences null). Both bit.
+    var ks2 = _freeable_sess();
+    var kblk = sess_ident(ks2);
+    var kcand = sess_cand(ks2);          # the mid-`passwd` candidate, also secret
+    var b = 0;
+    while (b < IDENT_LEN) { store8(kblk + b, 0xAA); b = b + 1; }   # "secret" bytes
+    b = 0;
+    while (b < CAND_LEN) { store8(kcand + b, 0xBB); b = b + 1; }
+    session_free(ks2);
+    var residue = 0;
+    b = 0;
+    while (b < IDENT_LEN) {
+        if ((load8(kblk + b) & 0xFF) != 0) { residue = residue + 1; }
+        b = b + 1;
+    }
+    assert_eq(residue, 0, "the live ident block is zeroed before it returns to the freelist");
+    # The 1.6.4 entry claimed the candidate was "wiped and freed on commit, on
+    # both rewinds, and in session_free". Three of those four were true.
+    var cres = 0;
+    b = 0;
+    while (b < CAND_LEN) {
+        if ((load8(kcand + b) & 0xFF) != 0) { cres = cres + 1; }
+        b = b + 1;
+    }
+    assert_eq(cres, 0, "and so is the passwd candidate, as 1.6.4 always claimed");
+
     return 0;
 }
 
@@ -2843,6 +2906,20 @@ fn _armed_rx_sess(nlines): i64 {
         line = line + 1;
     }
     store64(s + SS_RX_LEN, o);
+    return s;
+}
+
+# A session with every buffer session_free will try to release. Anything that
+# reaches drop_session MUST be built this way: session_free calls
+# telnet_state_free(SS_TS) unconditionally, and a 0 there dereferences null —
+# and sock_close(SS_FD) on the 0 a memset leaves would close fd 0.
+fn _freeable_sess(): i64 {
+    var s = _tx_sess();
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_TS, telnet_state_new());
+    store64(s + SS_RX_BUF, fl_alloc(RX_CAP));
+    store64(s + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(s + SS_NAME_BUF, fl_alloc(NAME_CAP));
     return s;
 }
 
@@ -3255,6 +3332,416 @@ fn test_stun_decay(): i64 {
     return 0;
 }
 
+# === 1.6.11 — the tail the re-run left. ===
+fn test_tail_guards(): i64 {
+    test_group("tail-guards");
+
+    # --- F2: world_start_room must not name a room in a zero-room world. It
+    # returned g_start_room unconditionally, and that is 0 both by default and
+    # after H9 zeroes it on a rejected load — a valid-LOOKING index into a null
+    # table, which every `room >= 0` guard downstream then reads as "placed".
+    var saved_count = g_room_count;
+    var saved_rooms = g_rooms;
+    var saved_start = g_start_room;
+    assert(world_start_room() >= 0, "a loaded world has a real start room");
+    g_room_count = 0;
+    g_rooms = 0;
+    g_start_room = 0;
+    assert_eq(world_start_room(), 0 - 1, "a zero-room world reports UNPLACED, not room 0");
+    g_room_count = saved_count;
+    g_rooms = saved_rooms;
+    g_start_room = saved_start;
+
+    # --- F3: a token's recorded length must equal the bytes actually stored.
+    # pa_emit_byte stores nothing once the norm buffer is full and returns 0;
+    # the count advanced anyway, so tok_len outran the buffer and every consumer
+    # — tok_eq, qual_parse, kw_matches, session_appendtx_tok — read past it.
+    var pa = parser_new();
+    var big = alloc(LINE_CAP + 64);
+    var i = 0;
+    while (i < LINE_CAP) { store8(big + i, 97 + (i % 26)); i = i + 1; }
+    # Drive the parser PAST NORM_CAP directly. A normal line cannot do this —
+    # LINE_CAP == NORM_CAP, which is the load-bearing invariant that keeps the
+    # defect latent — so the test hands parser_parse a longer buffer than any
+    # socket line could produce. That is the parser's own robustness contract,
+    # and it is the only way to reach the saturating branch.
+    var huge = alloc(NORM_CAP + 512);
+    i = 0;
+    while (i < NORM_CAP + 400) { store8(huge + i, 97 + (i % 26)); i = i + 1; }
+    parser_parse(pa, huge, NORM_CAP + 400);
+    var tn = parser_count(pa);
+    var over = 0;
+    var total = 0;
+    var k = 0;
+    while (k < tn) {
+        if (tok_len(pa, k) > NORM_CAP) { over = over + 1; }
+        total = total + tok_len(pa, k);
+        k = k + 1;
+    }
+    assert_eq(over, 0, "no single token claims more bytes than the norm buffer holds");
+    assert(total <= NORM_CAP, "and the tokens together never claim more than was stored");
+
+    # --- F4: a parser token is player-typed, so it goes through the sanitizer.
+    # telnet_feed decodes `IAC IAC` to a literal 0xFF data byte, which survives
+    # into the token; every not-found reply echoed it bare.
+    var s = _tx_sess();
+    store64(s + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    var raw = alloc(16);
+    store8(raw + 0, 122);            # 'z'
+    store8(raw + 1, 0 - 1);          # 0xFF — a lone IAC if echoed raw
+    store8(raw + 2, 122);            # 'z'
+    parser_parse(pa, raw, 3);
+    _tx_reset(s);
+    session_appendtx_tok(s, pa, 0);
+    assert_eq(_lone_iac_count(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN)), 0,
+              "an echoed token never puts a lone IAC on the wire");
+
+    # --- F6: a rejected load must unpublish, including on the pre-alloc paths
+    # (missing file, empty, over cap) that sit above the old zeroing line.
+    var saved_objs = g_obj_tpl_count;
+    var saved_mobs = g_mob_tpl_count;
+    assert(g_obj_tpl_count > 0, "objects are loaded to begin with");
+    assert(world_load_objs("tests/fixtures/nosuchfile.cyml") < 0, "a missing objs file is rejected");
+    assert_eq(g_obj_tpl_count, 0, "and leaves NO table published");
+    assert(world_load_mobs("tests/fixtures/nosuchfile.cyml") < 0, "a missing mobs file is rejected");
+    assert_eq(g_mob_tpl_count, 0, "and leaves no mob table published");
+    assert(world_load_objs(DP_OBJS) > 0, "the real object table reloads");
+    assert(world_load_mobs(DP_MOBS) >= 0, "and the real mob table");
+    assert_eq(g_obj_tpl_count, saved_objs, "back to the authored object count");
+    assert_eq(g_mob_tpl_count, saved_mobs, "and the authored mob count");
+
+    # --- F1: render_who (`@who`) bounds the room index at BOTH ends. It tested
+    # only `room >= 0` and then dereferenced — cmd_who three hundred lines below
+    # has always checked both. Drive it with a session parked past the end of
+    # the room table: a half-guarded render_who walks off g_rooms and dies.
+    var saved_head = g_session_head;
+    var w = _tx_sess();
+    store64(w + SS_NAME_BUF, fl_alloc(NAME_CAP));
+    memcpy(load64(w + SS_NAME_BUF), "Ghosty", 6);
+    store64(w + SS_NAME_LEN, 6);
+    store64(w + SS_ROOM, g_room_count + 500);       # positive, and nonexistent
+    store64(w + SS_NEXT, 0);
+    g_session_head = w;
+    var viewer = _tx_sess();
+    _tx_reset(viewer);
+    render_who(viewer);
+    assert(load64(viewer + SS_TX_LEN) > 0, "render_who answers instead of dereferencing a bad index");
+    assert_eq(_contains(load64(viewer + SS_TX_BUF), load64(viewer + SS_TX_LEN), "no one in-world"), 1,
+              "and an out-of-range session is not counted as in-world");
+    g_session_head = saved_head;
+
+    # --- F9: class stats are clamped where a character is MADE, matching the
+    # bound player_auth_load already applies where a record is READ.
+    if (g_class_count > 0) {
+        var c = cl_at(0);
+        var saved_hp = load64(c + CL_HP);
+        var saved_en = load64(c + CL_ENERGY);
+        store64(c + CL_HP, 0 - 5);        # an authored `hp = -5`
+        store64(c + CL_ENERGY, 0 - 5);
+        var pc = _mk_sess("Clamped", 7);
+        apply_class(pc, 0);
+        assert(load64(pc + SS_MAXHP) >= 1, "a negative authored hp cannot make a dead-on-arrival player");
+        assert_eq(load64(pc + SS_HP), load64(pc + SS_MAXHP), "and hp starts at max");
+        assert(load64(pc + SS_MAXENERGY) >= 0, "energy is floored too");
+        store64(c + CL_HP, saved_hp);
+        store64(c + CL_ENERGY, saved_en);
+    }
+
+    # --- F10: the killing blow emits the same tail as every other exit from
+    # combat_round. It returned straight after mob_died, so the one round a
+    # player most wants to read ended with no HP line and no prompt.
+    if (g_mob_tpl_count > 0) {
+        if (g_room_count > 0) {
+            var ks = _mk_sess("Finisher", 8);
+            store64(ks + SS_ROOM, 0);
+            store64(ks + SS_PHASE, PHASE_CMD);
+            store64(ks + SS_FD, 0 - 1);
+            store64(ks + SS_HP, 500); store64(ks + SS_MAXHP, 500);
+            store64(ks + SS_NDICE, 20); store64(ks + SS_DSIZE, 20); store64(ks + SS_DMOD, 9000);
+            store64(ks + SS_HIT, 100);          # always hits, always kills
+            var km = mob_spawn(mt_at(0), 0);
+            mi_set_hp(km, 1);
+            store64(ks + SS_TARGET, km);
+            mi_set_target(km, ks);
+            var kh = g_session_head;
+            store64(ks + SS_NEXT, 0);
+            g_session_head = ks;
+            _tx_reset(ks);
+            combat_round(ks);
+            g_session_head = kh;
+            assert_eq(_contains(load64(ks + SS_TX_BUF), load64(ks + SS_TX_LEN), "collapses"), 1,
+                      "the mob died this round");
+            assert_eq(_contains(load64(ks + SS_TX_BUF), load64(ks + SS_TX_LEN), "[ hp "), 1,
+                      "and the killing blow still prints the condition line");
+            assert_eq(_contains(load64(ks + SS_TX_BUF), load64(ks + SS_TX_LEN), "> "), 1,
+                      "and the prompt");
+            store64(ks + SS_TARGET, 0);
+            _drain_ilist(room_at(0) + RM_OBJ_HEAD);   # the corpse it left
+        }
+    }
+
+    # --- F11: `get X from Y` finds a CARRIED container, matching cmd_put's own
+    # claim to be "the exact inverse of get X from Y". Put accepted a carried
+    # container and get only ever searched the room, so anything put into a bag
+    # in your own hands could never be taken out again.
+    if (g_obj_tpl_count >= 2) {
+        if (g_room_count > 0) {
+            var gs = _mk_sess("Fetcher", 7);
+            store64(gs + SS_ROOM, 0);
+            store64(gs + SS_PHASE, PHASE_CMD);
+            store64(gs + SS_FD, 0 - 1);
+            var bag = item_new(ot_at(1));
+            var gem = item_new(ot_at(0));
+            ilist_push(gs + SS_INV, bag);
+            ilist_push(bag + OI_CONTENTS, gem);      # as cmd_put would leave it
+            var gpa = parser_new();
+            var gcmd = alloc(160);
+            var gco = _str_into(gcmd, 0, "get ");
+            gco = _str_into(gcmd, gco, _kw1(oi_kw_ptr(gem), alloc(64)));
+            gco = _str_into(gcmd, gco, " from ");
+            gco = _str_into(gcmd, gco, _kw1(oi_kw_ptr(bag), alloc(64)));
+            _tx_reset(gs);
+            parser_parse(gpa, gcmd, gco);
+            cmd_get(gs, gpa);
+            assert_eq(_on_ilist(gs + SS_INV, gem), 1, "the item comes out of a carried container");
+            assert_eq(_on_ilist(bag + OI_CONTENTS, gem), 0, "and is no longer inside it");
+
+            # --- F11b: and it SURVIVES a disconnect. _build_record walked only
+            # the top-level SS_INV chain, so anything in a carried bag was never
+            # written — and session_drop_inv then obj_free'd it, recursing
+            # through OI_CONTENTS. Put your scrip in a sack, log out, gone.
+            ilist_remove(gs + SS_INV, gem);
+            ilist_push(bag + OI_CONTENTS, gem);       # back inside the bag
+            _path_for("Bagman", 6, g_persist_path);
+            syscall(87, g_persist_path);              # unlink any prior run
+            var bsalt = alloc(SALT_LEN);
+            var bq = 0;
+            while (bq < SALT_LEN) { store8(bsalt + bq, 31 + bq); bq = bq + 1; }
+            memcpy(load64(gs + SS_NAME_BUF), "Bagman", 6);
+            store64(gs + SS_NAME_LEN, 6);
+            var bblk = sess_ident(gs);
+            memcpy(bblk, bsalt, SALT_LEN);
+            ident_derive(bsalt, "bagpassphrase", 13, bblk + IDENT_SK, bblk + IDENT_PK);
+            store64(gs + SS_HP, 10); store64(gs + SS_MAXHP, 10);
+            store64(gs + SS_ROOM, 0 - 1);
+            store64(gs + SS_AUTHED, 1);
+            assert_eq(player_save(gs), 1, "the character saves with a full bag");
+
+            var back = _mk_sess("Bagman", 6);
+            assert_eq(player_auth_load(back, "bagpassphrase", 13), 1, "and loads again");
+            var restored = 0;
+            var ro = load64(back + SS_INV);
+            while (ro != 0) { restored = restored + 1; ro = oi_next(ro); }
+            assert_eq(restored, 2, "BOTH the bag and what was inside it come back");
+            _drain_ilist(back + SS_INV);
+            _drain_ilist(gs + SS_INV);
+        }
+    }
+
+    return 0;
+}
+
+# === 1.6.12 — bound the CLASS: every loop that dispatches lines has a budget. ===
+fn test_event_budget(): i64 {
+    test_group("event-budget");
+
+    # --- G1: one epoll pass spends EVENT_LINES_MAX lines across ALL sessions,
+    # not RX_MAX_LINES each. The batch drains up to MAX_EPOLL_EVENTS = 64 events
+    # and the tick-deadline check sits OUTSIDE that loop, so an unbudgeted batch
+    # ran to completion whatever it cost: measured 4.12 s from 6.6 kB of input,
+    # 164% of the entire tick interval, swallowing a whole combat tick.
+    #
+    # The budget is threaded, not global: dispatch_session_max reports what it
+    # spent so the caller can charge accurately. Drive that directly — the loop
+    # itself lives behind a socket and a signalfd.
+    var s = _armed_rx_sess(20);
+    var fired[8];
+    dispatch_session_max(0, s, EPOLLIN, 0, 3, &fired);
+    assert_eq(load64(&fired), 3, "a budget below RX_MAX_LINES is honoured exactly");
+
+    # And on event_batch_step itself, with a budget that is NOT a multiple of
+    # RX_MAX_LINES. EVENT_LINES_MAX is 2 x RX_MAX_LINES, so a loop test alone
+    # only ever exercises take == 8 and cannot tell a budgeted step from one
+    # that always takes a full slice. (It couldn't. Three mutations passed.)
+    var s3 = _armed_rx_sess(20);
+    var keep3[8];
+    var left3 = event_batch_step(0, s3, EPOLLIN, 0, 3, &keep3);
+    assert_eq(left3, 0, "a 3-line budget is spent exactly, not rounded up to a slice");
+    var s4 = _armed_rx_sess(20);
+    var left4 = event_batch_step(0, s4, EPOLLIN, 0, 5, &keep3);
+    assert_eq(left4, 0, "and a 5-line budget likewise");
+    var s5 = _armed_rx_sess(2);              # only 2 lines queued
+    var left5 = event_batch_step(0, s5, EPOLLIN, 0, RX_MAX_LINES, &keep3);
+    assert_eq(left5, RX_MAX_LINES - 2, "a session with less to do is charged only what it used");
+    dispatch_session_max(0, s, EPOLLIN, 0, 0, &fired);
+    assert_eq(load64(&fired), 0, "a spent budget dispatches nothing");
+    dispatch_session_max(0, s, EPOLLIN, 0, RX_MAX_LINES, &fired);
+    assert_eq(load64(&fired), RX_MAX_LINES, "and a full slice still fires RX_MAX_LINES");
+
+    # The batch arithmetic the loops implement: min(budget, RX_MAX_LINES) per
+    # session, budget decremented by what was actually spent, so N sessions can
+    # never cost N x RX_MAX_LINES.
+    # Drive event_batch_step — the function BOTH loops call — rather than
+    # reimplementing its arithmetic here. The first version of this test did
+    # reimplement it, and three mutations to the real code passed unnoticed
+    # because the test was only ever checking its own copy.
+    var budget = EVENT_LINES_MAX;
+    var served = 0;
+    var spent = 0;
+    var guard = 0;
+    while (budget > 0) {
+        if (guard > 1000) { budget = 0; continue; }
+        var s2 = _armed_rx_sess(20);
+        var keep[8];
+        var left = event_batch_step(0, s2, EPOLLIN, 0, budget, &keep);
+        spent = spent + (budget - left);
+        budget = left;
+        served = served + 1;
+        guard = guard + 1;
+    }
+    assert_eq(spent, EVENT_LINES_MAX, "a whole pass spends exactly the batch budget");
+    # Assert the SESSION count too, not just the budget delta. A step that
+    # charged a flat 1 per session would still make `spent` reach the budget —
+    # after servicing 16 sessions at a full slice each, i.e. the very thing the
+    # budget exists to prevent. This is the assertion that sees that.
+    assert_eq(served, EVENT_LINES_MAX / RX_MAX_LINES,
+              "and services exactly budget/slice sessions, not one per unit of budget");
+    assert(served < MAX_EPOLL_EVENTS,
+           "far short of MAX_EPOLL_EVENTS sessions each having had a full slice");
+    # The number that matters: unbudgeted, one pass was MAX_EPOLL_EVENTS x
+    # RX_MAX_LINES = 512 lines. Budgeted it is EVENT_LINES_MAX = 16 — a 32x
+    # reduction in the worst-case cost of a single event-loop pass. Asserted as
+    # "at least 8x" so tuning either constant does not turn this into a flake,
+    # with the exact ratio pinned separately.
+    assert(spent * 8 <= MAX_EPOLL_EVENTS * RX_MAX_LINES,
+           "a bounded pass costs at most an eighth of the unbounded one");
+    assert_eq((MAX_EPOLL_EVENTS * RX_MAX_LINES) / spent, 32,
+              "and on today's constants exactly a 32x reduction");
+
+    return 0;
+}
+
+# === G2 (1.6.12) — the `passwd` re-key is metered, like its two siblings. ===
+fn test_passwd_meter(): i64 {
+    test_group("passwd-meter");
+    persist_init();
+
+    # Third instance of one defect: 1.6.2 capped login, E3 (1.6.10) capped
+    # creation and called it "structurally identical" to login — and this path,
+    # structurally identical to both, was never looked at. Measured before the
+    # fix: 1000 attacker lines = 1103 ms of loop time, SS_FAILS still 0,
+    # SS_QUIT still 0, still cycling.
+    var s = _mk_sess("Rekeyer2", 8);
+    store64(s + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_AUTHED, 1);
+    store64(s + SS_PHASE, PHASE_CMD);
+    passwd_begin(s);
+    assert_eq(load64(s + SS_PHASE), PHASE_CHPASS_NEW, "passwd enters the re-key flow");
+
+    var i = 0;
+    while (i < MAX_LOGIN_FAILS - 1) {
+        _tx_reset(s);
+        chpass_on_new(s, "alphaphrase", 11);
+        assert_eq(load64(s + SS_PHASE), PHASE_CHPASS_CONFIRM, "the new passphrase is taken");
+        chpass_on_confirm(s, "bravophrase", 11);
+        assert_eq(load64(s + SS_FAILS), i + 1, "a mismatched confirm counts an attempt");
+        assert_eq(load64(s + SS_PHASE), PHASE_CHPASS_NEW, "and rewinds for another try");
+        i = i + 1;
+    }
+    _tx_reset(s);
+    chpass_on_new(s, "alphaphrase", 11);
+    chpass_on_confirm(s, "bravophrase", 11);
+    assert_eq(load64(s + SS_PHASE), PHASE_CMD, "the cap abandons the re-key");
+    assert_eq(load64(s + SS_FAILS), 0, "and clears the counter for the next invocation");
+    assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "UNCHANGED"), 1,
+              "telling the player their passphrase is untouched");
+    # An authenticated player is NOT disconnected — they can type `passwd` again.
+    # That still bounds the work per invocation, which is the point.
+    assert_eq(load64(s + SS_QUIT), 0, "a fumbling player is not thrown off the server");
+    assert_eq(load64(s + SS_IDENT_CAND), 0, "and the candidate key is released");
+
+    # --- G3: the attacker-paced audit events fire ONCE per session, at the cap,
+    # not once per attempt. Each audit_event costs 1640 bytes of bump arena that
+    # alloc() can never reclaim (most of it upstream in libro) plus ~360 bytes
+    # appended to a never-rotated data/audit.libro. Five per connection at the
+    # unauthenticated creation path measured ~755 kB/s of permanently-lost arena.
+    #
+    # Counted through the durable store, which is where the entries actually
+    # land — the streaming chain retains nothing by design (1.6.1), so its
+    # length is not the observable.
+    # The store is append-only across every run the machine has ever done, so it
+    # is megabytes. Size the buffer generously and REFUSE to assert if the read
+    # saturates it — a truncated read makes every length compare equal, which
+    # would turn this into a test that always passes. (It did, first time.)
+    var ACAP = 67108864;
+    var abuf = alloc(ACAP);
+    var before = file_read_all(DP_AUDIT, abuf, ACAP);
+    var cs = _mk_sess("Auditee", 7);
+    store64(cs + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(cs + SS_FD, 0 - 1);
+    store64(cs + SS_PHASE, PHASE_CONFIRMPASS);
+    var cblk = sess_ident(cs);
+    var csalt = alloc(SALT_LEN);
+    var cq = 0;
+    while (cq < SALT_LEN) { store8(csalt + cq, 5 + cq); cq = cq + 1; }
+    memcpy(cblk, csalt, SALT_LEN);
+    ident_derive(csalt, "auditphrase", 11, cblk + IDENT_SK, cblk + IDENT_PK);
+
+    var k = 0;
+    while (k < MAX_LOGIN_FAILS - 1) {
+        login_on_confirm(cs, "wrongphrase", 11);
+        k = k + 1;
+    }
+    var mid = file_read_all(DP_AUDIT, abuf, ACAP);
+    assert(before < ACAP, "the audit store fits the probe buffer");
+    assert_eq(mid, before, "four failed creation attempts write NO durable audit entries");
+    login_on_confirm(cs, "wrongphrase", 11);           # the fifth trips the cap
+    assert_eq(load64(cs + SS_QUIT), 1, "the cap fired");
+    var after = file_read_all(DP_AUDIT, abuf, ACAP);
+    if (after >= ACAP) {
+        assert(0, "audit store exceeded the probe buffer — this check cannot run");
+    } else {
+        assert(after > mid, "and the capped-out session writes one entry, so a flood is still visible");
+    }
+
+    # The SAME assertion on the returning-player path. Covering one of two
+    # symmetric paths is precisely the mistake this release exists to correct —
+    # 1.6.2 capped login and left creation, 1.6.10 capped creation and left
+    # `passwd`. Both audit paths, or neither.
+    _path_for("Auditee2", 8, g_persist_path);
+    syscall(87, g_persist_path);
+    var ls = _mk_sess("Auditee2", 8);
+    var lsalt = alloc(SALT_LEN);
+    cq = 0;
+    while (cq < SALT_LEN) { store8(lsalt + cq, 90 + cq); cq = cq + 1; }
+    var lblk2 = sess_ident(ls);
+    memcpy(lblk2, lsalt, SALT_LEN);
+    ident_derive(lsalt, "realphrase", 10, lblk2 + IDENT_SK, lblk2 + IDENT_PK);
+    store64(ls + SS_ROOM, 0 - 1);
+    store64(ls + SS_HP, 10); store64(ls + SS_MAXHP, 10);
+    store64(ls + SS_AUTHED, 1);
+    assert_eq(player_save(ls), 1, "a record to fail against");
+
+    var lp = _mk_sess("Auditee2", 8);
+    store64(lp + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(lp + SS_FD, 0 - 1);
+    var lbase = file_read_all(DP_AUDIT, abuf, ACAP);
+    k = 0;
+    while (k < MAX_LOGIN_FAILS - 1) {
+        login_on_pass(lp, "wrongphrase", 11);
+        k = k + 1;
+    }
+    assert_eq(file_read_all(DP_AUDIT, abuf, ACAP), lbase,
+              "four wrong passphrases write NO durable audit entries either");
+    login_on_pass(lp, "wrongphrase", 11);
+    assert_eq(load64(lp + SS_QUIT), 1, "the login cap fired");
+    assert(file_read_all(DP_AUDIT, abuf, ACAP) > lbase,
+           "and it writes exactly one entry at the cap");
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -3483,6 +3970,9 @@ fn main() {
     test_create_guards();
     test_object_maxexist();
     test_stun_decay();
+    test_tail_guards();
+    test_event_budget();
+    test_passwd_meter();
 
     return assert_summary();
 }

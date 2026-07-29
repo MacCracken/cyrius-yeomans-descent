@@ -518,6 +518,34 @@ fn _build_record(s): i64 {
             off = _ap(off, oi_tpl_id_ptr(it), oi_tpl_id_len(it));
             first = 0;
         }
+        # F11 (1.6.11) — descend one level into a carried container.
+        #
+        # This walked only the top-level SS_INV chain, so anything sitting in a
+        # bag the player was holding was never written — and session_drop_inv
+        # then obj_free'd it, which recurses through OI_CONTENTS. Put your scrip
+        # in a sack, log out, and the scrip was gone. Silent, and caused by
+        # 1.6.7's `put` accepting a carried container in the first place.
+        #
+        # The contents are FLATTENED into the same comma-separated list rather
+        # than nested. That keeps the frozen v1 `inv` field byte-compatible
+        # (ADR 0007 §3) — it is still a list of template ids — at the cost of
+        # the nesting not surviving a reconnect: the items come back loose in
+        # your hands. Losing the arrangement is a fair trade against losing the
+        # items; representing nesting needs a schema change, i.e. 2.0.
+        #
+        # One level is enough: cmd_put caps nesting at depth 1 by refusing to
+        # put a non-empty container into anything.
+        var inner = oi_contents(it);
+        while (inner != 0) {
+            if (oi_tpl_id_len(inner) > 0) {
+                if (off > SAVE_CAP - SIG_TAIL) { off = SAVE_ERR; }
+                if (_sv_bad(off) == 1) { inner = 0; continue; }
+                if (first == 0) { off = _ac(off, ","); }
+                off = _ap(off, oi_tpl_id_ptr(inner), oi_tpl_id_len(inner));
+                first = 0;
+            }
+            inner = oi_next(inner);
+        }
         it = oi_next(it);
     }
     off = _ac(off, "\"\n");
@@ -844,8 +872,12 @@ fn login_on_pass(s, buf, len): i64 {
         # oracle. Hardcoded — ADR 0007 §6 freezes the YD_* knob set for all 1.x.
         var fails = load64(s + SS_FAILS) + 1;
         store64(s + SS_FAILS, fails);
-        audit_event(SEV_WARNING, "login.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+        # G3 (1.6.12) — one entry per session at the cap, not one per attempt.
+        # Same reasoning as _confirm_mismatch below: the rate here is the
+        # attacker's, each entry is 1640 B of unreclaimable arena, and the
+        # flood signal is fully preserved.
         if (fails >= MAX_LOGIN_FAILS) {
+            audit_event(SEV_WARNING, "login.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
             session_appendtx_cstr(s, "\r\nToo many failed attempts. Closing.\r\n");
             store64(s + SS_QUIT, 1);
             return 0;
@@ -905,8 +937,24 @@ fn login_on_newpass(s, buf, len): i64 {
 fn _confirm_mismatch(s): i64 {
     var fails = load64(s + SS_FAILS) + 1;
     store64(s + SS_FAILS, fails);
-    audit_event(SEV_WARNING, "create.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    # G3 (1.6.12) — one durable audit entry per session, not one per attempt.
+    #
+    # Every audit_event costs 1640 bytes of BUMP arena that alloc() can never
+    # reclaim (1416 B of it inside libro's filestore_append, which is upstream
+    # and CLAUDE.md forbids touching) plus ~360 B appended to a never-rotated
+    # data/audit.libro. Measured on the unauthenticated creation path: 5 attempts
+    # x 1640 B = 8.2 kB per connection, ~755 kB/s of permanently-lost arena at
+    # single-core saturation. E3 bounded the attempts per CONNECTION; it did not
+    # bound reconnects, and nothing else did either.
+    #
+    # The event exists to make a flood VISIBLE, and logging at the cap keeps
+    # exactly that: every session that hammers the limit still writes one
+    # SEV_WARNING naming it. What is given up is per-attempt granularity on a
+    # path whose rate the ATTACKER sets — which is the path where granularity
+    # buys the least and costs the most. The authenticated `passwd` path keeps
+    # its per-attempt entry, because a real player sets that rate.
     if (fails >= MAX_LOGIN_FAILS) {
+        audit_event(SEV_WARNING, "create.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
         session_echo_on(s);
         session_appendtx_cstr(s, "\r\nToo many failed attempts. Closing.\r\n");
         store64(s + SS_QUIT, 1);
@@ -1043,6 +1091,45 @@ fn chpass_on_new(s, buf, len): i64 {
     return 0;
 }
 
+# G2 (1.6.12) — a failed re-key costs a counted attempt, and enough abandon it.
+#
+# The THIRD instance of one defect. `chpass_on_new` derives a fresh Ed25519
+# keypair on every in-range line and `chpass_on_confirm` derives again to
+# compare, rewinding to PHASE_CHPASS_NEW on mismatch — so 100% of attacker lines
+# cost a full derivation and the cycle never terminates. Measured: 1000 lines =
+# 1103 ms of single-threaded loop time, and afterwards SS_FAILS == 0, SS_QUIT ==
+# 0, still cycling.
+#
+# 1.6.2 capped the login path. E3 (1.6.10) capped the creation path and its
+# comment called that path "structurally identical" to the login one — and this
+# path is structurally identical to BOTH and was not looked at. The lesson is in
+# the CHANGELOG rather than here, but the shape is: fixing an instance is not
+# fixing the class, and `grep -n ident_derive src/` was always the whole answer.
+#
+# Unlike creation, this does not close the socket. The session is an
+# authenticated player who may simply be fumbling, so the re-key is abandoned
+# and they are returned to the command prompt with their existing passphrase
+# untouched — they can type `passwd` again. That still bounds the work per
+# invocation, which is the point, and it costs a legitimate user nothing.
+fn _chpass_mismatch(s): i64 {
+    sess_cand_clear(s);
+    var fails = load64(s + SS_FAILS) + 1;
+    store64(s + SS_FAILS, fails);
+    audit_event(SEV_WARNING, "passwd.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    if (fails >= MAX_LOGIN_FAILS) {
+        store64(s + SS_FAILS, 0);
+        store64(s + SS_PHASE, PHASE_CMD);
+        session_echo_on(s);
+        session_appendtx_cstr(s, "\r\nToo many failed attempts — re-key abandoned.");
+        session_appendtx_cstr(s, " Your passphrase is UNCHANGED.\r\n");
+        session_send_cmd_prompt(s);
+        return 0;
+    }
+    store64(s + SS_PHASE, PHASE_CHPASS_NEW);
+    session_appendtx_cstr(s, "\r\nThose don't match. New passphrase (4-64 chars): ");
+    return 0;
+}
+
 # Commit half of the re-key. A mismatch rewinds to PHASE_CHPASS_NEW with the
 # live key untouched. On match only 112 bytes (salt|pk|sk) are copied over the
 # ident block, deliberately sparing IDENT_CREATED, then player_save re-signs
@@ -1052,17 +1139,11 @@ fn chpass_on_confirm(s, buf, len): i64 {
     var pk2 = cand + CAND_PK2;
     var sk2 = cand + CAND_SK2;
     if (len > PASS_MAX) {   # over-long → cannot match the (<=PASS_MAX) candidate
-        sess_cand_clear(s);
-        store64(s + SS_PHASE, PHASE_CHPASS_NEW);
-        session_appendtx_cstr(s, "\r\nThose don't match. New passphrase (4-64 chars): ");
-        return 0;
+        return _chpass_mismatch(s);
     }
     ident_derive(cand, buf, len, sk2, pk2);
     if (_bytes_eq(pk2, cand + IDENT_PK, PK_LEN) == 0) {
-        sess_cand_clear(s);
-        store64(s + SS_PHASE, PHASE_CHPASS_NEW);
-        session_appendtx_cstr(s, "\r\nThose don't match. New passphrase (4-64 chars): ");
-        return 0;
+        return _chpass_mismatch(s);
     }
     # Commit: copy candidate salt+pk+sk into the live ident block (preserve
     # the original creation timestamp), re-sign + save under the new key.
@@ -1092,6 +1173,7 @@ fn chpass_on_confirm(s, buf, len): i64 {
         session_send_cmd_prompt(s);
         return 0;
     }
+    store64(s + SS_FAILS, 0);   # G2 — a successful re-key clears the count
     store64(s + SS_PHASE, PHASE_CMD);
     session_echo_on(s);
     audit_event(SEV_INFO, "passwd.change", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
