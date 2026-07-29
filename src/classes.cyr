@@ -68,8 +68,10 @@ fn cl_con(c): i64       { return load64(c + CL_CON); }
 # Starting TEC — ability power for Splicer damage and Chaplain heals.
 fn cl_tec(c): i64       { return load64(c + CL_TEC); }
 
-# Class id of a session (or -1), and its display name (for who / stats).
-fn session_class(s): i64 { return load64(s + SS_CLASS); }
+# H5 (1.6.14) — `session_class` deleted. It was never called, and its comment
+# claimed a use ("for who / stats") that does not exist: both read SS_CLASS
+# directly. A comment asserting a caller that is not there is worse than the
+# dead code, because it makes the next reader look for one.
 # Same bytes as cl_name_ptr, keyed by class index — for callers holding SS_CLASS.
 fn class_name_ptr(idx): i64 { return cl_at(idx) + CL_NAME; }
 # Length half of that pair; both feed session_appendtx, which takes ptr + len.
@@ -128,7 +130,15 @@ fn world_load_classes(path): i64 {
         var c = cl_at(i);
         var id = toml_get(pairs, "id");
         if (id == 0) { return WL_ERR_NOID; }
-        store64(c + CL_ID_LEN, copy_str_capped(c + CL_ID, CL_ID_CAP, id));
+        # H3 (1.6.14) — CAP - 1, matching the two fields beside it.
+        #
+        # This copied all 32 bytes of a 32-byte slot, leaving no terminator,
+        # while the adjacent name and role copies use CAP - 1 for exactly that
+        # reason. Safe today only because every reader goes through CL_ID_LEN
+        # and nothing treats the id as a cstr — a trap for the first caller that
+        # does, and the same shape as the OT_ID / OI_TPL_ID mismatch that 1.6.6
+        # fixed for objects and did not sweep for classes.
+        store64(c + CL_ID_LEN, copy_str_capped(c + CL_ID, CL_ID_CAP - 1, id));
         var name = toml_get(pairs, "name");
         if (name != 0) { store64(c + CL_NAME_LEN, copy_str_capped(c + CL_NAME, CL_NAME_CAP - 1, name)); }
         var role = toml_get(pairs, "role");
@@ -161,10 +171,17 @@ fn world_load_classes(path): i64 {
 fn apply_class(s, idx): i64 {
     var c = cl_at(idx);
     store64(s + SS_CLASS, idx);
-    store64(s + SS_STR, cl_str(c));
-    store64(s + SS_DEX, cl_dex(c));
-    store64(s + SS_CON, cl_con(c));
-    store64(s + SS_TEC, cl_tec(c));
+    # H4 (1.6.14) — the rest of the 1.6.7 sign sweep, finally finished.
+    #
+    # H12 (1.6.7) taught the config reader to accept negatives; H13 clamped
+    # reset_secs and F9 (1.6.11) clamped hp and energy. These four were missed
+    # both times. player_auth_load clamps all four to [1, 1000] when a saved
+    # character is READ, so the invariant was asserted on the load path and
+    # absent on the creation path — the same split F9 fixed for hp.
+    store64(s + SS_STR, _clamp(cl_str(c), 1, 1000));
+    store64(s + SS_DEX, _clamp(cl_dex(c), 1, 1000));
+    store64(s + SS_CON, _clamp(cl_con(c), 1, 1000));
+    store64(s + SS_TEC, _clamp(cl_tec(c), 1, 1000));
     # F9 (1.6.11) — clamp on the CREATION path, matching the load path exactly.
     #
     # H12 (1.6.7) taught toml_int to read a leading '-', and H13 clamped the one
@@ -185,9 +202,12 @@ fn apply_class(s, idx): i64 {
     store64(s + SS_HP, chp);
     store64(s + SS_AC, cl_ac(c));
     store64(s + SS_HIT, cl_hit(c));
-    store64(s + SS_NDICE, load64(c + CL_NDICE));
-    store64(s + SS_DSIZE, load64(c + CL_DSIZE));
-    store64(s + SS_DMOD,  load64(c + CL_DMOD));
+    # H4 — the damage profile feeds roll()'s loop, so ndice is a trip count an
+    # authored file should not be able to set to a million. Same bounds the load
+    # path uses.
+    store64(s + SS_NDICE, _clamp(load64(c + CL_NDICE), 1, 100));
+    store64(s + SS_DSIZE, _clamp(load64(c + CL_DSIZE), 1, 1000));
+    store64(s + SS_DMOD,  _clamp(load64(c + CL_DMOD), 0 - 1000, 10000));
     var cen = _clamp(cl_energy(c), 0, 1000000);   # F9 — same bound as the load path
     store64(s + SS_MAXENERGY, cen);
     store64(s + SS_ENERGY, cen);

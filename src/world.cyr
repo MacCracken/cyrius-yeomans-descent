@@ -71,7 +71,12 @@ var WL_ERR_DANGLE  = 0 - 6;   # an exit names a room that does not exist
 var g_rooms      = 0;   # contiguous block of g_room_count RM_SIZE structs
 var g_room_count = 0;
 var g_start_room = 0;   # room index new players spawn into (default 0)
-var g_zone_name  = 0;   # str: human zone name (for prompts / Joshua)
+# Authored in the zone header and stored, but not read by anything today. Kept
+# because it is part of the frozen zone format (ADR 0007 §5) — dropping it would
+# be a format change — and because the operator channel (M18) is its consumer.
+# H5 (1.6.14): the comment used to cite "prompts / Joshua"; there are no prompts
+# using it and Joshua is backlog, so it named two consumers that do not exist.
+var g_zone_name  = 0;   # str: human zone name
 var g_zone_id    = 0;   # str: machine zone id (space-free, for log tokens)
 
 # M7 — zone reset cadence. reset_secs is authored in the zone header
@@ -175,8 +180,9 @@ fn room_mob_head(r): i64      { return load64(r + RM_MOB_HEAD); }
 fn room_set_mob_head(r, v): i64 { store64(r + RM_MOB_HEAD, v); return 0; }
 # Head of the room's object-instance list (item.cyr OI_NEXT chain), or 0.
 fn room_obj_head(r): i64      { return load64(r + RM_OBJ_HEAD); }
-# Overwrite the head only; item.cyr's ilist_* take the field address instead.
-fn room_set_obj_head(r, v): i64 { store64(r + RM_OBJ_HEAD, v); return 0; }
+# H5 (1.6.14) — `room_set_obj_head` deleted. Never called, and its own comment
+# said why: item.cyr's ilist_* primitives take the field ADDRESS and mutate it
+# in place, so a setter has no role. Honest comment, dead function.
 # str: the authored `mobs` id list (space-separated), or 0. Kept after boot
 # because zone reset re-reads it to top the room back up to its population.
 fn room_mobspawn(r): i64      { return load64(r + RM_MOBSPAWN); }

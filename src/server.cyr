@@ -23,8 +23,31 @@ enum ServerConst {
     # files and the audit store.
     MAX_SESSIONS       = 256;
     ACCEPT_BACKOFF_TICKS = 4;
-    EPOLL_EVENT_SIZE = 12;     # kernel writes packed { u32 events; u64 data }
+    # H1 (1.6.14) — the epoll_event layout, PER ARCHITECTURE.
+    #
+    # This was a bare `12` with the data read at `+4`, which is the x86_64
+    # *packed* layout only. aarch64 Linux leaves the struct unpacked: 16 bytes
+    # with the u64 at offset 8. So on ARM the loop would have read a session
+    # pointer out of the wrong bytes and dereferenced it.
+    #
+    # The stdlib already knows this — `epoll_event_new` has separate x86_64 and
+    # aarch64 versions and the aarch64 one carries a comment explaining the
+    # split. Descent used that helper to WRITE events and then hardcoded its own
+    # constants to READ them back, so the write path was portable and the read
+    # path was not. These two constants are the read path's half of the same
+    # fact, and `_ev_scratch` below is what keeps the two in step.
+    EPOLL_EVENT_SIZE = 12;
+    EPOLL_DATA_OFF   = 4;
 }
+
+# aarch64 Linux: unpacked 16-byte epoll_event, data at +8. Overrides the
+# x86_64 values above. Kept adjacent to them so the two cannot drift apart.
+#ifdef CYRIUS_ARCH_AARCH64
+enum EpollArch64 {
+    EPOLL_EVENT_SIZE_A64 = 16;
+    EPOLL_DATA_OFF_A64   = 8;
+}
+#endif
 
 # Tags discriminating epoll user-data values. Listener + signalfd carry
 # these literal tags; per-session events carry the Session pointer
@@ -81,9 +104,52 @@ fn install_signal_fd(): i64 {
 # Register `fd` for EPOLLIN, tagging its events with `data_tag` — a literal
 # FdTag for the listener / signalfd, or the Session pointer for a client.
 # Read-arming only; EPOLLOUT is added later on demand by session_set_out.
+# The epoll_event stride and data offset for THIS target. Both the reader (the
+# dispatch loop) and the writer (ev_scratch) go through these, so a layout that
+# is right for one is right for the other by construction — which is exactly what
+# was not true before H1.
+fn epoll_ev_size(): i64 {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return EPOLL_EVENT_SIZE_A64;
+    #endif
+    return EPOLL_EVENT_SIZE;
+}
+# Byte offset of the u64 tag inside an epoll_event on this target.
+fn epoll_data_off(): i64 {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return EPOLL_DATA_OFF_A64;
+    #endif
+    return EPOLL_DATA_OFF;
+}
+
+# H2 (1.6.14) — ONE reusable event struct, not one per call.
+#
+# `epoll_event_new` allocates 16 bytes from the bump allocator, which has no
+# free — so every accept and every EPOLLOUT arm/disarm leaked 16 bytes for the
+# life of the process. Tiny, but unbounded and entirely avoidable: `epoll_ctl`
+# copies the struct, so it is dead the moment the syscall returns and a single
+# buffer serves every call. Single-threaded event loop (ADR 0003), so there is
+# no aliasing hazard.
+#
+# Writing it here rather than calling the stdlib helper also puts the write and
+# the read on the SAME layout constants — which is the actual fix for H1. The
+# helper was correct; having two sources of truth was not.
+var g_ev_scratch = 0;
+# Fill the shared event struct and return it. Valid only until the next call —
+# epoll_ctl copies it, so no caller needs it to outlive the syscall.
+fn ev_scratch(events, data): i64 {
+    if (g_ev_scratch == 0) { g_ev_scratch = alloc(16); }
+    store32(g_ev_scratch, events);
+    store64(g_ev_scratch + epoll_data_off(), data);
+    return g_ev_scratch;
+}
+
+# Register `fd` for EPOLLIN, tagging its events with `data_tag` — a literal
+# FdTag for the listener / signalfd, or the Session pointer for a client.
+# Read-arming only; EPOLLOUT is added on demand by session_set_out.
 fn epoll_add_in(epfd, fd, data_tag): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
-    var ev = epoll_event_new(EPOLLIN, data_tag);
+    var ev = ev_scratch(EPOLLIN, data_tag);
     return sys_epoll_ctl(epfd, EPOLL_CTL_ADD, fd, ev);
     #endif
     # agnos: never called (the poll loop sweeps g_session_head); epoll_event_new
@@ -99,7 +165,7 @@ fn session_set_out(epfd, s, armed): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     var ev_mask = EPOLLIN;
     if (armed == 1) { ev_mask = EPOLLIN | EPOLLOUT; }
-    var ev = epoll_event_new(ev_mask, s);
+    var ev = ev_scratch(ev_mask, s);
     sys_epoll_ctl(epfd, EPOLL_CTL_MOD, load64(s + SS_FD), ev);
     #endif
     # agnos: no epoll; the poll loop flushes every session each sweep, so tx
@@ -354,7 +420,7 @@ fn drain_pending_rx(): i64 {
 fn listener_disarm(): i64 {
     if (g_listener_armed == 0) { return 0; }
     #ifndef CYRIUS_TARGET_AGNOS
-    var ev = epoll_event_new(0, TAG_LISTENER);
+    var ev = ev_scratch(0, TAG_LISTENER);
     sys_epoll_ctl(g_epfd, EPOLL_CTL_MOD, g_listener_fd, ev);
     #endif
     g_listener_armed = 0;
@@ -367,7 +433,7 @@ fn listener_disarm(): i64 {
 fn listener_rearm(): i64 {
     if (g_listener_armed == 1) { return 0; }
     #ifndef CYRIUS_TARGET_AGNOS
-    var ev = epoll_event_new(EPOLLIN, TAG_LISTENER);
+    var ev = ev_scratch(EPOLLIN, TAG_LISTENER);
     sys_epoll_ctl(g_epfd, EPOLL_CTL_MOD, g_listener_fd, ev);
     #endif
     g_listener_armed = 1;
@@ -1411,7 +1477,7 @@ fn cmd_serve(port): i64 {
     g_epfd = epfd;   # publish for room broadcasts (M3-C)
     epoll_add_in(epfd, lfd, TAG_LISTENER);
     epoll_add_in(epfd, sigfd, TAG_SIGNAL);
-    var events_buf = alloc(MAX_EPOLL_EVENTS * EPOLL_EVENT_SIZE);
+    var events_buf = alloc(MAX_EPOLL_EVENTS * 16);   # H1 — 16 covers both layouts
     var next_tick = clock_now_ms() + g_tick_ms;
     var stop = 0;
     while (stop == 0) {
@@ -1446,9 +1512,9 @@ fn cmd_serve(port): i64 {
         var budget = EVENT_LINES_MAX;
         var i = 0;
         while (i < n) {
-            var ev_off = i * EPOLL_EVENT_SIZE;
+            var ev_off = i * epoll_ev_size();          # H1 — per-arch stride
             var ev_mask = load32(events_buf + ev_off);
-            var data = load64(events_buf + ev_off + 4);
+            var data = load64(events_buf + ev_off + epoll_data_off());
             if (data == TAG_LISTENER) {
                 handle_accept(epfd, lfd, clock_now_ms());
             }

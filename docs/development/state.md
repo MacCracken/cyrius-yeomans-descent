@@ -3,7 +3,7 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.6.13 — nothing open can reach a live server; the gate is a clean re-run)
+> **Last refresh**: 2026-07-29 (v1.6.14 — only a docs pass left before the gate)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
@@ -11,22 +11,26 @@
 
 ## Version
 
-**1.6.13** — 2026-07-29. **732 assertions**; `cyrius audit` exits 0; 5/5 benches.
+**1.6.14** — 2026-07-29. **751 assertions**; `cyrius audit` exits 0; 5/5 benches.
 
-Closed the three open issues that could reach an operator or a player, all three
-from the 1.6.0 sweep and none ever tracked: a **carry cap** (a player past ~113
-items silently stopped saving — the record refused whole, and the player was
-never told), a **30 s pre-auth timeout** (1.6.3 shipped only half of that
-finding), and **whitespace trimming on config values** (a CRLF-saved zone file
-could rewrite a setting with no error).
+Closed the dormant tail: the **epoll_event layout** is now per-architecture on
+both the read and write paths (an ARM build would have read session pointers
+from the wrong bytes — the stdlib had this right and descent hardcoded the x86
+offset for reads only), which also removed a **16-byte allocation per accepted
+connection**; the **class-id terminator**; and the **rest of the 1.6.7 sign
+sweep** — `str`/`dex`/`con`/`tec` and the damage dice were clamped on the load
+path and unclamped on the creation path.
 
-**Nothing open can affect a running server now.** What remains is dormant or
-documentation — see
-[roadmap: what is left](roadmap.md#what-is-left).
+Two flagged "dead symbols" were kept rather than deleted: `mt_level` and
+`g_zone_name` are authored zone-format fields frozen by ADR 0007 §5, with named
+consumers at M16 and M18. Their comments claimed uses that did not exist; that
+was the defect.
 
-**The 1.x line still needs a clean re-run sweep to close.** Two re-runs have each
-found serious defects the previous pass missed; the bar is a pass with no
-critical or high findings.
+**All that remains before the gate is a documentation pass** (1.6.15): the
+README says v1.2.0 and the architecture doc describes a combat model that was
+never built.
+
+**The 1.x line still needs a clean re-run sweep to close.**
 
 ---
 
@@ -161,7 +165,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (732 assertions, 45 groups)
+  cyrius-yeomans-descent.tcyr   unit suite (751 assertions, 46 groups)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -204,7 +208,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **732** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **751** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -461,7 +465,7 @@ guard these.
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test                                      # 732 assertions, all pass
+cyrius test                                      # 751 assertions, all pass
 ./build/cyrius-yeomans-descent serve 4000
 # new name → passphrase (echo-suppressed) → class → play; `save`/`passwd`/`quit`,
 # reconnect → restored + "last seen". kill -9 after a save → restart → no loss.

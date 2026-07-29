@@ -1,0 +1,20 @@
+game = "yeomans-descent"
+name = "H3 fixture — maximal class id"
+[[entries]]
+kind = "class"
+id = "abcdefghijklmnopqrstuvwxyz012345"
+name = "Maximal"
+role = "Fixture"
+str = 10
+dex = 10
+con = 10
+tec = 10
+hp = 30
+ac = 8
+hit = 1
+energy = 20
+dmg = "1d4+0"
+---
+A class whose id is exactly CL_ID_CAP bytes. That is the only length at which
+the CAP vs CAP-1 copy is observable — every authored class id is ~8 bytes and
+round-trips either way, so a test using the real file proves nothing.

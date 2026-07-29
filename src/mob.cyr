@@ -74,7 +74,10 @@ fn mt_name_ptr(t): i64    { return t + MT_NAME; }
 fn mt_name_len(t): i64    { return load64(t + MT_NAME_LEN); }
 # Keyword blob as a cstr — kw_matches scans to the NUL, no length travels with it.
 fn mt_kw_ptr(t): i64      { return t + MT_KW; }         # NUL-terminated
-# Authored level, default 1. Flavour only so far — combat reads ac/hit/dice, not this.
+# Authored level, default 1. Stored and NOT READ by anything today — combat uses
+# ac/hit/dice. Kept rather than deleted: `level` is part of the frozen zone
+# format (ADR 0007 §5) and M16 (XP, levels, death cost) is its consumer. H5
+# (1.6.14) — "flavour only so far" understated it; nothing reads it at all.
 fn mt_level(t): i64       { return load64(t + MT_LEVEL); }
 # Max HP. mob_spawn seeds instance HP from it; mob_condition scales its prose by it.
 fn mt_hp(t): i64          { return load64(t + MT_HP); }
@@ -364,6 +367,15 @@ fn mob_spawn(tpl, room_idx): i64 {
     var mhp = mt_hp(tpl);
     if (mhp < 1) { mhp = 1; }
     store64(m + MI_HP, mhp);
+    # H4 (1.6.14) — a mob's dice profile is read straight from the zone file and
+    # fed to roll(), whose ndice is a loop trip count. parse_dice already falls
+    # back to 1d4 on a malformed value, but an authored `dmg = "999999d6"` parses
+    # fine and is not malformed — it is just absurd. Bounded at spawn, where the
+    # instance is made, for the same reason the class stats are.
+    if (mt_ndice(tpl) < 1)   { store64(tpl + MT_NDICE, 1); }
+    if (mt_ndice(tpl) > 100) { store64(tpl + MT_NDICE, 100); }
+    if (mt_dsize(tpl) < 1)   { store64(tpl + MT_DSIZE, 1); }
+    if (mt_dsize(tpl) > 1000) { store64(tpl + MT_DSIZE, 1000); }
     store64(m + MI_ROOM, room_idx);
     store64(m + MI_HOME, room_idx);   # M13 — wander changes MI_ROOM, never this
     store64(m + MI_ACTED, 0);

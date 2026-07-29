@@ -22,15 +22,15 @@ ownership and fix size.
 | # | Release | Items | Contains | Blocks 2.0? |
 |---|---|---|---|---|
 | ~~1~~ | [~~**1.6.13**~~](#1613--shipped--2026-07-29) | ~~3~~ | ✅ **shipped** — carry cap, pre-auth timeout, config whitespace | — |
-| 2 | [**1.6.14**](#1614--correctness--hygiene-tail) | 5 | Class stat clamps, class-ID terminator, ARM epoll offsets, dead symbols, per-accept alloc — all dormant | no |
+| ~~2~~ | [~~**1.6.14**~~](#1614--shipped--2026-07-29) | ~~5~~ | ✅ **shipped** — epoll layout, class-ID terminator, stat clamps, dead symbols | — |
 | 3 | [**1.6.15**](#1615--documentation-truth-pass) | 1 | README says v1.2.0; architecture doc describes combat we never built | no |
 | 4 | [**re-run sweep**](#the-gate--what-closes-the-1x-line) | — | **The gate.** Closes the 1.x line if it returns no critical or high findings | **yes** |
 | 5 | **2.0.0** | 3 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death | — |
 | 6 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
-**Nothing open can affect a running server any more.** 1.6.13 closed the last
-one. Everything remaining in 1.6.14–1.6.15 is dormant (cannot fire in the
-shipped configuration), or documentation.
+**One item of open work remains before the gate:** the documentation truth pass
+(1.6.15). Nothing open affects a running server, and nothing open is dormant
+code — it is all docs.
 
 **Blocked, not schedulable here:** one issue is upstream in libro and needs a
 **2.8.5** release. Descent's own share of it is already zero.
@@ -41,7 +41,7 @@ the release.
 
 ---
 
-## Open issues — the work in 1.6.14 → 1.6.15
+## Open issues — the work in 1.6.15
 
 **Reconciled against the original 1.6.0 sweep output on 2026-07-29.** All 56 raw
 / 44 verified findings from that sweep have been matched against the current
@@ -85,104 +85,16 @@ ever been tracked. Detail in the 1.6.13 CHANGELOG entry.
 
 ---
 
-### 1.6.14 — correctness + hygiene tail
+### 1.6.14 — shipped ✅ 2026-07-29
 
-#### Character stats from `classes.cyml` aren't range-checked on creation
+The dormant tail: per-arch epoll layout (an ARM build would have read session
+pointers from the wrong bytes), the per-connection event allocation that fix
+removed, the class-id terminator, the rest of the 1.6.7 sign sweep, and two dead
+functions. Detail in the 1.6.14 CHANGELOG entry.
 
-
-
-**What breaks.** 1.6.7 taught the config reader to accept negative numbers, and
-1.6.11 clamped `hp` and `energy` on the creation path — but `str`, `dex`, `con`
-and `tec` were missed, and the damage-dice profile (`ndice`/`dsize`) is unbounded
-on both the class and mob paths. The *load* path clamps all of them; the
-*creation* path does not, so the same field is checked when a saved character is
-read and unchecked when a new one is made.
-
-**Can it happen today?** **Only via an authored file.** `data/classes.cyml` and
-the zone files are operator content, not player input — so this is a typo away,
-not an attack. An unbounded `ndice` also feeds a `roll()` loop.
-
-**Whose.** Ours — `src/classes.cyr` (`apply_class`), `src/mob.cyr`.
-
-**Fix size.** Small — four `_clamp` calls and a dice bound, mirroring what
-`player_auth_load` already does.
-
----
-
-#### Class IDs are not zero-terminated
-
-
-
-**What breaks.** A class id is copied into a 32-byte slot using all 32 bytes,
-leaving no terminator. The two fields beside it (name, role) copy at most 31 for
-exactly that reason.
-
-**Can it happen today?** **No — dormant.** Every reader uses the stored length,
-so nothing treats an id as a terminated string. It is a trap for the first piece
-of code that does.
-
-**Whose.** Ours — `src/classes.cyr:131`.
-
-**Fix size.** One character: `CL_ID_CAP` → `CL_ID_CAP - 1`.
-
----
-
-#### An ARM build would read session pointers from the wrong offset
-
-
-
-**What breaks.** The event loop hardcodes the x86 layout of the kernel's
-`epoll_event` struct — 12 bytes, pointer at offset 4. On aarch64 Linux the struct
-is unpacked: 16 bytes, pointer at offset 8. The server would read a session
-pointer out of the wrong bytes and dereference garbage.
-
-**Can it happen today?** **No — dormant.** Descent builds x86_64 and agnos only.
-It fires the first time anyone runs `--aarch64`.
-
-**Whose.** Ours, and avoidably so: **the Cyrius stdlib already handles this**. It
-ships a per-architecture `epoll_event_new` (x86_64 writes data at +4, aarch64 at
-+8, with a comment explaining the split). Descent *uses* that helper to **write**
-events and then hardcodes its own constants to **read** them back. The write path
-is portable; only the read path is not.
-
-**Fix size.** Small: derive the size and data offset per target the way the
-stdlib does, instead of the local `EPOLL_EVENT_SIZE = 12`.
-
----
-
-#### Dead symbols carrying comments that say they are live
-
-
-
-**What breaks.** `mt_level`, `session_class` and `room_set_obj_head` are defined
-and never called; `parser_free` and `g_zone_name` are near-dead. Some carry
-comments asserting they are in use.
-
-**Can it happen today?** No. It is a correctness-of-the-map problem: this tree has
-already produced several findings that were *only* comments contradicting code.
-
-**Whose.** Ours.
-
-**Fix size.** Small: delete them, or wire them up and make the comments true.
-
----
-
-#### `epoll_event_new` allocates 16 bytes per accepted connection
-
-
-
-**What breaks.** Every accept and every EPOLLOUT arm/disarm allocates a fresh
-16-byte event struct from the non-reclaiming bump allocator.
-
-**Can it happen today?** **Yes, but trivially** — 16 bytes per connection.
-Listed for completeness, not because it needs doing.
-
-**Whose.** Shared: the allocation is in the stdlib helper; the call frequency is
-ours.
-
-**Fix size.** Small — reuse one scratch event struct.
-
----
+Two of the flagged "dead symbols" were **kept**: `mt_level` and `g_zone_name` are
+authored zone-format fields frozen by ADR 0007 §5 with named future consumers
+(M16, M18). Their comments were the thing that was wrong.
 
 ---
 

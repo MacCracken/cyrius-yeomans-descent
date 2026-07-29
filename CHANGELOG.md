@@ -4,6 +4,77 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.14] — 2026-07-29
+
+**The dormant tail.** Five items that could not fire in the shipped
+configuration — an ARM build, a config typo, a caller that does not exist yet.
+Nothing here was reachable by a player; all of it was a trap for the next
+change.
+
+### Fixed
+
+- **An ARM build would have read session pointers from the wrong bytes.** The
+  dispatch loop hardcoded `EPOLL_EVENT_SIZE = 12` and read the tag at `+4`,
+  which is the x86_64 *packed* layout. aarch64 Linux leaves the struct unpacked:
+  16 bytes, tag at `+8`.
+
+  The stdlib already knew this — `epoll_event_new` ships separate x86_64 and
+  aarch64 versions, and the aarch64 one carries a comment explaining the split.
+  Descent used that helper to **write** events and then hardcoded its own
+  constants to **read** them back, so the write path was portable and the read
+  path was not. Two sources of truth for one fact.
+
+  Both halves now go through `epoll_ev_size()` / `epoll_data_off()`, so a layout
+  right for one is right for the other by construction.
+- **…and that removed a per-connection allocation.** `epoll_event_new` allocates
+  16 bytes from the bump allocator, which has no free, so every accept and every
+  EPOLLOUT arm/disarm leaked 16 bytes for the life of the process. `epoll_ctl`
+  copies the struct, so it is dead the moment the syscall returns and one
+  reusable buffer serves every call — which is also what put the writer on the
+  same constants as the reader.
+- **Class IDs had no room for a terminator.** A 32-byte id filled its 32-byte
+  slot exactly, while the two fields beside it copy at `CAP - 1` for precisely
+  that reason. Safe only because every reader goes through `CL_ID_LEN` — the
+  same shape as the object-id mismatch 1.6.6 fixed, in the one place 1.6.6 did
+  not sweep.
+- **The 1.6.7 sign sweep, finished.** `str` / `dex` / `con` / `tec` and the
+  damage-dice profile were clamped where a saved character is **read** and
+  unclamped where one is **made**. An authored negative reached the session
+  directly, and `ndice` is a `roll()` loop trip count — an authored `999999d6`
+  parses fine and is not malformed, just absurd. Bounded on both the class and
+  mob paths, with the same limits `player_auth_load` already used.
+
+### Changed
+
+- **Two dead functions deleted, two misleading comments corrected.** Rather than
+  deleting all four flagged symbols:
+  - `session_class` — deleted. Never called, and its comment claimed a use ("for
+    who / stats") that does not exist; both read `SS_CLASS` directly.
+  - `room_set_obj_head` — deleted. Never called, and its own comment said why.
+  - `mt_level` and `g_zone_name` — **kept**. Both are authored zone-format
+    fields frozen by ADR 0007 §5, so removing them would be a format change, and
+    both have a named future consumer (M16 and M18). Their comments overstated
+    them — "flavour only so far" and "for prompts / Joshua" named consumers that
+    do not exist — and now say plainly that nothing reads them yet.
+
+### Testing
+
+- 732 → **751 assertions**; new `hygiene-tail` group and a
+  `longid.classes.cyml` fixture.
+- 9 mutations. **Two initially failed to fail**, and the reasons are worth
+  keeping:
+  - The class-id assertion checked the shipped file, whose ids are ~8 bytes and
+    round-trip either way — so reintroducing the bug changed nothing it could
+    see. Now driven through the real loader over a 32-byte-id fixture, which is
+    the only length at which `CAP` and `CAP - 1` differ. Same trap the hex
+    encoder hit in 1.6.8.
+  - The aarch64 offset mutation is **structurally invisible on x86**: an
+    x86-only mistake cannot be caught by a test running on x86. Covered three
+    other ways instead — the writer/reader round-trip invariant is asserted at
+    the audit gate on whatever arch is built, `--aarch64` compiles clean, and
+    the branch is provably live (poisoning it fails the aarch64 build while x86
+    still passes). Stated here rather than counted as tested.
+
 ## [1.6.13] — 2026-07-29
 
 **The three open issues that could reach an operator or a player.** All three

@@ -3924,6 +3924,94 @@ fn test_carry_cap(): i64 {
     return 0;
 }
 
+# === 1.6.14 — the dormant tail. ===
+fn test_hygiene_tail(): i64 {
+    test_group("hygiene-tail");
+
+    # --- H1: the epoll_event layout. The reader and the writer must agree, and
+    # they now go through the same two accessors — which is the actual fix. The
+    # old bug was that the WRITE used the stdlib's per-arch helper and the READ
+    # used a hardcoded x86 offset, so on aarch64 they disagreed and the loop
+    # dereferenced a session pointer built from the wrong bytes.
+    assert(epoll_ev_size() >= 12, "the event stride is a real size");
+    assert(epoll_ev_size() <= 16, "and never larger than the 16 bytes allocated per slot");
+    assert(epoll_data_off() >= 4, "the data offset is past the u32 events field");
+    assert(epoll_data_off() + 8 <= 16, "and the u64 fits inside the slot");
+
+    # Round-trip through the same buffer the loop reads: write a tagged event,
+    # read it back the way the dispatch loop does. Arch-independent by
+    # construction — whatever this target's layout is, the two halves match.
+    var probe = 0x5EED1234;
+    var ev = ev_scratch(EPOLLIN, probe);
+    assert_eq(load32(ev), EPOLLIN, "the event mask round-trips");
+    assert_eq(load64(ev + epoll_data_off()), probe, "and so does the tag the loop reads back");
+
+    # --- H2: one reusable struct, not one allocation per accept. `epoll_ctl`
+    # copies the struct, so a single buffer serves every call; the old helper
+    # took 16 bytes of never-reclaimed bump arena per accept and per EPOLLOUT
+    # arm/disarm.
+    var before = alloc_used();
+    var i = 0;
+    while (i < 200) { ev_scratch(EPOLLIN, i); i = i + 1; }
+    assert_eq(alloc_used() - before, 0, "200 events allocate nothing at all");
+    assert_eq(ev_scratch(EPOLLIN, 1), ev_scratch(EPOLLOUT, 2), "because it is one buffer, reused");
+
+    # --- H3: a class id leaves room for a terminator, like the two fields beside
+    # it. Safe today only because every reader uses CL_ID_LEN — a trap for the
+    # first caller that treats it as a cstr, and the same shape as the object-id
+    # mismatch 1.6.6 fixed without sweeping classes.
+    # Drive the REAL loader over a fixture whose id is exactly CL_ID_CAP bytes —
+    # the only length at which the CAP vs CAP-1 copy is observable. Every
+    # authored class id is ~8 bytes and round-trips either way, so asserting
+    # against the shipped file proves nothing. (It didn't: this assertion passed
+    # unchanged when the bug was reintroduced.)
+    var saved_cc = g_class_count;
+    assert(world_load_classes("tests/fixtures/longid.classes.cyml") > 0,
+           "the maximal-id class fixture loads");
+    assert_eq(load64(cl_at(0) + CL_ID_LEN), CL_ID_CAP - 1,
+              "a 32-byte class id is stored at CAP-1, leaving room for the NUL");
+    assert_eq(load8(cl_at(0) + CL_ID + CL_ID_CAP - 1) & 0xFF, 0,
+              "and the last byte of the slot really is a terminator");
+    assert(world_load_classes(DP_CLASSES) > 0, "the real class table reloads");
+    assert_eq(g_class_count, saved_cc, "back to the authored class count");
+
+    # --- H4: the rest of the 1.6.7 sign sweep. These four were clamped where a
+    # saved character is READ and unclamped where one is MADE.
+    if (g_class_count > 0) {
+        var c2 = cl_at(0);
+        var sv_str = load64(c2 + CL_STR); var sv_dex = load64(c2 + CL_DEX);
+        var sv_con = load64(c2 + CL_CON); var sv_tec = load64(c2 + CL_TEC);
+        var sv_nd  = load64(c2 + CL_NDICE);
+        store64(c2 + CL_STR, 0 - 5); store64(c2 + CL_DEX, 0 - 5);
+        store64(c2 + CL_CON, 0 - 5); store64(c2 + CL_TEC, 0 - 5);
+        store64(c2 + CL_NDICE, 999999);          # a roll() trip count
+        var pc = _mk_sess("Clamped2", 8);
+        apply_class(pc, 0);
+        assert(load64(pc + SS_STR) >= 1, "an authored negative str is clamped at creation");
+        assert(load64(pc + SS_DEX) >= 1, "and dex");
+        assert(load64(pc + SS_CON) >= 1, "and con");
+        assert(load64(pc + SS_TEC) >= 1, "and tec");
+        assert(load64(pc + SS_NDICE) <= 100,
+               "and ndice is bounded — it is a loop trip count, not a stat");
+        store64(c2 + CL_STR, sv_str); store64(c2 + CL_DEX, sv_dex);
+        store64(c2 + CL_CON, sv_con); store64(c2 + CL_TEC, sv_tec);
+        store64(c2 + CL_NDICE, sv_nd);
+    }
+
+    # --- H4: the same bound on the mob side, where the dice come from the zone.
+    if (g_mob_tpl_count > 0) {
+        var mt = mt_at(0);
+        var sv = load64(mt + MT_NDICE);
+        store64(mt + MT_NDICE, 999999);
+        var mm = mob_spawn(mt, 0);
+        assert(mt_ndice(mt) <= 100, "an absurd authored mob dice count is bounded at spawn");
+        mob_remove(mm);
+        store64(mt + MT_NDICE, sv);
+    }
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -4156,6 +4244,7 @@ fn main() {
     test_event_budget();
     test_passwd_meter();
     test_carry_cap();
+    test_hygiene_tail();
 
     return assert_summary();
 }

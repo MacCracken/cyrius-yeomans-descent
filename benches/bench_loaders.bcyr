@@ -139,6 +139,33 @@ fn main(): i64 {
         println("  RESULT: FAIL (a loader is not idempotent across reloads)");
         g_lfail = 1;
     }
+    # --- H1 (1.6.14): the epoll_event layout the dispatch loop reads.
+    #
+    # This lives in a BENCH, not the unit suite, for an honest reason: the
+    # defect is that the x86 offset was used on aarch64, and an x86-only mistake
+    # is invisible to any test running on x86. What CAN be checked anywhere is
+    # the invariant that actually matters — that the writer and the reader agree
+    # on this target, whatever target that is. Cross-arch coverage is the
+    # `--aarch64` build in CI plus the fact that the branch is provably compiled
+    # (poison it and the aarch64 build fails while x86 still passes).
+    var probe = 0x0BADF00D;
+    var ev = ev_scratch(EPOLLIN, probe);
+    if (load32(ev) != EPOLLIN) {
+        println("  epoll layout: event mask does not round-trip");
+        g_lfail = 1;
+    }
+    if (load64(ev + epoll_data_off()) != probe) {
+        println("  epoll layout: the tag the loop reads back is NOT what was written");
+        g_lfail = 1;
+    }
+    if (epoll_data_off() + 8 > 16) {
+        println("  epoll layout: the u64 does not fit the 16-byte slot");
+        g_lfail = 1;
+    }
+    print("  epoll layout: stride ", 23); print_num(epoll_ev_size());
+    print(", data at +", 12); print_num(epoll_data_off());
+    println("  — writer and reader agree");
+
     if (g_lfail != 0) { return 1; }
     println("  RESULT: PASS");
     return 0;
