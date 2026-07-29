@@ -617,20 +617,105 @@ fn cmd_inventory(s): i64 {
 # boot (room empty → spawns all authored) and on zone reset. Corpses /
 # dropped loot carry no template id, so they never block or get matched.
 
-fn _obj_id_present(ri, idptr, idlen): i64 {
-    var o = room_obj_head(room_at(ri));
+# Does this instance carry template id `idptr[0..idlen)`?
+fn _oi_id_eq(o, idptr, idlen): i64 {
+    if (oi_tpl_id_len(o) != idlen) { return 0; }
+    var j = 0;
+    while (j < idlen) {
+        if ((load8(oi_tpl_id_ptr(o) + j) & 0xFF) != (load8(idptr + j) & 0xFF)) { return 0; }
+        j = j + 1;
+    }
+    return 1;
+}
+
+# Count matching instances on one intrusive list, DESCENDING into containers.
+fn _obj_id_count_list(head, idptr, idlen): i64 {
+    var n = 0;
+    var o = head;
     while (o != 0) {
-        if (oi_tpl_id_len(o) == idlen) {
-            var j = 0;
-            var same = 1;
-            while (j < idlen) {
-                if ((load8(oi_tpl_id_ptr(o) + j) & 0xFF) != (load8(idptr + j) & 0xFF)) { same = 0; j = idlen; }
-                else { j = j + 1; }
-            }
-            if (same == 1) { return 1; }
-        }
+        if (_oi_id_eq(o, idptr, idlen) == 1) { n = n + 1; }
+        var inner = oi_contents(o);
+        if (inner != 0) { n = n + _obj_id_count_list(inner, idptr, idlen); }
         o = oi_next(o);
     }
+    return n;
+}
+
+# === E5 (1.6.10) — count an authored id across the WHOLE world. ===
+#
+# `_obj_id_present` used to scan the top-level object list of the single room
+# being topped up. Two ways to defeat it, and the reset then minted a duplicate
+# that nothing ever reclaims — `obj_free` is reached only from corpse decay and
+# from a disconnecting player's inventory, so a duplicate is permanent:
+#
+#   1. Carry the object to another room and drop it. The home room reads as
+#      "missing" forever. Pre-existing; named verbatim in server.cyr's H11
+#      comment as "an unbounded fl_alloc growth path driven by ordinary play".
+#   2. **Hide it in place, inside a container.** The scan walked `oi_next` and
+#      never descended `OI_CONTENTS`. **This one is ours** — it did not exist
+#      before 1.6.7 added `put`. Reproduced live in market.stalls: `get optic`
+#      → `put optic in shard` → `@reset` → `objs +1`, a duplicate on the floor
+#      with the original still in the shard, once per reset cycle, unbounded.
+#
+# So the question the reset asks is now the right one: not "is this id in this
+# room" but "does the world already hold as many of this id as the zone authors".
+# That is the classic max-exist count, and it fixes both drivers at once — a
+# relocated object still lets its home room restock (the population is short by
+# one), while a hidden or duplicated one does not (the population is already
+# full). Player inventories count too, or logging in with an authored item in
+# hand would restock the world for free.
+fn _obj_id_world_count(idptr, idlen): i64 {
+    var n = 0;
+    var ri = 0;
+    while (ri < g_room_count) {
+        n = n + _obj_id_count_list(room_obj_head(room_at(ri)), idptr, idlen);
+        ri = ri + 1;
+    }
+    var s = g_session_head;                      # forward ref → server.cyr
+    while (s != 0) {
+        n = n + _obj_id_count_list(load64(s + SS_INV), idptr, idlen);
+        s = load64(s + SS_NEXT);
+    }
+    return n;
+}
+
+# How many times the zone authors this id, across every room's `objects` list.
+# The reset's ceiling: the world may hold this many and no more.
+fn _obj_id_authored_count(idptr, idlen): i64 {
+    var n = 0;
+    var ri = 0;
+    while (ri < g_room_count) {
+        var sp = room_objspawn(room_at(ri));
+        if (sp != 0) {
+            var p = str_data(sp);
+            var len = str_len(sp);
+            var i = 0;
+            while (i < len) {
+                if ((load8(p + i) & 0xFF) == 32) { i = i + 1; continue; }
+                var start = i;
+                while (i < len) { if ((load8(p + i) & 0xFF) == 32) { break; } i = i + 1; }
+                if (i - start == idlen) {
+                    var j = 0;
+                    var same = 1;
+                    while (j < idlen) {
+                        if ((load8(p + start + j) & 0xFF) != (load8(idptr + j) & 0xFF)) { same = 0; j = idlen; }
+                        else { j = j + 1; }
+                    }
+                    if (same == 1) { n = n + 1; }
+                }
+            }
+        }
+        ri = ri + 1;
+    }
+    return n;
+}
+
+# Should the reset skip this id for this room? Yes when the room already holds
+# one (the original per-room rule, so a full room never double-stocks), or when
+# the world is already at the authored ceiling for it.
+fn _obj_id_present(ri, idptr, idlen): i64 {
+    if (_obj_id_count_list(room_obj_head(room_at(ri)), idptr, idlen) > 0) { return 1; }
+    if (_obj_id_world_count(idptr, idlen) >= _obj_id_authored_count(idptr, idlen)) { return 1; }
     return 0;
 }
 

@@ -269,15 +269,73 @@ fn mobs_forget_session(s): i64 {
 # Metering per tick rather than per event is the whole point: a burst that used
 # to be paid in one 65-second stall is now spread across ticks at RX_MAX_LINES
 # each, and the loop stays responsive to everyone else throughout.
+# === E1 + E2 (1.6.10) — the tick honours SS_QUIT, and the drain has a budget. ===
+#
+# Two defects, one walk, so one edit.
+#
+# **E1 — SS_QUIT was advisory on this path.** Exactly one place acted on it:
+# `dispatch_session`, which runs only when an epoll event arrives for that fd.
+# A session whose rx buffer still held queued lines therefore kept being fed 8
+# lines per tick *after the server had decided to close it*, and on the
+# returning-player path every one of those lines is a full `player_auth_load`
+# (read + parse + 3 hex decodes + ed25519_verify, measured 7.66 ms).
+#
+# So `MAX_LOGIN_FAILS` did not bound anything. The sweep observed SS_FAILS
+# climbing 7, 15, 23, 31, 39, 47 across six consecutive ticks with SS_QUIT
+# already 1 and the session still on `g_session_head` — a cap believed enforced
+# since 1.6.2 and enforced nowhere. Measured ~64 ms per such session per tick,
+# linear in session count: ~4.1 s per tick at 64 sessions.
+#
+# **E2 — the drain had no aggregate budget.** `RX_MAX_LINES` is a PER-SESSION
+# cap and this walks every session, so the real bound was 8 x session count x
+# whatever the most expensive line costs. Measured 2.2 s in a single tick at
+# MAX_SESSIONS — 88% of the whole 2.5 s interval, from ~1 MB of attacker input.
+# This is the identical shape H16 fixed for `save_sweep` in 1.6.8; the argument
+# in that comment block applies here verbatim and simply was not carried over.
+#
+# The budget is in LINES and shared across the whole walk, not sessions, so a
+# session with one queued line costs one line rather than a whole slice. No
+# cross-tick cursor, for the reason H16 gives: SS_SIZE lands in a freelist class
+# `fl_free` does not zero and the next accept re-issues, so a retained session
+# pointer is the H1 / M12-C use-after-free shape. Head bias is acceptable here
+# in a way it would not be for saves — a serviced session's remainder shrinks
+# every pass, so the head drains and moves on rather than staying eligible.
+enum DrainConst {
+    # 16 x ~1.08 ms (the costliest unauthenticated line, a keypair derivation)
+    # = ~17 ms, about a third of the ADR 0001 50 ms p99 drift budget, and that
+    # worst case is transient: E3 caps how many such lines one session may ever
+    # spend before it is closed.
+    DRAIN_LINES_MAX = 16;
+}
+# Give sessions with retained rx bytes another metered pass, drop any the server
+# has already condemned, and return how many sessions were serviced. Called once
+# per tick from advance_tick. See the block above for both bounds.
 fn drain_pending_rx(): i64 {
+    var budget = DRAIN_LINES_MAX;
     var s = g_session_head;
     var drained = 0;
     while (s != 0) {
         var nxt = load64(s + SS_NEXT);
-        if (load64(s + SS_RX_LEN) > 0) {
-            session_consume_rx(s);
-            flush_session(g_epfd, s);
-            drained = drained + 1;
+        if (load64(s + SS_QUIT) == 1) {
+            # E1 — already condemned. Drain what it has been told and tear it
+            # down here rather than waiting for an epoll event that may never
+            # come: the attacker's socket is deliberately silent, and this walk
+            # is the only thing still touching the session. Same mid-walk drop
+            # sweep_idle has always done, and `nxt` is already captured.
+            session_drain(s);
+            drop_session(g_epfd, s);
+        } else {
+            if (load64(s + SS_RX_LEN) > 0) {
+                if (budget > 0) {
+                    var take = budget;
+                    if (take > RX_MAX_LINES) { take = RX_MAX_LINES; }
+                    var fired[8];
+                    session_consume_rx_max(s, take, &fired);
+                    budget = budget - load64(&fired);
+                    flush_session(g_epfd, s);
+                    drained = drained + 1;
+                }
+            }
         }
         s = nxt;
     }
@@ -841,6 +899,11 @@ fn room_append_present(viewer, room_idx): i64 {
 # obj_len > 0) + tail. Subject/object are (ptr, len) so either a player
 # name or a mob name fits — "<alice> strikes <drone>." or "<drone> hits
 # <alice>!". Non-dropping (combat tick safety). (0.6.1)
+#
+# Since H15 (1.6.8) this MARKS its recipients rather than flushing them: it is
+# the tick-driven broadcaster, and the tick is where the write count was
+# quadratic. flush_dirty_sessions writes each session once, last thing in
+# advance_tick.
 fn room_combat_line(room_idx, except_s, subj_p, subj_l, mid, obj_p, obj_l, tail): i64 {
     var t = g_session_head;
     while (t != 0) {
@@ -885,9 +948,18 @@ fn room_find_player(viewer, room_idx, np, nl): i64 {
 }
 
 # Broadcast a movement line to everyone in `room_idx` except `except_s`:
-# a leading CRLF, the mover's name, then the cstr parts a/b/c (any may be
-# ""). Each recipient is flushed immediately (the loop won't otherwise
-# poll them this cycle); a recipient that errors on flush is dropped.
+# a leading CRLF, the mover's name, then the cstr parts a/b/c (any may be "").
+#
+# E7 (1.6.10) — this used to claim "each recipient is flushed immediately ... a
+# recipient that errors on flush is dropped". Neither half has been true since
+# H15 (1.6.8): recipients are MARKED (session_mark_dirty) and written once, by
+# flush_dirty_sessions at the end of advance_tick for tick-driven prose or at
+# the end of dispatch_session for command-driven prose (H19, 1.6.9). And
+# nothing here drops anyone — flush_session is non-dropping by design, because
+# this runs while the session list is being walked.
+#
+# The leading CRLF is load-bearing and outlives all of that: a line arriving
+# after a prompt has to start on a fresh row.
 fn room_broadcast(room_idx, except_s, mover_s, a, b, c): i64 {
     var name_buf = load64(mover_s + SS_NAME_BUF);
     var name_len = load64(mover_s + SS_NAME_LEN);
@@ -912,10 +984,16 @@ fn room_broadcast(room_idx, except_s, mover_s, a, b, c): i64 {
     return 0;
 }
 
-# Flush one session immediately (e.g. a directed `tell` recipient, or a
-# combatant mid-tick). Non-dropping: a broken socket is reaped on its next
-# epoll HUP in dispatch_session, never freed here — so this is safe to call
-# while walking the session list (the combat tick does).
+# Flush one session immediately — a directed `tell` or `give` recipient.
+# Non-dropping: a broken socket is reaped on its next epoll HUP in
+# dispatch_session, never freed here, so this is safe to call while walking the
+# session list.
+#
+# E7 (1.6.10) — the parenthetical used to say "or a combatant mid-tick", which
+# stopped being true at H15 (1.6.8): combat prose is marked dirty and written
+# once by flush_dirty_sessions at the end of advance_tick, and the room
+# broadcasters mark rather than flush. This is now only the directed-message
+# path, which runs on the epoll side and is O(1).
 fn deliver_to(t): i64 {
     flush_session(g_epfd, t);
     return 0;
@@ -939,8 +1017,13 @@ fn combat_tick_all(): i64 {
 
 # Broadcast a speech/emote line to everyone in `room_idx` except
 # `except_s`: a leading CRLF, the speaker's name, a `lead` cstr, the
-# message body bytes, then a `tail` cstr. Each recipient is flushed; a
-# flush error drops that recipient.
+# message body bytes, then a `tail` cstr.
+#
+# E7 (1.6.10) — "each recipient is flushed; a flush error drops that recipient"
+# has been wrong since H15 (1.6.8): recipients are marked and written once.
+# This one is reached from the COMMAND path, so H19 (1.6.9) drains the dirty
+# set at the end of dispatch_session — which is what keeps `say` at 0 ms
+# instead of the 2099 ms it cost between those two releases.
 fn room_say_broadcast(room_idx, except_s, speaker_s, lead, body, body_len, tail): i64 {
     var name_buf = load64(speaker_s + SS_NAME_BUF);
     var name_len = load64(speaker_s + SS_NAME_LEN);

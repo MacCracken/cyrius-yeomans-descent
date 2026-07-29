@@ -4,6 +4,143 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.10] — 2026-07-29
+
+**Sweep batch E — what the re-run turned up.** The 1.6.9 re-run put eight
+findings through adversarial verification and none was refuted. This closes the
+critical, all four highs, and the two mediums with teeth.
+
+The findings interlock, and the order matters: **`SS_QUIT` being advisory on the
+tick path is what made every attempt cap in the server a suggestion.** Fixing
+that first is what gives the others something to stand on.
+
+### Fixed
+
+- **`MAX_LOGIN_FAILS` was not enforced. At all.** *(critical)* `login_on_pass`
+  has capped consecutive failures since 1.6.2 by setting `SS_QUIT` — and exactly
+  one place ever acted on it: `dispatch_session`, which runs only when an epoll
+  event arrives. A session whose rx buffer still held queued lines therefore
+  kept being fed 8 lines per tick **after the server had decided to close it**,
+  and on the returning-player path every one of those is a full
+  `player_auth_load` (read + parse + 3 hex decodes + `ed25519_verify`, 7.66 ms).
+
+  The sweep watched `SS_FAILS` climb 7, 15, 23, 31, 39, 47 across six
+  consecutive ticks with `SS_QUIT` already 1 and the session still on
+  `g_session_head`. ~64 ms per such session per tick, linear in session count:
+  **~4.1 s per tick at 64 sessions.** A cap believed enforced for seven releases
+  and enforced nowhere.
+
+  `drain_pending_rx` now tears such a session down where it finds it — the same
+  mid-walk drop `sweep_idle` has always done, with `SS_NEXT` already captured.
+- **`drain_pending_rx` had no aggregate budget.** *(critical)* `RX_MAX_LINES` is
+  a **per-session** cap and the sweep walks every session, so the real bound was
+  8 × session count × whatever the costliest line costs, inline in the tick.
+  **Measured 2.2 s in a single tick at `MAX_SESSIONS`** — 88% of the whole 2.5 s
+  interval, from ~1 MB of attacker input, unauthenticated.
+
+  This is the identical shape H16 fixed for `save_sweep` in 1.6.8; the argument
+  in that comment block applies verbatim and simply had not been carried over.
+  The budget is now in **lines, shared across the whole walk** — not sessions —
+  so a session with one queued line costs one line rather than a whole slice.
+  `session_consume_rx_max` reports how many lines it actually dispatched, which
+  is what makes accurate charging possible. No cross-tick cursor, for the reason
+  H16 gives: a retained session pointer is the H1 / M12-C use-after-free shape.
+- **Character creation had no attempt cap at all.** *(high)* `PHASE_NEWPASS` ↔
+  `PHASE_CONFIRMPASS` derived a fresh Ed25519 keypair on every line and looped
+  forever on mismatch — no counter, no rate limit, and alone among the failure
+  paths in `persist.cyr`, **no audit event**, so a flood left no trace. Measured
+  2.16 ms of server CPU for ten bytes of input, ~215 µs per attacker byte. 1.6.2
+  capped the returning-player path and left the structurally identical creation
+  path open — the easier of the two to reach, since it needs no account to exist.
+
+  Mismatches now count against `MAX_LOGIN_FAILS` and emit `create.fail`. Verified
+  live: the session closes on the fifth mismatched pair.
+- **Two sessions could create the same character.** *(high)* H11 (1.6.6) refused
+  a second *login* for an existing character but wired the check only into
+  `login_on_pass`. The creation window is not a race — it is the whole
+  passphrase + confirm + class-prompt sequence, bounded only by the 5-minute
+  idle reap. Both sessions forged **different** keypairs, both set `SS_AUTHED`,
+  both wrote the record, and the last writer's passphrase became the only one
+  that opened the account.
+
+  Checked in `login_on_confirm`, which is the only place it can go:
+  `session_already_online` requires `SS_AUTHED` on the other session, and at the
+  name prompt neither is authed yet. `player_exists` is re-tested too, for the
+  case where the first creator finished and disconnected inside the window.
+  Verified live: B is refused, and **A's passphrase still opens the account**.
+
+### Changed
+
+- **The zone reset counts the whole world, not one room's floor.** *(medium)*
+  `_obj_id_present` scanned the top-level object list of the single room being
+  topped up, so an authored id that was anywhere else read as "missing" and a
+  duplicate was minted — permanently, since `obj_free` is reached only from
+  corpse decay and from a disconnecting player's inventory. Two ways to defeat
+  it: carry the object to another room (pre-existing, and named verbatim in
+  `server.cyr`'s H11 comment as "an unbounded `fl_alloc` growth path driven by
+  ordinary play"), or —
+
+  **— hide it in place, inside a container. That one is ours, from 1.6.7.** The
+  scan walked `oi_next` and never descended `OI_CONTENTS`, and before `put`
+  existed there was no way to hide an object in its own room. Reproduced live in
+  `market.stalls`: `get optic` → `put optic in shard` → `@reset` → **`objs +1`**,
+  a duplicate on the floor with the original still in the shard, once per reset
+  cycle with no ceiling. Post-fix the same sequence reports **`objs +0`** four
+  resets running.
+
+  The reset now asks the right question — not "is this id in this room" but
+  "does the world already hold as many as the zone authors". That is the classic
+  max-exist count, and it fixes both drivers at once: a relocated object still
+  lets its home room restock (the population is short by one), a hidden or
+  duplicated one does not. Player inventories count, or logging in holding an
+  authored item would restock the world for free.
+- **A stunned mob that nobody was fighting stayed stunned forever.** *(medium)*
+  Stun was decremented in exactly two places, both inside the player-versus-
+  target round. `bash` a mob and then flee or switch target, and its `MI_STUN`
+  never reached zero: `_mob_can_act` returns 0 while it is positive, so the mob
+  never wandered, never assisted and never fought again — permanently inert
+  furniture wherever a player last used an ability.
+
+  The decay moved to `mob_tick_all`, the one place that runs every tick for
+  every living mob, and is now the **only** place it happens — otherwise an
+  engaged mob would be charged twice a tick and `emp` would be worth half what
+  it claims. Equivalent for engaged mobs because `advance_tick` runs
+  `combat_tick_all` before `mob_tick_all`.
+- **Comments that described behaviour two releases old.** `room_broadcast`,
+  `room_say_broadcast` and `deliver_to` all still asserted an immediate
+  per-recipient flush and a drop-on-error that H15 (1.6.8) removed and H19
+  (1.6.9) replaced. `mi_set_stun` still credited `combat_round` with the decay.
+  Corrected — a comment asserting the opposite of its code is a finding, and
+  this line has now produced three of them.
+
+### Testing
+
+- 614 → **636 assertions**; new groups `preauth-scale`, `create-guards`,
+  `object-maxexist`, `stun-decay`.
+- **22 mutations**, every one now discriminating — but **eight did not at first,
+  and all eight were test bugs, not dead guards.** Worth listing, because the
+  pattern is consistent: a test that does not reach the code cannot fail for it.
+  - `var sessions[64]` is 64 **bytes**, not 64 entries. Writing 40 pointers into
+    it smashed the stack. This is the first line of CLAUDE.md's Key Principles
+    and I still walked into it.
+  - `ilist_find_kw_nth` with a zero-length noun matches **nothing**
+    (`kw_matches` returns 0 for `nlen <= 0`), so the object test silently
+    selected no target and skipped the entire branch under test — hiding three
+    mutations at once.
+  - The drain budget is a multiple of `RX_MAX_LINES`, so the caller-supplied cap
+    was only ever exercised at exactly 8 and would have looked honoured even if
+    ignored.
+  - The double-decay mutation needs an *engaged* mob, and the first test had no
+    combat round running at all.
+  - E4's `player_exists` re-test needs the first creator to have **disconnected**;
+    with them still online the earlier check fires first and masks it.
+- **A test that was not idempotent.** `create-guards` saves a record, so the
+  second run of the suite found it already on disk and five assertions failed.
+  Passed once, failed forever after. It now unlinks the record first.
+- Live verification for each: creation cap closes on the fifth mismatch,
+  duplicate creation refused with A's passphrase intact, and the reset reports
+  `objs +0` where it reported `objs +1`.
+
 ## [1.6.9] — 2026-07-29
 
 **Sweep batch D — coverage, and the re-run.** The last planned batch: close the

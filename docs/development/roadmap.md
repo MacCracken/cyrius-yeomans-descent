@@ -54,6 +54,7 @@ MUD rather than a well-built room-crawler.
 | **1.6.7** | Sweep batch B — content + parser correctness | ✅ 2026-07-28 |
 | **1.6.8** | Sweep batch C — resource & timing hygiene | ✅ 2026-07-28 |
 | **1.6.9** | Sweep batch D — coverage + docs; re-run sweep reopened the line | ✅ 2026-07-29 |
+| **1.6.10** | Sweep batch E — the re-run's critical + highs | ✅ 2026-07-29 |
 | **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
 | **2.1.0** | M17 — equipment slots + item modifiers · M18 — operator identity + control channel | planned |
 | **2.2.0** | M19 — threat, aggression, resistance · M20 — currency and shops | planned |
@@ -82,9 +83,9 @@ embarrassing the release.
 
 **1.6.5 shipped** — the two flagged as worth pulling forward: four content loaders that published global state before validating it (a rejected file left a live half-world while telling the operator the load had failed), and `player_save` failures discarded at four of five call sites, including the `passwd` commit that claimed success while the record kept the old key. **431 assertions.**
 
-**Batches A–D are shipped (1.6.6–1.6.9). The re-run sweep reopened the line** — it found a remote crash the first pass missed, so a **batch E (1.6.10)** is filed; see *Sweep backlog* below. **2.0 work does not start until batch E lands and a re-run comes back clean.**
+**Batches A–E are shipped (1.6.6–1.6.10).** The 1.6.9 re-run reopened the line — it found a remote crash the first pass missed — and batch E closed its critical, all four highs and both meaningful mediums. **What is left is 1.6.11 (the low/nit tail) and one more re-run; 2.0 does not start until that comes back clean.**
 
-**Next is batch E (1.6.10)** — what the 1.6.9 re-run sweep turned up, including two criticals. **Then 2.0.0**, starting with **M14 — ADR 0008 + save schema v2**, the gate everything else routes through. Read the critical path above first: saves are signed with a key derived from the player's passphrase, which the server never holds, so **migration is lazy-at-login and additive only**. Pickup pointer in [`state.md`](state.md).
+**Next is 1.6.11** — the low/nit tail from the re-run, then re-run the sweep once more. **Then 2.0.0**, starting with **M14 — ADR 0008 + save schema v2**, the gate everything else routes through. Read the critical path above first: saves are signed with a key derived from the player's passphrase, which the server never holds, so **migration is lazy-at-login and additive only**. Pickup pointer in [`state.md`](state.md).
 
 ---
 
@@ -221,86 +222,63 @@ place (the regression dimension re-checked every CHANGELOG claim from 1.6.0
 onward), and the newly-found issues cluster in areas the first sweep had no
 instrument for — which is exactly what batch D built.
 
-### 1.6.10 — Batch E: what the re-run turned up
+### 1.6.10 — Batch E: what the re-run turned up ✅ shipped
 
-Filed from the 1.6.9 re-run against the 1.6.8/1.6.9 tree. **Not** a rewrite of
-the original 44 — those are closed, and the re-run's regression dimension
-re-checked every CHANGELOG claim from 1.6.0 onward and found none undone.
+Filed from the 1.6.9 re-run; eight findings went to adversarial verification and
+**all eight survived**. The critical, all four highs and the two mediums with
+teeth are closed — see the 1.6.10 CHANGELOG entry.
 
-Eight findings went to adversarial verification (two independent lenses each,
-one instructed to refute and one to reproduce). **All eight survived; none was
-refuted.** Severities below are the verifiers' corrected values, not the
-finders' claims.
+- **`MAX_LOGIN_FAILS` was not enforced** *(critical)* — `SS_QUIT` was honoured
+  only on the epoll event path, so the cap set in 1.6.2 closed nothing for seven
+  releases. ~4.1 s per tick at 64 sessions. The tick tears such sessions down now.
+- **`drain_pending_rx` had no aggregate budget** *(critical)* — 2.2 s in one tick
+  at `MAX_SESSIONS`, unauthenticated. Now a line budget shared across the walk,
+  the same shape H16 gave `save_sweep`.
+- **Character creation had no attempt cap** *(high)* and **no audit trail** —
+  both added.
+- **Two sessions could create the same character** *(high)* — H11 covered login
+  only. Checked in `login_on_confirm`, the only place it can go.
+- **The zone reset re-minted authored objects** *(medium)* — now a world-wide
+  max-exist count. Closes the pre-existing relocate driver **and the one 1.6.7's
+  `put` introduced** (hide it in a container, in its own room).
+- **An abandoned stun never decayed** *(medium)* — mobs stunned and then left
+  alone were inert forever. Decay moved to the actor tick, single-sourced.
+- **Comments describing two-release-old behaviour** — the broadcasters and
+  `mi_set_stun`. This line has now produced three such findings; they are being
+  treated as findings, not tidying.
 
-**Critical**
+**Carried, not fixed:**
 
-- **`MAX_LOGIN_FAILS` is not actually enforced.** `SS_QUIT` is only honoured on
-  the epoll event path (`server.cyr:1084`), so the attempt cap does not close
-  the session it exists to close. A 1.6.2 fix that does not do what its
-  CHANGELOG says — which is worse than a missing fix, because it was believed
-  done. Both verifiers rated this critical.
+- **~3.8 kB of bump arena per failed login** *(high)*. Split by owner: the
+  `filestore_append` half is **upstream libro** (the 2.8.5 already tracked in
+  `state.md`), and `alloc()` has no free, so it is permanent. Bounding the
+  attempts — which 1.6.10 does on both the login and creation paths — caps total
+  exposure to a small multiple per connection regardless, which is why this is
+  no longer urgent. The descent-side half (`toml_parse`/`str_new` per attempt)
+  is fixable here and is filed for **1.6.11**.
+- The low/nit tail: `session_appendtx_tok` echoing raw typed bytes, class `hp` /
+  `energy` unclamped after the 1.6.7 sign change, the killing blow skipping the
+  condition line, `qual_single`'s comment on bare `all`, `session_free` not
+  wiping the Ed25519 secret-key block before `fl_free`, and `put X in <carried
+  container>` being unretrievable and unsaved.
+- **The four guards that survive deletion** (accept backoff, the session ceiling,
+  and now-tested `MAX_LOGIN_FAILS` / `drain_pending_rx`). 1.6.10 added real tests
+  for the last two; the accept-path pair still needs the predicates factored out
+  the way 1.6.3 factored `save_rate_limited`, so they are testable without a
+  socket.
 
-**High**
+**Exit criterion for the 1.x line:** batch E is landed and `cyrius audit` is
+green, so what remains is **one more re-run sweep coming back with no critical or
+high findings**. The 1.6.9 re-run is the reason that bar exists: the first sweep
+declared itself done while a remote crash sat on a first-class command verb, so a
+sweep that has not been re-run against the repaired tree has proved nothing.
 
-- **`drain_pending_rx` has no aggregate budget** (`server.cyr:272`).
-  `RX_MAX_LINES` (8) is a *per-session* cap and the sweep drains every session
-  inside one tick, so the real bound is 8 × session count of arbitrary command
-  work per tick — **measured at 2.1 s in a single tick**. 1.6.2 capped the wrong
-  axis. Found independently by two dimensions.
-- **Character creation has no attempt cap at all** (`persist.cyr:889`).
-  `PHASE_NEWPASS` ↔ `PHASE_CONFIRMPASS` is unbounded pre-auth Ed25519 work.
-  `bench_persist`, added in 1.6.9, is what makes the cost legible: **≈7.7 ms and
-  ≈3.9 kB of non-reclaimable bump arena per attempt.**
-- **No duplicate-identity check on character CREATION** (`persist.cyr:889`).
-  1.6.6's H11 refused a second *login* for an existing character; two sessions
-  can still create the same name concurrently, and the second silently wins.
-- **Every failed login permanently consumes ~3.8 kB of bump arena**
-  (`persist.cyr:630`). `alloc()` has no free, so failed attempts are a permanent
-  cost. Compounds the two items above.
+### 1.6.11 — the tail, then re-run
 
-**Medium**
-
-- **Objects that leave their authored room are never reclaimed, and the reset
-  re-mints them** (`item.cyr:642`). `_obj_id_present` scans only the top-level
-  list of the room being topped up, so an authored id that is anywhere else
-  reads as "missing" and a fresh instance is minted. Nothing ever frees a
-  non-corpse object lying in a room — `obj_free` is reached only from corpse
-  decay and from a disconnecting player's inventory.
-
-  **1.6.7 added a second, easier driver for this, and it is ours.** Before
-  `put` existed the only way to hide an object from the check was to carry it to
-  another room; now it can be hidden *in place*, because `_obj_id_present` walks
-  `oi_next` and never descends `OI_CONTENTS`. Reproduced live in
-  `market.stalls`: `get optic` → `put optic in shard` → `@reset` → **`objs +1`**,
-  a duplicate optic on the floor with the original still inside the shard.
-  Repeat for one per cycle, unbounded.
-
-  Fix both halves together: have the presence scan descend `OI_CONTENTS` (closes
-  the 1.6.7 driver) and give the reset a reclaim half to match its spawn half
-  (closes the original relocate driver). Note this violates v2.0 criterion #9
-  ("object counts return to a bounded steady state under soak"), and the
-  existing soak never drops or relocates an authored object, which is why it
-  passes today.
-- Comments in `room_broadcast` / `room_say_broadcast` still assert an immediate
-  flush and drop-on-error; 1.6.8 changed both.
-- A stunned mob that is not the player's current target never sheds its stun.
-- `put X in <carried container>` is accepted but X cannot be retrieved, and the
-  save record does not describe the nesting (1.6.7).
-
-**Low / nit** — `session_appendtx_tok` echoes typed bytes with the raw appender;
-class `hp` / `energy` unclamped after the 1.6.7 sign change; the killing blow
-skips the condition line and prompt; `qual_single`'s comment misdescribes bare
-`all`; `session_free` releases the Ed25519 secret-key block without wiping it.
-
-**Closed in 1.6.9, listed for the record:** the `examine` remote crash (high,
-both verifiers) and 1.6.8's `say` latency regression.
-
-**One filed finding was a false positive** and is recorded rather than silently
-dropped: `render_who` was reported as bounding the room index only from below.
-It bounds it both ways (`rm >= 0` **and** `rm < world_room_count()`).
-
-**Revised exit criterion for the 1.x line:** batch E landed, `cyrius audit`
-green, and a re-run sweep producing no critical or high findings. Then 2.0 / M14.
+The low/nit findings above, the descent-side half of the failed-login allocation,
+and the accept-path predicates. Then re-run the sweep. If it comes back clean the
+line closes and 2.0 / M14 opens; if it does not, that is the answer and the tail
+gets another batch.
 
 ---
 

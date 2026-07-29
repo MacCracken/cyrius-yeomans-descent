@@ -1276,14 +1276,23 @@ fn session_push_line_byte(s, b): i64 {
 # into the line accumulator, which dispatches complete lines to
 # session_on_line. The raw rx buffer is scratch — fully consumed here,
 # so SS_RX_LEN resets to 0 on return.
-fn session_consume_rx(s): i64 {
+# E2 (1.6.10) — the same consumer, with the line cap supplied by the caller and
+# the number of lines actually dispatched reported back through `out_fired`.
+#
+# `drain_pending_rx` needs both. It runs inside the tick over EVERY session, so
+# it has to spend a budget shared across the whole walk rather than let each
+# session take a fixed slice — and it can only spend that budget accurately if
+# it learns how many lines a session really fired, not how many it was offered.
+# Charging the full slice to a session that had one line queued would starve the
+# rest of the list for no work done.
+fn session_consume_rx_max(s, maxlines, out_fired): i64 {
     var rx = load64(s + SS_RX_BUF);
     var len = load64(s + SS_RX_LEN);
     var ts = load64(s + SS_TS);
     var i = 0;
     var fired = 0;
     while (i < len) {
-        if (fired >= RX_MAX_LINES) { i = i; break; }
+        if (fired >= maxlines) { i = i; break; }
         var ev = telnet_feed(ts, load8(rx + i));
         # Drain any negotiation reply into the tx queue before the data
         # byte, preserving RFC 854 on-wire ordering.
@@ -1307,6 +1316,7 @@ fn session_consume_rx(s): i64 {
     # drain_pending_rx (server.cyr) gives it another capped pass each tick — epoll
     # is level-triggered on socket data, so it will NOT re-fire for bytes already
     # sitting in this buffer.
+    store64(out_fired, fired);
     if (i < len) {
         var rem = len - i;
         var k = 0;
@@ -1316,6 +1326,14 @@ fn session_consume_rx(s): i64 {
     }
     store64(s + SS_RX_LEN, 0);
     return 0;
+}
+
+# The event-path consumer: one session, the full RX_MAX_LINES slice. Unchanged
+# behaviour — this is the H5 (1.6.2) dispatch cap, and every existing caller
+# still gets exactly it.
+fn session_consume_rx(s): i64 {
+    var fired[8];
+    return session_consume_rx_max(s, RX_MAX_LINES, &fired);
 }
 
 # === session_is_idle — has this session been silent past the limit? ===

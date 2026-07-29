@@ -242,10 +242,8 @@ fn mob_died(s, m): i64 {
 # caller (mob_tick_all) must skip a mob the player is already fighting, or that
 # mob swings twice a tick.
 fn mob_swing(s, m): i64 {
-    if (mi_stun(m) > 0) {
-        mi_set_stun(m, mi_stun(m) - 1);
-        return 0;
-    }
+    # E6 (1.6.10) — CHECK only; mob_tick_all owns the decay now (see below).
+    if (mi_stun(m) > 0) { return 0; }
     var tpl = mi_tpl(m);
     if (combat_try_hit(mt_hit(tpl), player_eff_ac(s)) == 1) {
         var dmg = roll(mt_ndice(tpl), mt_dsize(tpl), mt_dmod(tpl));
@@ -333,8 +331,16 @@ fn combat_round(s): i64 {
     }
 
     # A stunned mob loses its turn.
+    #
+    # E6 (1.6.10) — this used to be one of the only two places stun was
+    # decremented, and both were inside the player-versus-target round. A mob
+    # stunned and then abandoned (flee, or switch target) never decayed and was
+    # inert forever. The decay moved to mob_tick_all, which runs for every
+    # living mob every tick; this site keeps the CHECK and the prose. Ordering
+    # makes that equivalent for an engaged mob: advance_tick runs
+    # combat_tick_all before mob_tick_all, so the mob still forfeits this turn
+    # and still loses exactly one point of stun per tick.
     if (mi_stun(m) > 0) {
-        mi_set_stun(m, mi_stun(m) - 1);
         session_appendtx_cstr(s, ansi_miss());
         session_appendtx_cstr(s, mi_name_ptr(m));
         session_appendtx_cstr(s, " is reeling and cannot act.");

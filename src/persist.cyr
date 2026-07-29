@@ -882,6 +882,51 @@ fn login_on_newpass(s, buf, len): i64 {
     return 0;
 }
 
+# E3 (1.6.10) — a failed confirm costs a counted attempt, and enough of them
+# close the session.
+#
+# `login_on_newpass` derives a fresh Ed25519 keypair on every in-range line and
+# `login_on_confirm` derives again to compare, so one mismatched pair is two
+# derivations — measured 2.16 ms of server CPU for 10 bytes of attacker input,
+# about 215 us per byte. The cycle was unbounded: no counter, no rate limit, and
+# — alone among the failure paths in this file — no audit event either, so a
+# flood left no trace at all.
+#
+# 1.6.2 capped the returning-player path at MAX_LOGIN_FAILS and left the
+# structurally identical creation path open, which is the easier of the two to
+# reach because it needs no account to exist. SS_FAILS is reused deliberately:
+# session_new zeroes it and nothing else touches it before authentication, so
+# the two paths share one budget per connection, which is the honest bound —
+# an attacker should not get five guesses AND five creations.
+#
+# This only bounds anything because E1 made SS_QUIT authoritative on the tick
+# path; before that, setting it here would have been the same no-op that
+# MAX_LOGIN_FAILS was.
+fn _confirm_mismatch(s): i64 {
+    var fails = load64(s + SS_FAILS) + 1;
+    store64(s + SS_FAILS, fails);
+    audit_event(SEV_WARNING, "create.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    if (fails >= MAX_LOGIN_FAILS) {
+        session_echo_on(s);
+        session_appendtx_cstr(s, "\r\nToo many failed attempts. Closing.\r\n");
+        store64(s + SS_QUIT, 1);
+        return 0;
+    }
+    session_appendtx_cstr(s, "\r\nThose don't match. Let's begin again.\r\n");
+    return login_begin_newpass(s);
+}
+
+# The name was claimed while this session was mid-creation (E4). Refuse rather
+# than overwrite: the other session's identity is already sealed or on disk, and
+# writing ours would destroy a character that is not ours.
+fn _create_taken(s): i64 {
+    session_echo_on(s);
+    session_appendtx_cstr(s, "\r\nThat name was just taken. Please reconnect and choose another.\r\n");
+    store64(s + SS_QUIT, 1);
+    audit_event(SEV_WARNING, "create.dup", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    return 0;
+}
+
 # Second half of creation: re-derive from the confirm line and require the
 # same public key — the passphrase is never stored, so equality of derived
 # pubkeys IS the comparison. On match the identity is sealed (created stamp,
@@ -892,16 +937,36 @@ fn login_on_confirm(s, buf, len): i64 {
     # over-long confirm cannot match — treat as a mismatch (ident_derive also
     # clamps, so this is purely for clean behaviour).
     if (len > PASS_MAX) {
-        session_appendtx_cstr(s, "\r\nThose don't match. Let's begin again.\r\n");
-        return login_begin_newpass(s);
+        return _confirm_mismatch(s);
     }
     var pk2 = g_persist_dec + 128;
     var sk2 = g_persist_dec + 160;
     ident_derive(blk, buf, len, sk2, pk2);
     if (_bytes_eq(pk2, blk + IDENT_PK, PK_LEN) == 0) {
-        session_appendtx_cstr(s, "\r\nThose don't match. Let's begin again.\r\n");
-        return login_begin_newpass(s);
+        return _confirm_mismatch(s);
     }
+    # E4 (1.6.10) — the same character must not be created twice concurrently.
+    #
+    # H11 (1.6.6) refused a second session for an existing character, but wired
+    # the check only into login_on_pass — the RETURNING-player path. Creation had
+    # none, and the window is not a race: it is the whole passphrase + confirm +
+    # class-prompt sequence, bounded only by the 5-minute idle reap. Two sessions
+    # that both type the same unused name each forge their own salt and keypair,
+    # each set SS_AUTHED, and each write data/players/<name>.cyml — with DIFFERENT
+    # pubkeys, so the last writer's passphrase becomes the only one that opens the
+    # account and the first player's character is silently gone.
+    #
+    # It has to sit HERE and not at the name prompt: session_already_online
+    # requires SS_AUTHED on the other session, and at the name prompt neither is
+    # authed yet. player_exists is re-tested too, for a record that appeared
+    # during the window.
+    if (session_already_online(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), s) == 1) {
+        return _create_taken(s);
+    }
+    if (player_exists(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN)) == 1) {
+        return _create_taken(s);
+    }
+    store64(s + SS_FAILS, 0);   # sealed — the creation attempt count resets
     store64(blk + IDENT_CREATED, get_epoch_secs());
     store64(s + SS_AUTHED, 1);
     session_echo_on(s);   # 0.8.1 — passphrase set; restore echo

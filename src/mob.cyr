@@ -112,7 +112,9 @@ fn mi_set_target(m, v): i64 { store64(m + MI_TARGET, v); return 0; }
 fn mi_next(m): i64        { return load64(m + MI_NEXT); }
 # Remaining stunned ticks (bash / EMP). Non-zero means the mob forfeits its swing.
 fn mi_stun(m): i64        { return load64(m + MI_STUN); }
-# Abilities set the tick count; combat_round spends one as it burns the mob's turn.
+# Abilities set the tick count; mob_tick_all spends one per tick (E6, 1.6.10 —
+# it used to be combat_round, which only ran while a player was engaged, so an
+# abandoned stun never decayed).
 fn mi_set_stun(m, v): i64 { store64(m + MI_STUN, v); return 0; }
 # Instances carry no name of their own — hop to the template; cstr-safe, see mt_name_ptr.
 fn mi_name_ptr(m): i64    { return mt_name_ptr(mi_tpl(m)); }
@@ -681,6 +683,28 @@ fn mob_tick_all(tick): i64 {
             if (load64(m + MI_ACTED) != tick) {
                 store64(m + MI_ACTED, tick);
                 took_turn = took_turn + 1;
+                # E6 (1.6.10) — a stun the player is not standing there to
+                # burn off must still tick down.
+                #
+                # Stun was decremented in exactly two places, both inside
+                # combat_round / mob_swing, i.e. only while the player is
+                # actively engaged with THAT mob. `bash` the mob, then flee or
+                # switch target, and its MI_STUN never reached zero again:
+                # _mob_can_act returns 0 forever, so it never wandered, never
+                # assisted and never fought — permanently inert furniture in
+                # the room where a player last used an ability.
+                #
+                # Decayed here, in the one place that runs every tick for every
+                # living mob — and this is now the ONLY place it is decremented.
+                # The two sites in combat.cyr keep their check and their prose
+                # but no longer decay, so an engaged mob cannot be charged twice
+                # in a tick, which it would be: mob_tick_all walks every mob,
+                # including the player's current target.
+                #
+                # Equivalent for an engaged mob, because advance_tick runs
+                # combat_tick_all before mob_tick_all — it still forfeits the
+                # turn and still sheds exactly one point per tick.
+                if (mi_stun(m) > 0) { mi_set_stun(m, mi_stun(m) - 1); }
                 if (_mob_can_act(m) == 1) {
                     if (mi_target(m) != 0) {
                         # H7-a (1.6.4) — reap a stale latch FIRST. A mob whose

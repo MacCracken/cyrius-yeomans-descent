@@ -2813,6 +2813,448 @@ fn test_roomless_safety(): i64 {
     return 0;
 }
 
+# Build an unauthenticated session with `nlines` queued in its rx buffer. This
+# is the shape of the E2 pre-auth flood: bytes already off the socket, epoll
+# quiet, only the tick still touching it.
+#
+# The queued lines are INVALID NAMES parked in PHASE_NAME, deliberately. An
+# invalid name re-prompts and never sets SS_QUIT (session.cyr's login_on_name),
+# so the session survives every pass and the budget is what is under test. The
+# first draft used mismatched passphrases — which now trips the E3 creation cap,
+# whereupon E1 frees the session mid-walk and this harness reads a freed pointer
+# out of its own array. That is E1 and E3 working exactly as intended; it is not
+# what this test is measuring.
+fn _armed_rx_sess(nlines): i64 {
+    var s = _tx_sess();
+    store64(s + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(s + SS_NAME_BUF, fl_alloc(NAME_CAP));
+    store64(s + SS_TS, telnet_state_new());
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_PHASE, PHASE_NAME);
+    var rx = fl_alloc(RX_CAP);
+    store64(s + SS_RX_BUF, rx);
+    var o = 0;
+    var line = 0;
+    while (line < nlines) {
+        if (o > RX_CAP - 8) { line = nlines; continue; }
+        store8(rx + o, 33); o = o + 1;      # '!' — never a valid name
+        store8(rx + o, 33); o = o + 1;
+        store8(rx + o, 13); o = o + 1;      # CR
+        line = line + 1;
+    }
+    store64(s + SS_RX_LEN, o);
+    return s;
+}
+
+# Length of the active-session list.
+fn _sess_list_len(): i64 {
+    var n = 0;
+    var s = g_session_head;
+    while (s != 0) { n = n + 1; s = load64(s + SS_NEXT); }
+    return n;
+}
+
+# === E1 + E2 (1.6.10) — the tick honours SS_QUIT and the drain has a budget. ===
+fn test_preauth_scale(): i64 {
+    test_group("preauth-scale");
+
+    # --- E2: drain_pending_rx spends a budget SHARED across the whole session
+    # list, not RX_MAX_LINES per session. Stand up more sessions than the budget
+    # can service in one tick and count how many lines actually got dispatched.
+    var saved_head = g_session_head;
+    var saved_epfd = g_epfd;
+    g_session_head = 0;
+    g_epfd = 0;
+
+    var NS = 40;                 # far more sessions than DRAIN_LINES_MAX
+    var i = 0;
+    # alloc, not `var sessions[NS * 8]` — a `var buf[N]` declaration is N BYTES,
+    # and getting that wrong here smashed the stack (it is the first line of
+    # CLAUDE.md's Key Principles for a reason).
+    var sessions = alloc(NS * 8);
+    while (i < NS) {
+        var s = _armed_rx_sess(20);
+        store64(sessions + i * 8, s);
+        store64(s + SS_NEXT, g_session_head);
+        g_session_head = s;
+        i = i + 1;
+    }
+
+    # One tick's worth of draining. The aggregate lines consumed must not exceed
+    # the budget — the whole finding was that it was sessions x RX_MAX_LINES.
+    var before_total = 0;
+    i = 0;
+    while (i < NS) { before_total = before_total + load64(load64(sessions + i * 8) + SS_RX_LEN); i = i + 1; }
+    drain_pending_rx();
+    var after_total = 0;
+    i = 0;
+    while (i < NS) { after_total = after_total + load64(load64(sessions + i * 8) + SS_RX_LEN); i = i + 1; }
+
+    # Each dispatched line is 3 rx bytes ("!!" + CR), so the byte delta is an
+    # exact proxy for lines spent.
+    var drained_bytes = before_total - after_total;
+    assert(drained_bytes > 0, "the drain made progress");
+    # Unbudgeted, all 40 sessions would each lose up to RX_MAX_LINES lines in one
+    # tick — 320 lines. Budgeted, at most DRAIN_LINES_MAX move across the lot.
+    assert(drained_bytes <= DRAIN_LINES_MAX * 3,
+           "the tick spent at most DRAIN_LINES_MAX lines across ALL sessions");
+    # And it is not a stall: repeated ticks eventually clear the whole list.
+    var guard = 0;
+    while (after_total > 0) {
+        drain_pending_rx();
+        after_total = 0;
+        i = 0;
+        while (i < NS) { after_total = after_total + load64(load64(sessions + i * 8) + SS_RX_LEN); i = i + 1; }
+        guard = guard + 1;
+        if (guard > 10000) { after_total = 0; }
+    }
+    assert(guard <= 10000, "the whole backlog drains across successive ticks");
+
+    # --- E1: a session marked SS_QUIT is torn down by the tick, not left to be
+    # fed forever. This is what made MAX_LOGIN_FAILS a no-op: SS_QUIT was only
+    # honoured on the epoll event path, so a silent socket kept its condemned
+    # session alive and being charged 8 keypair derivations a tick.
+    var q = _armed_rx_sess(20);
+    store64(q + SS_QUIT, 1);
+    store64(q + SS_NEXT, 0);
+    g_session_head = q;
+    # A fresh telnet parser and no real fd — drop_session frees the session, so
+    # everything it owns must be owned solely by it (as _armed_rx_sess builds it).
+    assert_eq(_sess_list_len(), 1, "the condemned session is on the list");
+    drain_pending_rx();
+    assert_eq(_sess_list_len(), 0, "a SS_QUIT session is dropped by the tick, not fed by it");
+
+    # --- The caller-supplied cap itself. Above only exercises take == 8, since
+    # DRAIN_LINES_MAX is a multiple of RX_MAX_LINES — so the parameter would look
+    # honoured even if it were ignored. Drive it directly with a cap BELOW
+    # RX_MAX_LINES, which is the case the last session of a partly-spent budget
+    # actually hits.
+    var c = _armed_rx_sess(20);
+    var fired[8];
+    session_consume_rx_max(c, 3, &fired);
+    assert_eq(load64(&fired), 3, "a cap below RX_MAX_LINES is honoured exactly");
+    session_consume_rx_max(c, 1, &fired);
+    assert_eq(load64(&fired), 1, "and so is a cap of one");
+    session_consume_rx_max(c, RX_MAX_LINES, &fired);
+    assert_eq(load64(&fired), RX_MAX_LINES, "the full slice still fires RX_MAX_LINES");
+    # A cap of zero must consume nothing, not fall through to the default.
+    var before_len = load64(c + SS_RX_LEN);
+    session_consume_rx_max(c, 0, &fired);
+    assert_eq(load64(&fired), 0, "a zero cap dispatches nothing");
+    assert_eq(load64(c + SS_RX_LEN), before_len, "and leaves the buffer untouched");
+
+    g_session_head = saved_head;
+    g_epfd = saved_epfd;
+    return 0;
+}
+
+# === E3 + E4 (1.6.10) — the character-creation path is bounded and exclusive. ===
+fn test_create_guards(): i64 {
+    test_group("create-guards");
+    persist_init();
+
+    # Start from a clean slate: this group SAVES a record for "Createling" (that
+    # is the point of the last case), so without this the second run of the
+    # suite finds the record already on disk, E4's player_exists re-test refuses
+    # the very first creation, and five assertions fail. Passed once, failed
+    # forever after — a test that is not idempotent is a landmine.
+    _path_for("Createling", 10, g_persist_path);
+    syscall(87, g_persist_path);   # unlink(2); absent is fine
+
+    # A session parked mid-creation: identity forged by the newpass step, waiting
+    # on the confirm line. login_on_confirm re-derives from what it is given and
+    # compares public keys — the passphrase itself is never stored.
+    var saved_head = g_session_head;
+    g_session_head = 0;
+
+    var s = _mk_sess("Createling", 10);
+    store64(s + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_PHASE, PHASE_CONFIRMPASS);
+    var blk = sess_ident(s);
+    var salt = alloc(SALT_LEN);
+    var q = 0;
+    while (q < SALT_LEN) { store8(salt + q, 11 + q); q = q + 1; }
+    memcpy(blk, salt, SALT_LEN);
+    ident_derive(blk, "rightphrase", 11, blk + IDENT_SK, blk + IDENT_PK);
+
+    # --- E3: every mismatched confirm costs a counted attempt, and the fifth
+    # closes the session. Unbounded before 1.6.10: each mismatch is TWO Ed25519
+    # keypair derivations (~2.16 ms) for ten bytes of input, with no counter, no
+    # rate limit and — alone among the failure paths here — no audit trail.
+    var i = 0;
+    while (i < MAX_LOGIN_FAILS - 1) {
+        _tx_reset(s);
+        login_on_confirm(s, "wrongphrase", 11);
+        assert_eq(load64(s + SS_FAILS), i + 1, "a mismatched confirm counts an attempt");
+        assert_eq(load64(s + SS_QUIT), 0, "and does not close the session early");
+        i = i + 1;
+    }
+    _tx_reset(s);
+    login_on_confirm(s, "wrongphrase", 11);
+    assert_eq(load64(s + SS_FAILS), MAX_LOGIN_FAILS, "the cap is reached");
+    assert_eq(load64(s + SS_QUIT), 1, "and MAX_LOGIN_FAILS closes the creation session");
+    assert_eq(load64(s + SS_AUTHED), 0, "a capped-out session is never sealed");
+    assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "Too many failed"), 1,
+              "and it is told why");
+
+    # A CORRECT confirm on a fresh session seals it and clears the counter, so
+    # the cap cannot leak across a successful creation.
+    var ok = _mk_sess("Createling", 10);
+    store64(ok + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(ok + SS_FD, 0 - 1);
+    store64(ok + SS_PHASE, PHASE_CONFIRMPASS);
+    var okblk = sess_ident(ok);
+    memcpy(okblk, salt, SALT_LEN);
+    ident_derive(okblk, "rightphrase", 11, okblk + IDENT_SK, okblk + IDENT_PK);
+    store64(ok + SS_FAILS, 3);
+    _tx_reset(ok);
+    login_on_confirm(ok, "rightphrase", 11);
+    assert_eq(load64(ok + SS_AUTHED), 1, "a matching confirm seals the identity");
+    assert_eq(load64(ok + SS_FAILS), 0, "and resets the attempt counter");
+    assert_eq(load64(ok + SS_QUIT), 0, "and does not close the session");
+
+    # --- E4: the same name must not be sealed twice concurrently. H11 (1.6.6)
+    # refused a second LOGIN for an existing character but left creation open,
+    # and the window is not a race — it is the whole passphrase + confirm +
+    # class-prompt sequence. Both sessions would forge DIFFERENT keypairs and
+    # both write the record, so the last writer's passphrase became the only one
+    # that opened the account.
+    store64(ok + SS_NEXT, 0);
+    g_session_head = ok;                       # `ok` is authed and holds the name
+    var rival = _mk_sess("Createling", 10);
+    store64(rival + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(rival + SS_FD, 0 - 1);
+    store64(rival + SS_PHASE, PHASE_CONFIRMPASS);
+    var rblk = sess_ident(rival);
+    var rsalt = alloc(SALT_LEN);
+    q = 0;
+    while (q < SALT_LEN) { store8(rsalt + q, 200 + q); q = q + 1; }
+    memcpy(rblk, rsalt, SALT_LEN);
+    ident_derive(rblk, "rivalphrase", 11, rblk + IDENT_SK, rblk + IDENT_PK);
+    _tx_reset(rival);
+    login_on_confirm(rival, "rivalphrase", 11);
+    assert_eq(load64(rival + SS_AUTHED), 0,
+              "a second concurrent creation of the same name is refused");
+    assert_eq(load64(rival + SS_QUIT), 1, "and the rival session is closed");
+    assert_eq(_contains(load64(rival + SS_TX_BUF), load64(rival + SS_TX_LEN), "just taken"), 1,
+              "and told the name was taken, not silently overwritten");
+    assert_eq(load64(ok + SS_AUTHED), 1, "the session that got there first is untouched");
+
+    # The other half of the window: the first creator finished and DISCONNECTED
+    # while the rival was still typing. No session holds the name any more, so
+    # session_already_online cannot see it — only the record on disk can. That is
+    # what the player_exists re-test is for, and it is a distinct path.
+    store64(ok + SS_ROOM, 0 - 1);
+    store64(ok + SS_HP, 10); store64(ok + SS_MAXHP, 10);
+    assert_eq(player_save(ok), 1, "the first creator's record reaches disk");
+    g_session_head = 0;                        # ...and then they disconnect
+    assert_eq(session_already_online("Createling", 10, 0), 0,
+              "no live session holds the name any more");
+
+    var late = _mk_sess("Createling", 10);
+    store64(late + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(late + SS_FD, 0 - 1);
+    store64(late + SS_PHASE, PHASE_CONFIRMPASS);
+    var lblk = sess_ident(late);
+    var lsalt = alloc(SALT_LEN);
+    q = 0;
+    while (q < SALT_LEN) { store8(lsalt + q, 77 + q); q = q + 1; }
+    memcpy(lblk, lsalt, SALT_LEN);
+    ident_derive(lblk, "latephrase", 10, lblk + IDENT_SK, lblk + IDENT_PK);
+    _tx_reset(late);
+    login_on_confirm(late, "latephrase", 10);
+    assert_eq(load64(late + SS_AUTHED), 0,
+              "a creation that would overwrite an existing record is refused");
+    assert_eq(load64(late + SS_QUIT), 1, "and that session is closed too");
+
+    g_session_head = saved_head;
+    return 0;
+}
+
+# === E5 (1.6.10) — the reset counts the whole world, not one room's floor. ===
+fn test_object_maxexist(): i64 {
+    test_group("object-maxexist");
+    if (g_room_count == 0)    { assert(0, "maxexist: needs a loaded world"); return 0; }
+    if (g_obj_tpl_count == 0) { assert(0, "maxexist: needs object templates"); return 0; }
+
+    # Take the first id room 0 authors, and start from a fully-stocked world.
+    var sp = room_objspawn(room_at(0));
+    if (sp == 0) { assert(0, "maxexist: room 0 authors no objects"); return 0; }
+    var p = str_data(sp);
+    var idlen = 0;
+    while (idlen < str_len(sp)) {
+        if ((load8(p + idlen) & 0xFF) == 32) { idlen = str_len(sp); }
+        else { idlen = idlen + 1; }
+    }
+    if (idlen > str_len(sp)) { idlen = str_len(sp); }
+
+    zone_reset_objs();                       # top the world up to the ceiling
+    var authored = _obj_id_authored_count(p, idlen);
+    assert(authored >= 1, "the id is authored somewhere");
+    assert_eq(_obj_id_world_count(p, idlen), authored,
+              "a freshly-reset world holds exactly the authored count");
+    assert_eq(zone_reset_objs(), 0, "and a second reset mints nothing");
+
+    # --- The 1.6.7 driver: hide the instance inside a container, in its own
+    # room. The old scan walked oi_next and never descended OI_CONTENTS, so the
+    # room read as empty and the reset minted a duplicate — once per cycle,
+    # forever. Reproduced live before the fix (`@reset` reported `objs +1`).
+    var slot = room_at(0) + RM_OBJ_HEAD;
+    # Find the instance carrying THIS authored id, by id — not by keyword.
+    # (ilist_find_kw_nth with a zero-length noun matches nothing: kw_matches
+    # returns 0 for nlen <= 0. Using it here silently selected nothing and left
+    # three mutations undetected, which is how this was caught.)
+    var target = 0;
+    var scan = load64(slot);
+    while (scan != 0) {
+        if (_oi_id_eq(scan, p, idlen) == 1) { target = scan; scan = 0; }
+        else { scan = oi_next(scan); }
+    }
+    assert(target != 0, "room 0 holds an instance of its own authored id");
+    var box = item_new(ot_at(1));
+    ilist_push(slot, box);
+    if (target != 0) {
+        ilist_remove(slot, target);
+        ilist_push(box + OI_CONTENTS, target);
+    }
+    # The instance is now INSIDE box, so nothing of that id is on the room's
+    # top level. A scan that walks only oi_next therefore returns 0 here; one
+    # that descends OI_CONTENTS returns 1. That difference is the whole bug.
+    assert_eq(_obj_id_count_list(load64(slot), p, idlen), 1,
+              "the room count descends into containers to find the hidden instance");
+    assert_eq(_obj_id_world_count(p, idlen), authored,
+              "hiding an instance in a container does not make it vanish from the count");
+    assert_eq(zone_reset_objs(), 0, "so the reset does NOT mint a duplicate");
+
+    # --- The OTHER driver, and the one the world-wide ceiling exists for:
+    # carry the object to a DIFFERENT room and leave it there. Room 0's own
+    # scan now reads zero however thoroughly it descends, so only a world-wide
+    # count can tell "relocated" from "gone". Without the ceiling the reset
+    # mints a duplicate here — the pre-existing growth path, named verbatim in
+    # server.cyr's H11 comment.
+    if (g_room_count > 1) {
+        ilist_remove(box + OI_CONTENTS, target);
+        var away = room_at(1) + RM_OBJ_HEAD;
+        ilist_push(away, target);
+        assert_eq(_obj_id_count_list(load64(slot), p, idlen), 0, "room 0 no longer holds one");
+        assert_eq(_obj_id_world_count(p, idlen), authored, "but the world still does");
+        assert_eq(zone_reset_objs(), 0, "so the reset does NOT mint a replacement");
+        # Put it back where the rest of this group expects it.
+        ilist_remove(away, target);
+        ilist_push(box + OI_CONTENTS, target);
+    }
+
+    # --- The pre-existing driver: an instance genuinely leaves the world. The
+    # population is short, so the zone SHOULD restock — the max-exist rule must
+    # not turn into "never respawn anything".
+    if (target != 0) {
+        ilist_remove(box + OI_CONTENTS, target);
+        obj_free(target);
+        assert_eq(_obj_id_world_count(p, idlen), authored - 1, "the world is one short");
+        assert_eq(zone_reset_objs(), 1, "and the reset restocks exactly one");
+        assert_eq(_obj_id_world_count(p, idlen), authored, "back to the authored ceiling");
+    }
+
+    # A player carrying one counts too — otherwise logging in with an authored
+    # item in hand would restock the world for free, which is the same
+    # duplication by another route.
+    var carried = 0;
+    scan = load64(slot);
+    while (scan != 0) {
+        if (_oi_id_eq(scan, p, idlen) == 1) { carried = scan; scan = 0; }
+        else { scan = oi_next(scan); }
+    }
+    if (carried != 0) {
+        var saved_head = g_session_head;
+        var holder = _mk_sess("Holder", 6);
+        ilist_remove(slot, carried);
+        ilist_push(holder + SS_INV, carried);
+        store64(holder + SS_NEXT, 0);
+        g_session_head = holder;
+        assert_eq(_obj_id_world_count(p, idlen), authored,
+                  "an item in a player's inventory still counts against the ceiling");
+        # Put it back so the world is left exactly as this group found it.
+        ilist_remove(holder + SS_INV, carried);
+        ilist_push(slot, carried);
+        g_session_head = saved_head;
+    }
+
+    ilist_remove(slot, box);
+    obj_free(box);
+    assert_eq(_obj_id_world_count(p, idlen), authored, "the world is left at the ceiling");
+    return 0;
+}
+
+# === E6 (1.6.10) — a stun decays even when nobody is fighting the mob. ===
+fn test_stun_decay(): i64 {
+    test_group("stun-decay");
+    if (g_mob_tpl_count == 0) { assert(0, "stun-decay: needs a mob template"); return 0; }
+
+    var tpl = mt_at(0);
+    var m = mob_spawn(tpl, 0);
+    var saved_head = g_session_head;
+    g_session_head = 0;                     # nobody engaged with it at all
+
+    # Stun it the way `emp` does, then run ticks with no player anywhere near.
+    # Before 1.6.10 stun was decremented ONLY inside the player-versus-target
+    # round, so this mob stayed stunned forever: _mob_can_act returns 0 while
+    # MI_STUN is positive, so it never wandered, never assisted and never fought
+    # again — permanently inert furniture wherever a player last used bash or emp.
+    mi_set_stun(m, 2);
+    mob_tick_all(g_tick_count + 1);
+    assert_eq(mi_stun(m), 1, "an unengaged stunned mob sheds a point per tick");
+    mob_tick_all(g_tick_count + 2);
+    assert_eq(mi_stun(m), 0, "and reaches zero");
+    assert_eq(_mob_can_act(m), 1, "so it can act again");
+
+    # It must not go negative, and a mob that is not stunned is untouched.
+    mob_tick_all(g_tick_count + 3);
+    assert_eq(mi_stun(m), 0, "a mob with no stun stays at zero");
+
+    # Exactly one point per tick, not two: mob_tick_all walks EVERY mob, so if
+    # combat.cyr still decayed as well an engaged mob would lose both points in
+    # a single tick and `emp` would be worth half what it says.
+    mi_set_stun(m, 2);
+    mob_tick_all(g_tick_count + 4);
+    assert_eq(mi_stun(m), 1, "one point per tick, never two");
+
+    # --- And the engaged case, through the REAL advance_tick. This is the one
+    # that catches a double decay: mob_tick_all walks every mob including the
+    # player's current target, so if combat.cyr still decremented as well, an
+    # engaged mob would shed two points a tick and `emp` would be worth half
+    # what it claims. Only a live combat round can see that.
+    var s = _mk_sess("Stunner", 7);
+    store64(s + SS_ROOM, 0);
+    store64(s + SS_PHASE, PHASE_CMD);
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_HP, 500); store64(s + SS_MAXHP, 500);
+    store64(s + SS_NDICE, 1); store64(s + SS_DSIZE, 1); store64(s + SS_DMOD, 0);
+    var em = mob_spawn(tpl, 0);
+    mi_set_hp(em, 5000);                    # survives the round, so the tick is clean
+    store64(s + SS_TARGET, em);
+    mi_set_target(em, s);
+    store64(s + SS_NEXT, 0);
+    g_session_head = s;
+    obs_init();
+
+    mi_set_stun(em, 2);
+    advance_tick();
+    assert_eq(mi_stun(em), 1, "an ENGAGED mob sheds exactly one point per tick, not two");
+    advance_tick();
+    assert_eq(mi_stun(em), 0, "and reaches zero on the next");
+
+    store64(s + SS_TARGET, 0);
+    mi_set_target(em, 0);
+    mob_remove(em);
+    g_session_head = 0;
+
+    mi_set_stun(m, 0);
+    mob_remove(m);
+    g_session_head = saved_head;
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -3037,6 +3479,10 @@ fn main() {
     test_save_meter();
     test_hex_identity();
     test_roomless_safety();
+    test_preauth_scale();
+    test_create_guards();
+    test_object_maxexist();
+    test_stun_decay();
 
     return assert_summary();
 }

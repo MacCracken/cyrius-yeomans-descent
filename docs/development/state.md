@@ -3,14 +3,52 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.6.9 — batches A–D shipped; the re-run reopened the line, batch E filed)
+> **Last refresh**: 2026-07-29 (v1.6.10 — batches A–E shipped; 1.6.11 tail + one more re-run remain)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.6.9 tree.
+> tests, boot guide) describes the **current** 1.6.10 tree.
 
 ## Version
+
+**1.6.10** — sweep batch E, the re-run's findings, 2026-07-29. **636
+assertions**; `cyrius audit` exits 0; 5/5 benches.
+
+- **`MAX_LOGIN_FAILS` was enforced nowhere.** `SS_QUIT` was read on the epoll
+  event path only, so a session with queued rx kept being fed 8 lines a tick
+  *after* the server condemned it — ~64 ms each per tick, **~4.1 s per tick at
+  64 sessions**. A cap believed live since 1.6.2. The tick tears them down now.
+- **`drain_pending_rx` had no aggregate budget** — `RX_MAX_LINES` is per
+  session and the walk covers all of them. **2.2 s in one tick at
+  `MAX_SESSIONS`**, unauthenticated, from ~1 MB of input. Now a line budget
+  shared across the walk, mirroring what H16 did for `save_sweep`.
+- **Character creation had no attempt cap and no audit trail**, and **two
+  sessions could create the same character** — H11 (1.6.6) covered login only,
+  and the window is the whole confirm sequence, not a race. Both closed in
+  `login_on_confirm`, verified live.
+- **The zone reset re-minted authored objects.** Now a world-wide max-exist
+  count. Closes the pre-existing relocate driver **and the one 1.6.7's `put`
+  introduced** — `objs +1` per reset before, `objs +0` after.
+- **An abandoned stun never decayed**, so a mob bashed and then left alone was
+  inert forever. Decay moved to the actor tick and single-sourced there.
+
+**Still open: one more re-run.** Batch E closed the critical and every high the
+1.6.9 sweep produced, but the bar for closing the 1.x line is a *re-run that
+comes back clean*, and that has not been done against this tree. The first sweep
+declared itself finished while a remote crash sat on `examine`; a sweep that has
+not been re-run has proved nothing. 1.6.11 carries the low/nit tail and that
+re-run.
+
+**Testing note worth carrying.** Twenty-two mutations, and **eight failed to
+discriminate on the first pass — every one a test bug, not a dead guard.**
+`var sessions[64]` is 64 *bytes* (the first line of CLAUDE.md's Key Principles,
+and I still hit it); `ilist_find_kw_nth` with a zero-length noun matches nothing,
+so an object test silently selected no target and skipped the branch under test,
+masking three mutations at once; a budget that is a multiple of `RX_MAX_LINES`
+never exercises a partial cap; and a double-decay bug is invisible without an
+*engaged* mob. Separately, `create-guards` saved a record and so failed on its
+own second run — a test that is not idempotent is a landmine.
 
 **1.6.9** — sweep batch D, coverage + the re-run, 2026-07-29. **581 assertions**;
 `cyrius audit` exits 0; 5/5 benches.
@@ -501,7 +539,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (581 assertions, 31 groups)
+  cyrius-yeomans-descent.tcyr   unit suite (636 assertions, 35 groups)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -544,7 +582,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **581** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **636** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -718,19 +756,21 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** The tree builds, `cyrius audit` exits 0, and **581
+**No active cycle.** The tree builds, `cyrius audit` exits 0, and **636
 assertions + 5 benches** pass.
 
 **The 1.x line is NOT closed.** M10–M13, the 1.6.0 hardening sweep, and sweep
-batches A–D (1.6.6–1.6.9) are all shipped, and every one of the original 44
+batches A–E (1.6.6–1.6.10) are all shipped, and every one of the original 44
 verified findings is closed and re-verified as still closed. But batch D's last
 item was to **re-run the sweep**, and it found a remotely-triggerable crash the
 first pass had missed (`examine` on a zone-less server) plus a regression 1.6.8
-had introduced. Both are fixed in 1.6.9; the remaining verified findings are
-**batch E (1.6.10)** on the roadmap, including two rated critical.
+had introduced. Both were fixed in 1.6.9, and batch E (1.6.10) closed the critical plus every
+high. What remains is the low/nit tail and, decisively, **a re-run that comes
+back clean** — which has not happened yet.
 
-The revised exit criterion: batch E landed, `cyrius audit` green, and a re-run
-producing no critical or high findings. **2.0 / M14 does not start before that.**
+The exit criterion: **a re-run sweep producing no critical or high findings.**
+Batch E is landed and the audit is green; the re-run is 1.6.11's job. **2.0 /
+M14 does not start before that.**
 
 **One item is parked for upstream:** ~1632 bytes of bump arena per save (and
 ~3.9 kB per login), inside libro's `chain_append` / `filestore_append` —
@@ -742,8 +782,8 @@ reintroduced descent-side allocation trips the audit gate rather than a soak.
 (The *previous* parked item — the unbounded in-memory audit chain — was closed
 upstream in libro 2.8.4 and consumed in 1.6.1.)
 
-Next is **batch E (1.6.10)**, then **2.0.0** starting with **M14 — ADR 0008 +
-save schema v2**. Everything
+Next is **1.6.11** (the tail, then the re-run), then **2.0.0** starting with
+**M14 — ADR 0008 + save schema v2**. Everything
 else in the 2.0 line routes through it. Before touching it, read the critical
 path in [`roadmap.md`](roadmap.md#critical-path); the binding constraint is that
 records are signed with a key re-derived from the player's passphrase, which the
@@ -826,7 +866,7 @@ guard these.
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test                                      # 581 assertions, all pass
+cyrius test                                      # 636 assertions, all pass
 ./build/cyrius-yeomans-descent serve 4000
 # new name → passphrase (echo-suppressed) → class → play; `save`/`passwd`/`quit`,
 # reconnect → restored + "last seen". kill -9 after a save → restart → no loss.
