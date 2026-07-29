@@ -373,19 +373,106 @@ fn mobs_forget_session(s): i64 {
 # one that decides whether a tick can be swallowed whole.
 enum EventBudget { EVENT_LINES_MAX = 16; }
 enum DrainConst {
-    # 16 x ~1.08 ms (the costliest unauthenticated line, a keypair derivation)
-    # = ~17 ms, about a third of the ADR 0001 50 ms p99 drift budget, and that
-    # worst case is transient: E3 caps how many such lines one session may ever
-    # spend before it is closed.
+    # 1.7.0 — THIS COMMENT USED TO DO THE ARITHMETIC, AND IT WAS WRONG.
+    #
+    # It read: "16 x ~1.08 ms (the costliest unauthenticated line, a keypair
+    # derivation) = ~17 ms, about a third of the ADR 0001 50 ms p99 drift
+    # budget." Every clause of that was false or unfounded:
+    #
+    #   - A keypair derivation was NOT the costliest unauthenticated line. A
+    #     wrong passphrase against a name that exists was, at ~8.2 ms — seven
+    #     times more — because it paid a full ed25519_verify. The correct figure
+    #     was already written down twice within thirty lines of here (the E1
+    #     block above says "measured 7.66 ms"; the EVENT_LINES_MAX block says
+    #     "~8.1 ms for a wrong-passphrase verify"). This comment used neither.
+    #   - So the real worst case was 16 x 8.2 = 131 ms, not 17 ms.
+    #   - ADR 0001 contains no 50 ms figure at all. It says tick drift under load
+    #     is load-bearing and points at the M4 gate. The number lives in the
+    #     roadmap and the benches, which is why three gates could disagree about
+    #     it without anything failing.
+    #
+    # Both halves are now fixed. The reorder in player_auth_load makes a wrong
+    # passphrase cost ~1.07 ms, so the 1.08 ms premise is finally TRUE; and the
+    # bound no longer rests on a premise at all, because PASS_CHARGE_MAX meters
+    # what the line actually consumed. This count stays at 16 as a BACKSTOP for
+    # cost the meter cannot see (a `look` in a room full of dropped items), and
+    # keeping the value buys a property worth having: 1.7.0 can only ever admit
+    # FEWER lines than 1.6.15 did, never more. It is a strict refinement.
     DRAIN_LINES_MAX = 16;
+}
+
+# === PASS_CHARGE_MAX — the real bound (1.7.0). ===
+#
+# ONE constant for BOTH dispatch sites, on purpose: ADR 0003 has two loops, and
+# three of the last four findings in this file were one loop capped and the other
+# not. A single name cannot be updated in one place and forgotten in the other.
+#
+# Four constraints fix it at 20 units (= 5000 us of charged work per window):
+#   1. A sustained pass stays inside a fifth of the drift allowance:
+#      2 windows x 20 x 250 us = 10 000 us <= 50 000 / 5.          OK
+#   2. It admits the dearest UNAUTHENTICATED line from the cap rather than by
+#      luck of the progress clause: CHG_DERIVE + CHG_SIGN = 17 <= 20.  OK
+#   3. It does not admit two of them: 17 + 17 = 34 > 20.            OK
+#   4. It is below the dearest line overall, so the worst a window can overrun
+#      is max(cap, dearest) and not cap + dearest: 20 < 54.         OK
+#
+# Worst realised window, by what the peer sends: one successful login (13.5 ms,
+# via the progress clause), or two wrong passphrases (3.4 ms), or one 4 kB `say`
+# to a full room (6.5 ms), or sixteen `look`s (1.2 ms, count-bound).
+# === g_rx_backlog — the re-arm (1.7.0). ===
+#
+# A metered pass is only safe if the work it REFUSES gets picked up promptly.
+# Before 1.7.0 it would not have been, and the comment in the epoll loop saying
+# otherwise — "an unserviced socket re-fires immediately" — is true of the
+# LISTENER and false of a session that has already been drained:
+#
+#   session_on_readable_max reads the socket to EAGAIN unconditionally, BEFORE
+#   session_consume_rx_max ever looks at the line budget. epoll_add_in registers
+#   EPOLLIN with no EPOLLET, but level-triggered means "readable", and a drained
+#   socket is not readable — the refused bytes are in SS_RX_BUF, not in the
+#   kernel. So nothing re-fires, and drain_pending_rx was reached from exactly
+#   one place: advance_tick, once per tick.
+#
+# Refused lines therefore waited up to a full tick interval (2500 ms), ground out
+# at a few lines per second. That is why "just lower the count" was never the fix
+# it looked like, and why this counter has to exist alongside the meter.
+#
+# Set by drain_pending_rx to the number of sessions still holding retained bytes
+# (or still condemned) after its walk; read by both loops, which decline to sleep
+# while it is non-zero. Not a busy spin: each such pass does up to PASS_CHARGE_MAX
+# of real charged work, and it terminates because SS_RX_LEN is bounded by RX_CAP
+# and the progress clause guarantees at least one line per window.
+var g_rx_backlog = 0;
+
+enum ChargeBudget {
+    PASS_CHARGE_MAX = 20;
+    # The drift allowance, named so tests assert against a constant instead of a
+    # number retyped in prose. NOT from ADR 0001 — see the DrainConst note. The
+    # ADR is amended in this release to state it.
+    ADR1_DRIFT_US = 50000;
+}
+
+# Reference-host measurements the charge table is derived FROM. Read only by
+# tests and benches, and they exist so the derivation is CI-asserted rather than
+# living in a comment — which is the root cause this whole release is about. A
+# comment cannot fail CI.
+enum ChargeMeasured {
+    MEAS_DERIVE_US      =  1723;   # ident_derive
+    MEAS_SIGN_LINE_US   =  2270;   # dearest sign-bearing line (PHASE_CLASS)
+    MEAS_VERIFY_US      = 11371;   # ed25519_verify
+    MEAS_DEAREST_US     = 13458;   # successful login — needs a real credential
+    MEAS_DEAR_UNAUTH_US =  3938;   # dearest without the victim's passphrase
+    MEAS_WRONGPASS_US   =  1706;   # wrong passphrase, AFTER the reorder
 }
 # Give sessions with retained rx bytes another metered pass, drop any the server
 # has already condemned, and return how many sessions were serviced. Called once
 # per tick from advance_tick. See the block above for both bounds.
 fn drain_pending_rx(): i64 {
     var budget = DRAIN_LINES_MAX;
+    charge_window_open(PASS_CHARGE_MAX);   # 1.7.0 — the real bound
     var s = g_session_head;
     var drained = 0;
+    g_rx_backlog = 0;
     while (s != 0) {
         var nxt = load64(s + SS_NEXT);
         if (load64(s + SS_QUIT) == 1) {
@@ -394,8 +481,33 @@ fn drain_pending_rx(): i64 {
             # come: the attacker's socket is deliberately silent, and this walk
             # is the only thing still touching the session. Same mid-walk drop
             # sweep_idle has always done, and `nxt` is already captured.
+            #
+            # 1.7.0 — THIS ARM WAS THE UNBUDGETED ONE. It never consulted
+            # `budget`, and `drop_session`'s first act is an unconditional
+            # `player_save`, i.e. an ed25519_sign. So N condemned AUTHENTICATED
+            # sessions cost N signs in one walk with nothing bounding N —
+            # measured 81 ms at 64 and ~325 ms projected at MAX_SESSIONS, inside
+            # the very function E2 added a budget to. The line budget above and
+            # the charge window both looked like they covered this walk. Neither
+            # did, because the expensive work here is not a line.
+            #
+            # It is CHARGED rather than deferred: a condemned session must still
+            # be torn down promptly (that is E1, and the fd is a real resource),
+            # and deferring the save would need a queue holding a pointer
+            # `fl_free` is about to reissue — the H1 / M12-C use-after-free
+            # shape. So the save happens, the meter sees it, and the charge
+            # stops this pass from also dispatching lines. Bounding the reap
+            # count itself is a separate item (tracked in the roadmap).
             session_drain(s);
             drop_session(g_epfd, s);
+            if (charge_stop(charge_spent(), g_charge_cap, 0) == 1) {
+                # Out of budget: leave the rest of the condemned for the next
+                # pass. They are still on the list and still condemned, and the
+                # backlog flag below keeps the loop from sleeping on them.
+                g_rx_backlog = g_rx_backlog + 1;
+                s = 0;
+                continue;
+            }
         } else {
             if (load64(s + SS_RX_LEN) > 0) {
                 if (budget > 0) {
@@ -407,10 +519,17 @@ fn drain_pending_rx(): i64 {
                     flush_session(g_epfd, s);
                     drained = drained + 1;
                 }
+                # 1.7.0 — anything still retained after this walk is work the
+                # loop must come BACK for, and epoll will not tell it to: the
+                # socket was already drained to EAGAIN, so it is no longer
+                # readable and nothing re-fires. Count it so the loop declines
+                # to sleep. (See the g_rx_backlog block below.)
+                if (load64(s + SS_RX_LEN) > 0) { g_rx_backlog = g_rx_backlog + 1; }
             }
         }
         s = nxt;
     }
+    charge_window_close();
     return drained;
 }
 
@@ -557,7 +676,15 @@ fn advance_tick(): i64 {
     # pressure has not eased, the next real error simply disarms it again; the
     # cost is one wasted accept per window instead of a pinned core.
     if (g_tick_count >= g_accept_backoff_until) { listener_rearm(); }
-    drain_pending_rx();           # H5 — metered leftovers from a capped read
+    # 1.7.0 — drain_pending_rx used to be called HERE, once per tick. It now runs
+    # once per event-loop PASS, in both loop bodies, because from here it could
+    # only ever give a refused line tick-interval latency (up to 2500 ms) — epoll
+    # will not re-fire for bytes already in SS_RX_BUF. See the g_rx_backlog block.
+    #
+    # Moving it also moves it from the tick BODY into the pre-tick-check window,
+    # which is the quantity the drift allowance actually constrains. That is a
+    # tightening, not a loosening: it was never invisible-and-free, it was
+    # invisible-and-charged-to-the-wrong-budget.
     mob_tick_all(g_tick_count);   # M13 — every living mob takes a turn
     corpse_decay_sweep();   # M12-A — age out corpses and reclaim them
     maybe_zone_reset();  # M7 — respawn mobs/loot when the zone empties out
@@ -1335,6 +1462,27 @@ fn event_batch_step(epfd, s, events, now_ms, budget, out_keep): i64 {
     return budget - load64(&fired);
 }
 
+# Open the batch window and hand back the line backstop, so a loop body reads
+# `var budget = event_pass_begin();`.
+#
+# Returning the count rather than exposing two calls is deliberate: forgetting
+# the window is then a COMPILE error (an undefined `budget`) instead of a silent
+# reversion to unmetered. That closes the omission hazard at this site. The
+# matching hazard inside drain_pending_rx is not compile-checked — it is covered
+# by the suite instead, and named as a residual risk in state.md.
+fn event_pass_begin(): i64 {
+    charge_window_open(PASS_CHARGE_MAX);
+    return EVENT_LINES_MAX;
+}
+
+# Close it, and report whether the loop should decline to sleep. Both loops call
+# this at the end of a pass.
+fn event_pass_end(): i64 {
+    charge_window_close();
+    if (g_rx_backlog > 0) { return 1; }
+    return 0;
+}
+
 # The unbudgeted form: one session, a full slice. Kept for callers that are not
 # walking a list.
 fn dispatch_session(epfd, s, events, now_ms): i64 {
@@ -1484,6 +1632,13 @@ fn cmd_serve(port): i64 {
         var now = clock_now_ms();
         var timeout_ms = next_tick - now;
         if (timeout_ms < 0) { timeout_ms = 0; }
+        # 1.7.0 — do not park in epoll_wait while refused lines are sitting in
+        # SS_RX_BUF. epoll cannot see them (the socket is drained, so it is not
+        # readable), so without this clamp a metered pass would hand its
+        # leftovers a full tick interval of latency. Bounded, not a spin: each
+        # repeat does up to PASS_CHARGE_MAX units of real work, SS_RX_LEN only
+        # shrinks, and the progress clause guarantees at least one line per pass.
+        if (g_rx_backlog > 0) { timeout_ms = 0; }
         var n = sys_epoll_wait(epfd, events_buf, MAX_EPOLL_EVENTS, timeout_ms);
         if (n < 0) { continue; }   # EINTR-benign
         # G1 (1.6.12) — ONE budget for the whole batch.
@@ -1506,10 +1661,22 @@ fn cmd_serve(port): i64 {
         # tick-side drain, F7 (1.6.11) capped the idle reap. Nothing capped the
         # batch — the path that runs first and most often.
         #
-        # Nothing is dropped by stopping early: epoll is level-triggered, so an
-        # unserviced socket re-fires immediately, and drain_pending_rx already
-        # exists to grind retained remainders down at its own metered rate.
-        var budget = EVENT_LINES_MAX;
+        # 1.7.0 — the claim that used to close this block was WRONG, and it is
+        # the reason "just lower the count" was not the fix it appeared to be.
+        # It read: "Nothing is dropped by stopping early: epoll is
+        # level-triggered, so an unserviced socket re-fires immediately, and
+        # drain_pending_rx already exists to grind retained remainders down at
+        # its own metered rate."
+        #
+        # Level-triggered means READABLE, and a session whose socket has already
+        # been drained to EAGAIN is not readable — the refused bytes are sitting
+        # in SS_RX_BUF, not in the kernel. So nothing re-fired, and the drain ran
+        # once per TICK, meaning a refused line waited up to 2500 ms. True of the
+        # listener; false of a drained session. See the g_rx_backlog block.
+        #
+        # Fixed by making the drain part of this pass and by refusing to sleep
+        # while a backlog exists, so a refused line waits one pass, not one tick.
+        var budget = event_pass_begin();
         var i = 0;
         while (i < n) {
             var ev_off = i * epoll_ev_size();          # H1 — per-arch stride
@@ -1528,6 +1695,13 @@ fn cmd_serve(port): i64 {
             }
             i = i + 1;
         }
+        # 1.7.0 — the drain runs HERE, per pass, not once per tick from
+        # advance_tick. It has its own window (see drain_pending_rx), so this is
+        # two bounded windows per pass and not one unbounded one; the addition is
+        # done out loud in the PASS_CHARGE_MAX block. Moving it is what makes a
+        # refused line wait one pass instead of one tick interval.
+        drain_pending_rx();
+        event_pass_end();
         # Tick check — absolute scheduling per ADR 0003. If we drifted
         # past one tick, snap next_tick straight to the next future
         # boundary so we don't fire a burst of catch-up ticks.
@@ -1558,7 +1732,7 @@ fn cmd_serve(port): i64 {
         # it walks EVERY session on every ~20 ms pass with no MAX_EPOLL_EVENTS
         # analog at all, so at MAX_SESSIONS it was 256 x 64 ms = ~16.5 s per
         # pass. ADR 0003's two loops had diverged here; this is the divergence.
-        var budget = EVENT_LINES_MAX;
+        var budget = event_pass_begin();   # 1.7.0 — same window as the epoll side
         var s = g_session_head;
         while (s != 0) {
             var nxt = load64(s + SS_NEXT);
@@ -1567,11 +1741,17 @@ fn cmd_serve(port): i64 {
             if (load64(&keep) == 0) { drop_session(0, s); }
             s = nxt;
         }
+        drain_pending_rx();
+        event_pass_end();
         var now = clock_now_ms();
         if (now >= next_tick) {
             next_tick = tick_step(0, next_tick, now, g_tick_ms);   # H14
         }
-        sys_sleep_ms(20);
+        # 1.7.0 — skip the pacing sleep while refused lines are retained, for the
+        # same reason the epoll side clamps its timeout to 0. Without this the
+        # agnos backlog would drain at 50 lines/s. The sleep is the ONLY thing
+        # pacing this loop, so it is restored the moment the backlog clears.
+        if (g_rx_backlog == 0) { sys_sleep_ms(20); }
     }
     #endif
     println("server: shutdown signal received; closing listener.");

@@ -316,6 +316,7 @@ fn ident_derive(salt, pass, passlen, sk_out, pk_out): i64 {
     memcpy(msg + SALT_LEN, pass, n);
     var seed = g_ident_scratch + 200;
     sha256(msg, SALT_LEN + n, seed);
+    g_charge_derives = g_charge_derives + 1;   # 1.7.0 — counted, not predicted
     ed25519_keypair(seed, sk_out, pk_out);
     return 0;
 }
@@ -572,6 +573,7 @@ fn _build_record(s): i64 {
     if (_sv_bad(off) == 1) { return 0 - 1; }
     # sign the prefix [0, off) with the session's (re-derived) secret key
     var sig = g_persist_dec;
+    g_charge_signs = g_charge_signs + 1;       # 1.7.0 — counted, not predicted
     ed25519_sign(blk + IDENT_SK, g_persist_save, off, sig);
     off = _fhex(off, "sig", sig, SIG_LEN);                        # H17 — no alloc
     if (_sv_bad(off) == 1) { return 0 - 1; }
@@ -710,9 +712,54 @@ fn player_auth_load(s, pass, passlen): i64 {
     if (_has_ctrl(toml_get(pairs, "room")) == 1) { return 0 - 2; }
     if (_has_ctrl(toml_get(pairs, "inv")) == 1)  { return 0 - 2; }
 
+    # === Authentication BEFORE integrity (1.7.0). ===
+    #
+    # This function tests two independent things, and BOTH must pass:
+    #   authentication — does the typed passphrase derive the key the record
+    #                    names?  (ident_derive + _bytes_eq, measured 1077 us)
+    #   integrity      — is the record signed by that key?
+    #                    (ed25519_verify below, measured 7107 us)
+    #
+    # It used to evaluate them verify-first, so a WRONG PASSPHRASE paid the full
+    # 7107 us verify to learn what the 1077 us derive already knew. Same
+    # conjunction, cheaper order: 8006 us -> 1066 us on the line an attacker can
+    # queue for free, measured independently twice (8006->1066 and 7780->1012).
+    #
+    # There is direct precedent forty lines above, at the passlen bounds H5
+    # (1.6.2) hoisted ahead of this same verify, in the same words: it just stops
+    # paying for the answer first.
+    #
+    # NOTHING IS TRUSTED EARLIER. Both inputs to the moved code are established
+    # independently of the signature: `salt` and `filepk` are exact-length-checked
+    # and hex-decoded above (SALT_LEN*2 / PK_LEN*2, before any decode, which is
+    # the 0.9.0 overflow guard), and `pass` is bounds-checked here. The verify
+    # still gates every field restore below, and the schema check still sits
+    # AFTER the verify so a forged stamp on an unverified record cannot choose
+    # the error code (M11-B).
+    #
+    # ONE DETECTION NUANCE, deliberately accepted. A tampered record now reports
+    # `load.tamper` only once a passphrase matching the record's pubkey is typed.
+    # For the realistic tamper — edit a field, leave salt+pubkey alone — that is
+    # unchanged: the owner's passphrase still matches, so the verify still runs
+    # and still audits. Only a FULL salt+pubkey substitution degrades to a
+    # wrong-passphrase result, and an attacker able to rewrite the pubkey has
+    # already destroyed the record for its owner and holds write access to
+    # data/players/, which is a strictly larger problem than this signal.
+    if (passlen < PASS_MIN) { return 0; }
+    if (passlen > PASS_MAX) { return 0; }
+    var blk = sess_ident(s);
+    ident_derive(salt, pass, passlen, blk + IDENT_SK, blk + IDENT_PK);
+    if (_bytes_eq(blk + IDENT_PK, filepk, PK_LEN) == 0) { return 0; }
+
     # Integrity: the record must be self-consistent under its own pubkey.
     var prefix = _find_sig_offset(g_persist_slurp, n);
     if (prefix < 0) { return 0 - 2; }
+    # 1.7.0 — counted, not predicted. This counter is also the GUARD for the
+    # reorder above: a wrong passphrase must reach here zero times, and
+    # `auth-order` in the suite asserts exactly that. Revert the reorder and the
+    # count becomes 1 and the test fails, which is the only way to hold a pure
+    # reordering in place without a timing assertion.
+    g_charge_verifies = g_charge_verifies + 1;
     if (ed25519_verify(filepk, g_persist_slurp, prefix, filesig) != 1) {
         audit_event(SEV_SECURITY, "load.tamper", nm, nl);
         return 0 - 2;
@@ -737,15 +784,12 @@ fn player_auth_load(s, pass, passlen): i64 {
         return PL_ERR_SCHEMA;
     }
 
-    # Authentication: derive the keypair from the typed passphrase + stored
-    # salt and require the public key to match the record's. SECURITY: bound
-    # the passphrase length first — ident_derive copies it into a fixed
-    # scratch (it also clamps, but reject cleanly here as a wrong passphrase).
-    if (passlen < PASS_MIN) { return 0; }
-    if (passlen > PASS_MAX) { return 0; }
-    var blk = sess_ident(s);
-    ident_derive(salt, pass, passlen, blk + IDENT_SK, blk + IDENT_PK);
-    if (_bytes_eq(blk + IDENT_PK, filepk, PK_LEN) == 0) { return 0; }
+    # Commit the authenticated identity into the session. Deliberately still
+    # here, AFTER the verify, even though the derive that produced it moved
+    # above: a record that fails integrity must not leave committed state
+    # behind. (ident_derive has already written IDENT_SK / IDENT_PK by this
+    # point — that is scratch the next login overwrites and session_free wipes;
+    # the salt and the created stamp are what make the block authoritative.)
     memcpy(blk, salt, SALT_LEN);
     store64(blk + IDENT_CREATED, toml_int(pairs, "created", get_epoch_secs()));
 

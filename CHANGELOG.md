@@ -4,6 +4,136 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-07-29
+
+**The tick budget becomes a budget.** The gate sweep found that every per-tick
+budget in the tree was justified in a comment and nothing summed them. One
+event-loop pass with every budget at its cap measured **261 ms**, from sixteen
+connections sending wrong passphrases. No account required.
+
+The measured pre-tick-check quantity — the one a scheduled tick actually waits
+on — goes from **~247 ms to 4 ms**, and a wrong passphrase from **8006 µs to
+1066 µs**. 821 assertions (was 751), 6 benches (was 5), all 13 new guards
+mutation-verified.
+
+### Fixed
+
+- **A wrong passphrase paid 7107 µs to learn what 1077 µs already knew.**
+  `player_auth_load` tests two things that must both pass — is the record
+  intact (`ed25519_verify`), and is this the right passphrase (`ident_derive` +
+  compare) — and it evaluated them verify-first. Same conjunction, cheaper
+  order. **8006 → 1066 µs, 7.5×**, on the costliest line an unauthenticated peer
+  can queue for free. Nothing is trusted earlier: `salt` and `pubkey` are
+  exact-length-checked and decoded independently of the signature, and the verify
+  still gates every field restore. There was in-file precedent forty lines above,
+  where H5 (1.6.2) hoisted the passphrase *length* bounds ahead of the same
+  verify for the same reason.
+
+  One nuance, accepted deliberately and documented at the site: a tampered record
+  now reports `load.tamper` once a passphrase matching its pubkey is typed. For
+  the realistic tamper — edit a field, leave salt+pubkey — that is unchanged, so
+  the audit entry is preserved; only a full pubkey substitution degrades to a
+  wrong-passphrase result, and that requires write access to `data/players/`.
+
+- **Both per-pass line budgets were sized against the wrong worst case.** The
+  `DRAIN_LINES_MAX` comment budgeted `16 × ~1.08 ms (a keypair derivation)`. A
+  keypair derivation was not the costliest unauthenticated line — a wrong
+  passphrase against a name that exists was, at ~8.2 ms, because it paid a full
+  verify. The correct figure was **already written down twice within thirty lines
+  of that comment** and it used neither. Replaced by a charge meter; the counts
+  stay at 16 as backstops, so 1.7.0 can only ever admit *fewer* lines than
+  1.6.15, never more.
+
+- **A count budget cannot see cost.** One line spans 1.7 µs (rejected on length)
+  to 8411 µs (a successful login) — a ~4800× spread — so no value of N was right:
+  16 dear lines was 211 ms, and the N that fits one dear line is 1, which starves
+  `look`. Replaced with a window that charges from **counters at the four
+  expensive call sites** (`ed25519_keypair`, `ed25519_sign`, `ed25519_verify`,
+  and bytes escaped by `session_appendtx_prose`). A table mapping a line to a
+  predicted cost can be wrong the way the old comment was wrong; a call-site
+  counter cannot be wrong about how many times the expensive thing ran. It also
+  catches the `ed25519_sign` the `save` verb reaches from `PHASE_CMD`, which no
+  phase table would see.
+
+- **Refused lines waited up to a full tick interval, and the comment saying
+  otherwise was wrong.** The epoll loop claimed "an unserviced socket re-fires
+  immediately". Level-triggered means *readable*, and a session already drained
+  to EAGAIN is not readable — the refused bytes are in `SS_RX_BUF`, not the
+  kernel. `drain_pending_rx` ran once per tick from `advance_tick`, so a metered
+  pass would have handed its leftovers 2500 ms of latency. This is why "just
+  lower the count" was never the fix it appeared to be. The drain now runs once
+  per **pass** in both loop bodies, and `g_rx_backlog` clamps the epoll timeout
+  to 0 / skips the agnos sleep while work is retained.
+
+- **The condemned-session teardown was the unbudgeted one.** `drain_pending_rx`'s
+  `SS_QUIT` arm never consulted `budget`, and `drop_session`'s first act is an
+  unconditional `player_save` — an `ed25519_sign`. So N condemned *authenticated*
+  sessions cost N signs in one walk with nothing bounding N: **81 ms measured at
+  64, ~325 ms projected at MAX_SESSIONS**, inside the very function E2 (1.6.10)
+  added a line budget to. Both the line budget and the charge window *looked*
+  like they covered this walk. Neither did, because the expensive work here is
+  not a line. It is now charged rather than deferred — deferring the save would
+  need a queue holding a pointer `fl_free` is about to reissue, which is the
+  H1 / M12-C use-after-free shape.
+
+### Added
+
+- **`benches/bench_tick_budget.bcyr`** — gates one event-loop pass against the
+  drift allowance. This is the instrument whose absence let the mis-derived
+  budget stay green for eight releases: `bench_combat` gated the combat tick,
+  `bench_persist` reasoned about four saves in a comment, and **nothing summed a
+  pass**. It also carries a calibration tripwire that fails when the host is far
+  slower than the charge table assumes — a ratio catches that where an absolute
+  threshold cannot.
+
+- **`charge-window` and `auth-order` test groups** (+70 assertions). The reorder
+  has no observable result to assert, by design, so its guard is the verify
+  **call count**: a wrong passphrase must perform zero verifies. Deterministic —
+  no clock, no timing assertion.
+
+### Changed
+
+- `docs/adr/0001-tick-based-combat-over-cooldowns.md` now states the drift
+  allowance. It previously contained **no number at all** — the 50 ms lived only
+  in the roadmap and the benches, which is how three gates could disagree about
+  it without anything failing. Two allowances are now named and distinguished:
+  **drift** (50 ms p99, bounding work that delays a scheduled tick) and
+  **tick-body occupancy** (250 ms, 10% of the interval). A pre-work drift sample
+  cannot see tick-body cost, so summing the two against one threshold — which an
+  earlier draft of the roadmap did — mixes quantities.
+
+### Corrected
+
+- The roadmap's "252 ms = 504% of the ADR 0001 drift budget" conflated the two
+  quantities above, and cited a number ADR 0001 did not contain. `save_sweep` and
+  `sweep_idle` are tick-body; only the event batch delayed a scheduled tick.
+  The defect was real and the arithmetic was loose in the same way as the comment
+  it indicted. Both are fixed here, and the bench now gates the drift-relevant
+  quantity and *reports* the rest.
+
+### Known-unbounded (tracked, not fixed here)
+
+Named so they are not mistaken for covered. Each is a roadmap item:
+
+- **Sustained CPU is not bounded — only per-pass latency.** The meter converts a
+  421 ms stall into sustained Ed25519 work and does not cap the rate. What bounds
+  pre-auth CPU is `MAX_LOGIN_FAILS`, `MAX_SESSIONS` and the 30 s pre-auth idle
+  timeout, none of which is part of this fix. Relatedly, **`passwd` has no rate
+  limit at all** (no `SAVE_MIN_INTERVAL_MS` analogue).
+- **Nothing in the tree reclaims a dropped item**, so `session_append_objs` on
+  every `look` goes 1 µs → 563 µs at 4000 floor objects. Charged nothing by the
+  meter (no crypto, no prose) and bounded only by the line count. Only fixing
+  object lifetime fixes it.
+- **`combat_tick_all`'s broadcast fan-out is O(sessions²)** — 43.3 ms of tick
+  body at 256 co-located players (`bench_combat`, passing). Untouched here, and
+  deliberately *not* subtracted from the drift allowance.
+- **The host factor is one data point.** Every charge is a reference-host
+  measurement; on much slower hardware each under-values real cost. Only the new
+  bench's ratio tripwire catches it, and ADR 0007 blocks a `YD_*` escape hatch.
+- **The `g_rx_backlog` clamps are reviewed, not test-gated** — both loop bodies
+  sit behind a socket and a signalfd. The suite asserts the flag is *set*; that
+  the loops *read* it is not covered.
+
 ## [1.6.15] — 2026-07-29
 
 **The documentation truth pass.** No code changes. The 1.6.0 sweep found the

@@ -11,7 +11,38 @@
 
 ## Version
 
-**1.6.15** — 2026-07-29. **751 assertions**; `cyrius audit` exits 0; 5/5 benches.
+**1.7.0** — 2026-07-29. **821 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build (`x86_64` + `--agnos`).
+
+**The tick budget becomes a budget.** The drift-relevant quantity — work that
+delays a scheduled tick — went from **~247 ms to 4 ms**, and a wrong passphrase
+from **8006 µs to 1066 µs**. Five changes, in descending order of leverage:
+
+1. **The auth path stopped paying for an answer it could not use.**
+   `player_auth_load` verified the record signature (7107 µs) *before* checking
+   whether the passphrase even derived the right key (1077 µs). Both must pass, so
+   the order was free to change. 7.5× on the costliest line an unauthenticated
+   peer can queue. The 0.9.0 length checks and hex decodes already established
+   every input the moved code reads, and the verify still gates all field restore.
+2. **A charge window replaced the line counts.** One line spans 1.7 µs to 8411 µs,
+   so no line count was ever a bound. Charges come from **counters at the four
+   expensive call sites** — a table that predicts a line's cost can be wrong the
+   way the old comment was wrong; a counter cannot be wrong about how many times
+   `ed25519_verify` ran.
+3. **`drain_pending_rx` moved into both loop bodies**, with `g_rx_backlog`
+   clamping the epoll timeout / skipping the agnos sleep. Without this a metered
+   pass would hand its refused lines up to 2500 ms of latency, because a session
+   drained to EAGAIN is not readable and epoll never re-fires for bytes already in
+   `SS_RX_BUF`.
+4. **Condemned-session teardown is charged.** That arm never consulted any budget,
+   and `drop_session` opens with an unconditional signed save: 81 ms at 64 authed
+   drops, ~325 ms projected at MAX_SESSIONS.
+5. **`bench_tick_budget.bcyr`** gates a whole pass, with a calibration tripwire
+   for slower hosts.
+
+Two of the thirteen new guards **survived the first mutation pass**, which meant
+my tests were wrong, not the mutations: the prose charge only used cases where
+escaped == offered, and nothing drove the teardown arm at all. Both closed.
 
 A documentation truth pass, no code changes. The README was five releases stale
 and `docs/architecture/overview.md` documented a combat model that was never
@@ -26,20 +57,32 @@ Both docs also picked up the two user-visible changes of the whole 1.6.x line,
 neither of which had reached them: the **100-item carry cap** and the **30 s
 pre-auth disconnect**.
 
-**Every open issue from the 1.6.0 sweep and its two re-runs is closed.** The
-**third (gate) sweep has since run against this version and did not come back
-clean** — 8 open items, two of them high, batched as 1.7.0–1.7.3 in
-[`roadmap.md`](roadmap.md#open-issues--8). The two highs are a **252 ms tick pass
-at 504% of the ADR 0001 drift budget** (both per-tick line budgets were derived
-against a 1.08 ms line when the real worst case is 7.46 ms) and **1640 bytes of
-unreclaimable arena per failed connection attempt**, 563 MB/hour at 100
-reconnects/s. Neither needs an account.
+**The gate sweep's two high findings are closed by this release.** Six of its
+eight items remain, plus four more that 1.7.0's own design work turned up — all
+in [`roadmap.md`](roadmap.md). The next one is **1.7.1**: 1640 bytes of
+unreclaimable arena per failed connection attempt (563 MB/hour at 100
+reconnects/s, unauthenticated), the never-rotated audit log, and `passwd`'s
+missing rate limit.
 
-Of that second one, ~1.4 kB per event is inside libro's `filestore_append` and
+Of the arena loss, ~1.4 kB per event is inside libro's `filestore_append` and
 needs an upstream fix; **the event rate is ours and is what is unbounded**, so
 1.7.1 is schedulable work here. An earlier version of this file described the
 whole item as blocked upstream with Descent's share "already zero" — that was
 wrong about the part we own.
+
+**Two corrections this release made to its own prior claims**, recorded because
+both were published:
+
+- The "252 ms = 504% of the drift budget" headline **summed two different
+  quantities**. `record_tick_drift` takes a pre-work sample, so tick-body cost is
+  invisible to it by construction; only the event batch delayed a scheduled tick.
+  The drift-relevant figure was ~247 ms against 50 ms — the defect was real, the
+  arithmetic was loose in the same way as the comment it indicted.
+- **ADR 0001 never contained the 50 ms figure.** It said tick drift was
+  load-bearing and pointed at the M4 gate; the number lived only in the roadmap
+  and the benches, which is how three gates came to disagree about what it
+  covered. It is now stated in the ADR, split into a **drift** allowance (50 ms
+  p99) and a **tick-body occupancy** allowance (250 ms).
 
 ---
 

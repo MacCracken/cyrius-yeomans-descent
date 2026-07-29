@@ -17,7 +17,7 @@ Full design: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
 ## Status
 
-**v1.6.15 — feature-complete, maintained.** The full game loop is implemented and
+**v1.7.0 — feature-complete, maintained.** The full game loop is implemented and
 playable: the Telnet wire (RFC 854 / 1143), the verb-noun parser, a hand-authored
 21-room Hub zone, the 2.5 s combat tick with THAC0 hit/damage math, four playable
 classes with abilities, crash-safe player persistence (reconnect restores your
@@ -27,8 +27,10 @@ attrs / room / inventory; survives a `kill -9`), and presence-gated zone resets.
 ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)). The **1.6.x line is an audit
 sweep** — 1.6.0 audited the tree and the fixes ran through 1.6.15, with two
 re-run sweeps along the way. A third sweep has since run and found **8 more
-items, two of them high**, now open as **1.7.x**. The sweep line closes once a
-re-run comes back with nothing critical or high; see the
+items, two of them high**; **1.7.0 closed both highs** — the per-tick budgets are
+now bounded by counted crypto rather than a line count, and a wrong passphrase
+costs 7.5x less. The sweep line closes once a re-run comes back with nothing
+critical or high; see the
 [roadmap](docs/development/roadmap.md#open-issues--8) for every open finding with
 its impact and fix size, and [current state](docs/development/state.md) for the
 live snapshot.
@@ -38,7 +40,7 @@ live snapshot.
 ```sh
 cyrius deps                                               # resolve deps into lib/
 cyrius build src/main.cyr build/cyrius-yeomans-descent    # compile
-cyrius test                                               # 751 unit + integration assertions
+cyrius test                                               # 821 unit + integration assertions
 ./build/cyrius-yeomans-descent serve 4000                 # start the server on port 4000
 ```
 

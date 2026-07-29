@@ -330,6 +330,186 @@ fn session_appendtx_cstr(s, cstr): i64 {
 # a 4096-byte all-0xFF say escapes to 8192, and a truncation landing *between*
 # the two bytes of a pair would emit the exact lone 0xFF this exists to prevent.
 # Returns bytes written.
+# === Crypto and fan-out accounting (1.7.0). ===
+#
+# Four counters, incremented at the call sites of the only work in this server
+# that costs milliseconds instead of microseconds. They exist because 1.7.0's
+# defect was a COMMENT doing arithmetic against a cost that was 7x wrong, with
+# no instrument to contradict it.
+#
+# The distinction that makes this the right shape: a static table mapping a line
+# to a predicted cost can be wrong the same way that comment was wrong. A
+# counter at the call site cannot be wrong about how many times
+# `ed25519_verify` actually ran. So the expensive half is COUNTED, never
+# predicted — including an `ed25519_sign` reached from PHASE_CMD by the `save`
+# verb, which no phase table would see.
+#
+# Declared here rather than in persist.cyr because the include order is
+# session -> ... -> persist -> server, and all three files charge into them.
+var g_charge_derives     = 0;   # ed25519_keypair  (ident_derive, persist.cyr)
+var g_charge_signs       = 0;   # ed25519_sign     (_build_record, persist.cyr)
+var g_charge_verifies    = 0;   # ed25519_verify   (player_auth_load, persist.cyr)
+var g_charge_prose_bytes = 0;   # bytes ESCAPED by session_appendtx_prose
+
+# Monotonic, never reset — a window takes a base snapshot instead (1.7.0), so
+# these stay valid as a lifetime total for `@stats` and for tests that want a
+# before/after delta across an arbitrary span.
+fn charge_totals(): i64 {
+    return g_charge_derives + g_charge_signs + g_charge_verifies;
+}
+
+# === The charge window (1.7.0). ===
+#
+# WHY NOT A COUNT. `DRAIN_LINES_MAX` / `EVENT_LINES_MAX` budget 16 LINES per
+# pass, and the census measured the cost of one line spanning 1.7 us (a line
+# rejected on length) to 8411 us (a successful login) — a spread of ~4800x. No
+# value of N is right: 16 dear lines is 211 ms, and the N that fits one dear
+# line is 1, which would starve `look`. A count budget cannot see cost.
+#
+# WHY NOT A CLOCK. Three disqualifiers, all in-tree. On agnos `clock_now_ms` is
+# `sys_uptime_ms`, documented FROZEN for a foreground `run` program executing
+# with interrupts cleared — a frozen deadline is silently NO budget, which is
+# the 16.5 s-per-pass defect G1 fixed, failing silently where a frozen tick
+# fails loudly. agnos resolution is 10 ms, so any budget under that is
+# unenforceable there. And `clock_now_ns()` measured 1321 ns (no vDSO — Cyrius
+# links freestanding, so it is the raw syscall), a ~90% overhead on a 1.5 us
+# `look`. A charge check is one integer compare.
+#
+# WHAT THIS IS. Units of ~CHARGE_UNIT_US microseconds, charged from the COUNTERS
+# above — actual `ed25519_*` calls and actual escaped bytes, never a predicted
+# per-line cost. The distinction is the whole point: a table can be wrong the
+# way the old comment was wrong; a call-site counter cannot be wrong about how
+# many times the expensive thing ran. It also catches cost no phase table could
+# see, like the `ed25519_sign` the `save` verb reaches from PHASE_CMD.
+enum ChargeUnits {
+    # One unit ~= 250 us, so the cheapest thing worth charging (a keypair
+    # derivation) is 7 units: coarse enough to keep the table small integers,
+    # fine enough that a 5 ms cap is 20 steps.
+    CHARGE_UNIT_US = 250;
+
+    # Reference-host microseconds per operation, divided by CHARGE_UNIT_US and
+    # rounded UP — overcharging costs a little throughput, undercharging costs
+    # the bound. Derivations are in docs/development/state.md; the suite asserts
+    # each one against its MEAS_* figure so the arithmetic cannot rot in a
+    # comment the way the DRAIN_LINES_MAX comment did.
+    CHG_DERIVE = 7;    #  1750 us >= 1723 measured (ident_derive)
+    CHG_SIGN   = 10;   #  2500 us >= 2270 measured (dearest sign-bearing line)
+    CHG_VERIFY = 47;   # 11750 us >= 11371 measured; 7+47=54u covers a 13458 us login
+
+    # Broadcast fan-out, charged in BYTES because bytes are what the per-recipient
+    # IAC-escape loop walks. 6.195 ns/byte reference => 250000/6.195 = 40355,
+    # rounded DOWN so the charge errs high.
+    PROSE_BYTES_PER_UNIT = 40000;
+}
+
+# The installed cap for the current window, and the accumulator snapshot it was
+# opened against. A cap of 0 means UNMETERED, which is what every pre-1.7.0
+# caller gets without touching a single signature.
+var g_charge_cap        = 0;
+var g_charge_base_d     = 0;
+var g_charge_base_s     = 0;
+var g_charge_base_v     = 0;
+var g_charge_base_prose = 0;
+
+# Units spent since the window opened. Pure function of the counters and the
+# base, so a test can drive it without a socket.
+fn charge_spent(): i64 {
+    var u = (g_charge_derives  - g_charge_base_d) * CHG_DERIVE;
+    u = u + (g_charge_signs    - g_charge_base_s) * CHG_SIGN;
+    u = u + (g_charge_verifies - g_charge_base_v) * CHG_VERIFY;
+    u = u + (g_charge_prose_bytes - g_charge_base_prose) / PROSE_BYTES_PER_UNIT;
+    return u;
+}
+
+# Open a window: SNAPSHOT the accumulators and install `cap`.
+#
+# Snapshotting rather than zeroing is deliberate and load-bearing twice over: it
+# keeps `save_sweep`'s four `ed25519_sign`s — which run earlier in the same
+# `advance_tick` — out of this window's spend, and it survives someone
+# reordering `advance_tick` later.
+fn charge_window_open(cap): i64 {
+    g_charge_cap        = cap;
+    g_charge_base_d     = g_charge_derives;
+    g_charge_base_s     = g_charge_signs;
+    g_charge_base_v     = g_charge_verifies;
+    g_charge_base_prose = g_charge_prose_bytes;
+    return cap;
+}
+
+# Close it. Back to unmetered, so a caller that never opens a window behaves
+# exactly as it did before 1.7.0 — the omission fails OPEN to a known bound (the
+# line count) rather than closed to a wedged server.
+fn charge_window_close(): i64 {
+    g_charge_cap = 0;
+    return 0;
+}
+
+# === The guard. Pure, total, no clock, no globals read. ===
+#
+# Every input is a parameter precisely so the suite can enumerate the domain
+# instead of arranging a socket. Four clauses, in this order:
+#
+#   unmetered  — no window installed; behave as 1.6.15 did.
+#   progress   — the FIRST line of a window always runs, whatever it costs.
+#                Without this a line dearer than the whole cap (a successful
+#                login is 54 units against a cap of 20) could never run and the
+#                session would wedge forever. This is also what bounds the
+#                overrun at exactly one line and no more.
+#   metered    — the cap is spent. Catches cost nothing could have predicted.
+#   pre-charge — a line whose KNOWN crypto cannot fit waits for the next pass
+#                rather than overshooting by a whole ed25519_verify. This is
+#                what makes the worst window max(cap, dearest) instead of
+#                (cap - 1) + dearest.
+fn charge_stop(spent, cap, bound): i64 {
+    if (cap <= 0)      { return 0; }        # unmetered
+    if (spent == 0)    { return 0; }        # progress: always admit one
+    if (spent >= cap)  { return 1; }        # metered
+    if (bound > 0) {
+        if (spent + bound > cap) { return 1; }   # pre-charge
+    }
+    return 0;
+}
+
+# The crypto a line in `phase` is KNOWN to cost, in units, or 0 for "not flat,
+# meter it after the fact".
+#
+# Exact rather than heuristic for the phases listed, because none of them has an
+# attacker-controlled amplifier — verified by measurement: a 4-byte and a
+# 64-byte passphrase cost 8263 vs 8240 us, and a 500-byte and a 1099-byte record
+# 8240 vs 8300 us. The cost IS the crypto and the crypto is fixed by the phase.
+#
+# PHASE_CMD and PHASE_NAME return 0 deliberately. PHASE_CMD spans 46 us (`look`)
+# to 4050 us (a 4 kB `say` at MAX_SESSIONS) and no static number describes it;
+# PHASE_NAME is a single stat(2). Both are charged by what they actually consume.
+# The bound is the crypto the line is CERTAIN to perform, not the most it could.
+# That distinction is worth stating because the conservative reading looks safer
+# and is strictly worse:
+#
+#   PHASE_PASS performs a derive unconditionally, and an ed25519_verify ONLY if
+#   the derived key matches (that is the 1.7.0 reorder). So the certain cost is
+#   CHG_DERIVE; the verify is charged after the fact when it actually happens.
+#
+# Both readings give the SAME worst case, because the progress clause is what
+# absorbs an over-cap line either way: a window is at most max(cap, dearest) =
+# 54 units, whether the dear line was pre-charged or charged afterwards. But
+# bound = CHG_DERIVE admits TWO wrong passphrases per window (0 -> 7 -> 14, then
+# 14 + 7 = 21 > 20 stops) where bound = derive + verify admits only one. Same
+# bound, twice the throughput on the wrong-passphrase path — which is both the
+# attack path and the legitimate-typo path. Same reasoning for
+# PHASE_CHPASS_CONFIRM, whose sign happens only once the confirm matches.
+fn line_crypto_bound(phase): i64 {
+    if (phase == PHASE_PASS)            { return CHG_DERIVE; }
+    if (phase == PHASE_NEWPASS)         { return CHG_DERIVE; }
+    if (phase == PHASE_CONFIRMPASS)     { return CHG_DERIVE; }
+    if (phase == PHASE_CHPASS_NEW)      { return CHG_DERIVE; }
+    if (phase == PHASE_CHPASS_CONFIRM)  { return CHG_DERIVE; }
+    if (phase == PHASE_CLASS)           { return CHG_SIGN; }   # apply_class always saves
+    return 0;
+}
+
+# Escape player-authored bytes into the tx queue, IAC-doubling 0xFF and dropping
+# control bytes, truncating at TX_CAP rather than overrunning. Returns bytes
+# written.
 fn session_appendtx_prose(s, buf, len): i64 {
     var pos = load64(s + SS_TX_LEN);
     var room = TX_CAP - pos;
@@ -356,6 +536,10 @@ fn session_appendtx_prose(s, buf, len): i64 {
         }
         i = i + 1;
     }
+    # Charge the bytes ACTUALLY escaped, not `len`. Charging `len` after a
+    # TX_CAP truncation would bill a peer for work the server declined to do,
+    # which turns the meter itself into a cheap way to exhaust a shared budget.
+    g_charge_prose_bytes = g_charge_prose_bytes + w;
     store64(s + SS_TX_LEN, pos + w);
     return w;
 }
@@ -1321,6 +1505,15 @@ fn session_consume_rx_max(s, maxlines, out_fired): i64 {
     var fired = 0;
     while (i < len) {
         if (fired >= maxlines) { i = i; break; }
+        # 1.7.0 — the charge window. Checked at the TOP of the loop, at the same
+        # cut point the line cap already uses: byte `i` has not been fed yet, so
+        # the retained tail still starts on a byte boundary and the split-IAC
+        # hazard this function's tail comment describes is untouched.
+        #
+        # The bound is sampled from the CURRENT phase, before the line is
+        # dispatched, because dispatching is what changes the phase.
+        var bound = line_crypto_bound(load64(s + SS_PHASE));
+        if (charge_stop(charge_spent(), g_charge_cap, bound) == 1) { i = i; break; }
         var ev = telnet_feed(ts, load8(rx + i));
         # Drain any negotiation reply into the tx queue before the data
         # byte, preserving RFC 854 on-wire ordering.

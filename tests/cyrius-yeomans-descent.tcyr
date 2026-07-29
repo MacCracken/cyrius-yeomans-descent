@@ -2360,6 +2360,27 @@ fn test_tick_schedule(): i64 {
     return 0;
 }
 
+# Byte offset of the first occurrence of a cstr needle in buf[0..n), or -1.
+# Same scan as _count_occurrences below, stopping at the first hit — used to
+# corrupt a specific FIELD of a save record rather than a fixed offset, so the
+# test keeps testing what it means when the record layout shifts.
+fn _find_cstr(buf, n, needle): i64 {
+    var nl = strlen(needle);
+    if (nl <= 0) { return 0 - 1; }
+    var i = 0;
+    while (i + nl <= n) {
+        var k = 0;
+        var same = 1;
+        while (k < nl) {
+            if ((load8(buf + i + k) & 0xFF) != (load8(needle + k) & 0xFF)) { same = 0; k = nl; }
+            else { k = k + 1; }
+        }
+        if (same == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
 # Count non-overlapping occurrences of a cstr needle in buf[0..n).
 fn _count_occurrences(buf, n, needle): i64 {
     var nl = strlen(needle);
@@ -2938,6 +2959,44 @@ fn _armed_rx_sess(nlines): i64 {
         if (o > RX_CAP - 8) { line = nlines; continue; }
         store8(rx + o, 33); o = o + 1;      # '!' — never a valid name
         store8(rx + o, 33); o = o + 1;
+        store8(rx + o, 13); o = o + 1;      # CR
+        line = line + 1;
+    }
+    store64(s + SS_RX_LEN, o);
+    return s;
+}
+
+# Like _armed_rx_sess, but parked in PHASE_PASS against a name that HAS a record,
+# with `nlines` wrong-passphrase lines queued. That is the costliest line an
+# unauthenticated peer can queue, and the one 1.7.0's charge window is sized
+# against. Each queued line is >= PASS_MIN so it survives the H5 (1.6.2) length
+# pre-check and actually reaches the identity comparison — a line rejected on
+# length costs nothing and would make the test vacuous.
+#
+# Unlike the passphrase-MISMATCH creation path, a wrong passphrase on the
+# RETURNING path is capped by MAX_LOGIN_FAILS rather than freeing the session
+# mid-walk, so nlines must stay at or below that cap for the session to survive
+# the walk being measured. See _armed_rx_sess's note for the freed-pointer
+# hazard this avoids.
+fn _armed_pass_sess(name, nl, nlines): i64 {
+    var s = _tx_sess();
+    store64(s + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    var nmb = fl_alloc(NAME_CAP);
+    memcpy(nmb, name, nl);
+    store64(s + SS_NAME_BUF, nmb);
+    store64(s + SS_NAME_LEN, nl);
+    store64(s + SS_TS, telnet_state_new());
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_ROOM, 0 - 1);
+    store64(s + SS_PHASE, PHASE_PASS);
+    var rx = fl_alloc(RX_CAP);
+    store64(s + SS_RX_BUF, rx);
+    var o = 0;
+    var line = 0;
+    while (line < nlines) {
+        if (o > RX_CAP - 16) { line = nlines; continue; }
+        var k = 0;
+        while (k < 11) { store8(rx + o, 119 + (line % 2)); o = o + 1; k = k + 1; }
         store8(rx + o, 13); o = o + 1;      # CR
         line = line + 1;
     }
@@ -3924,6 +3983,332 @@ fn test_carry_cap(): i64 {
     return 0;
 }
 
+# === 1.7.0 — the charge window. ===
+#
+# The budget that replaced a line count. `charge_stop` is a PURE function of its
+# three arguments — no clock, no globals — specifically so the suite can
+# enumerate its domain instead of arranging a socket, and so reverting any clause
+# fails a test rather than only a bench.
+fn test_charge_window(): i64 {
+    test_group("charge-window");
+
+    # --- The four clauses of the guard, each isolated.
+    assert_eq(charge_stop(999999, 0, 0), 0, "cap 0 is UNMETERED — 1.6.15 behaviour");
+    assert_eq(charge_stop(999999, 0 - 5, 0), 0, "a negative cap is unmetered too, not inverted");
+    assert_eq(charge_stop(0, 20, 0), 0, "PROGRESS: the first line of a window always runs");
+    assert_eq(charge_stop(0, 20, 999), 0, "...even when its own bound exceeds the whole cap");
+    assert_eq(charge_stop(20, 20, 0), 1, "METERED: spend == cap stops");
+    assert_eq(charge_stop(21, 20, 0), 1, "...and over-spend stops");
+    assert_eq(charge_stop(19, 20, 0), 0, "under cap with no known bound proceeds");
+    assert_eq(charge_stop(19, 20, 1), 0, "...and proceeds when the bound just fits (19+1 == 20)");
+    assert_eq(charge_stop(19, 20, 2), 1, "PRE-CHARGE: a bound that would overshoot waits");
+    assert_eq(charge_stop(14, 20, 7), 1, "two wrong passphrases fit; a third is pre-charged out");
+
+    # The progress clause is what makes the window safe rather than a deadlock.
+    # A successful login is CHG_DERIVE + CHG_VERIFY = 54 units against a cap of
+    # 20; without progress it could never run at any cap and the session would
+    # wedge forever. This is the assertion that would catch removing it.
+    assert(CHG_DERIVE + CHG_VERIFY > PASS_CHARGE_MAX,
+           "the dearest line really is dearer than the cap — so progress is load-bearing");
+    assert_eq(charge_stop(0, PASS_CHARGE_MAX, CHG_DERIVE + CHG_VERIFY), 0,
+              "a login dearer than the whole cap still runs as a window's first line");
+
+    # --- The charge table must not UNDERCHARGE the measurements it was derived
+    # from. This is the arithmetic that used to live in a comment and be wrong.
+    # A comment cannot fail CI; these can.
+    assert(CHG_DERIVE * CHARGE_UNIT_US >= MEAS_DERIVE_US,
+           "CHG_DERIVE covers a measured ident_derive");
+    assert(CHG_SIGN * CHARGE_UNIT_US >= MEAS_SIGN_LINE_US,
+           "CHG_SIGN covers the dearest measured sign-bearing line");
+    assert(CHG_VERIFY * CHARGE_UNIT_US >= MEAS_VERIFY_US,
+           "CHG_VERIFY covers a measured ed25519_verify");
+    assert((CHG_DERIVE + CHG_VERIFY) * CHARGE_UNIT_US >= MEAS_DEAREST_US,
+           "a full login charge covers the measured dearest line");
+    assert((CHG_DERIVE + CHG_SIGN) * CHARGE_UNIT_US >= MEAS_DEAR_UNAUTH_US,
+           "the dearest UNAUTHENTICATED line is covered by its charge");
+
+    # --- The four sizing constraints on PASS_CHARGE_MAX, asserted rather than
+    # asserted-in-prose. Each is a separate claim and each can rot alone.
+    assert(2 * PASS_CHARGE_MAX * CHARGE_UNIT_US <= ADR1_DRIFT_US / 5,
+           "two sustained windows stay inside a fifth of the drift allowance");
+    assert(CHG_DERIVE + CHG_SIGN <= PASS_CHARGE_MAX,
+           "the cap admits the dearest unauthenticated line from the cap, not by luck");
+    assert(CHG_DERIVE + CHG_SIGN + CHG_DERIVE + CHG_SIGN > PASS_CHARGE_MAX,
+           "...but not two of them");
+    assert(PASS_CHARGE_MAX < CHG_DERIVE + CHG_VERIFY,
+           "the cap is below the dearest line, so a window overruns by at most one");
+
+    # --- line_crypto_bound: the passphrase phases are known-cost, the open-ended
+    # ones deliberately are not.
+    # The bound is what the line is CERTAIN to spend, not the most it could: a
+    # PHASE_PASS line always derives, and only verifies if the derived key
+    # matches. Charging the verify up front would halve throughput on the
+    # wrong-passphrase path for no gain in the bound, since the progress clause
+    # absorbs an over-cap line either way.
+    assert_eq(line_crypto_bound(PHASE_PASS), CHG_DERIVE,
+              "PHASE_PASS pre-charges the CERTAIN derive, not the conditional verify");
+    assert_eq(line_crypto_bound(PHASE_NEWPASS), CHG_DERIVE, "PHASE_NEWPASS is one derive");
+    assert_eq(line_crypto_bound(PHASE_CONFIRMPASS), CHG_DERIVE, "PHASE_CONFIRMPASS is one derive");
+    assert_eq(line_crypto_bound(PHASE_CHPASS_CONFIRM), CHG_DERIVE,
+              "PHASE_CHPASS_CONFIRM's sign is conditional on the confirm matching");
+    assert_eq(line_crypto_bound(PHASE_CLASS), CHG_SIGN, "PHASE_CLASS always saves, so the sign is certain");
+    # The property that makes the cheaper bound safe: either way, one window
+    # cannot exceed the dearest single line.
+    assert(PASS_CHARGE_MAX < CHG_DERIVE + CHG_VERIFY,
+           "a window's overrun is bounded by one dear line, not by cap + one dear line");
+    assert_eq(charge_stop(CHG_DERIVE, PASS_CHARGE_MAX, CHG_DERIVE), 0,
+              "two wrong passphrases fit one window (7 + 7 <= 20)");
+    assert_eq(charge_stop(2 * CHG_DERIVE, PASS_CHARGE_MAX, CHG_DERIVE), 1,
+              "...and a third does not (14 + 7 > 20)");
+    assert_eq(charge_stop(CHG_DERIVE + CHG_VERIFY, PASS_CHARGE_MAX, CHG_DERIVE), 1,
+              "a successful login spends the window in one line and stops the pass");
+    assert_eq(line_crypto_bound(PHASE_CMD), 0,
+              "PHASE_CMD is NOT flat (46 us to 4050 us) — metered after the fact, not predicted");
+    assert_eq(line_crypto_bound(PHASE_NAME), 0, "PHASE_NAME is a stat(2) — nothing to pre-charge");
+
+    # --- The window snapshots rather than zeroes, so work done BEFORE it opened
+    # is not billed to it. This is what keeps save_sweep's four signs out of the
+    # drain's window when both run in one advance_tick.
+    var d_before = g_charge_derives;
+    var sk = alloc(64); var pk = alloc(32); var salt = alloc(SALT_LEN);
+    var i = 0;
+    while (i < SALT_LEN) { store8(salt + i, 21 + i); i = i + 1; }
+    ident_derive(salt, "prewindowwork", 13, sk, pk);
+    assert_eq(g_charge_derives, d_before + 1, "a derive outside any window still counts globally");
+    charge_window_open(PASS_CHARGE_MAX);
+    assert_eq(charge_spent(), 0, "a freshly opened window has spent NOTHING of the prior work");
+    ident_derive(salt, "inwindowwork", 12, sk, pk);
+    assert_eq(charge_spent(), CHG_DERIVE, "...and bills a derive performed inside it");
+    ident_derive(salt, "inwindowwork2", 13, sk, pk);
+    assert_eq(charge_spent(), 2 * CHG_DERIVE, "charges accumulate within a window");
+    charge_window_close();
+    assert_eq(g_charge_cap, 0, "closing a window returns to unmetered");
+    assert_eq(charge_stop(charge_spent(), g_charge_cap, 0), 0,
+              "and a closed window never stops anything");
+
+    # --- Prose is charged by bytes ESCAPED, not bytes offered. Charging `len`
+    # after a TX_CAP truncation would bill a peer for work the server declined,
+    # which turns the meter into a way to exhaust a shared budget cheaply.
+    var t = _freeable_sess();
+    charge_window_open(PASS_CHARGE_MAX);
+    var pb = g_charge_prose_bytes;
+    var wrote = session_appendtx_prose(t, "hello", 5);
+    assert_eq(wrote, 5, "five printable bytes are written");
+    assert_eq(g_charge_prose_bytes - pb, 5, "...and exactly five are charged");
+
+    # The cases where ESCAPED and OFFERED genuinely differ. The first draft of
+    # this test used only w == len cases plus a full-queue case that returns
+    # before the charge line, so charging `len` instead of `w` SURVIVED
+    # mutation — the assertions could not tell the two apart. These can.
+
+    # (a) Control bytes are DROPPED, so w < len. Charging `len` would bill for
+    # bytes that were never escaped and never sent.
+    var pb_ctl = g_charge_prose_bytes;
+    var ctl = alloc(4);
+    store8(ctl + 0, 97); store8(ctl + 1, 1); store8(ctl + 2, 7); store8(ctl + 3, 98);
+    assert_eq(session_appendtx_prose(t, ctl, 4), 2, "two control bytes are dropped");
+    assert_eq(g_charge_prose_bytes - pb_ctl, 2,
+              "prose charges bytes ESCAPED (2), not bytes OFFERED (4)");
+
+    # (b) An IAC is DOUBLED, so w > len. The meter must follow the wire, not the
+    # request — this is the direction that would under-charge a fan-out.
+    var pb_iac = g_charge_prose_bytes;
+    var iac = alloc(2);
+    store8(iac + 0, 255); store8(iac + 1, 255);
+    assert_eq(session_appendtx_prose(t, iac, 2), 4, "two IACs become four wire bytes");
+    assert_eq(g_charge_prose_bytes - pb_iac, 4,
+              "...and all four are charged — the escape expansion is real work");
+
+    # (c) Truncation mid-buffer: room for some but not all. The charge follows
+    # what fit.
+    var pb_trunc = g_charge_prose_bytes;
+    store64(t + SS_TX_LEN, TX_CAP - 3);
+    var big = alloc(64);
+    var bi = 0;
+    while (bi < 64) { store8(big + bi, 65); bi = bi + 1; }
+    assert_eq(session_appendtx_prose(t, big, 64), 3, "only three bytes fit");
+    assert_eq(g_charge_prose_bytes - pb_trunc, 3,
+              "a truncated append charges what fit, not what was offered");
+
+    # (d) A completely full queue returns before charging anything.
+    store64(t + SS_TX_LEN, TX_CAP);
+    var pb2 = g_charge_prose_bytes;
+    assert_eq(session_appendtx_prose(t, "ignored", 7), 0, "a full tx queue writes nothing");
+    assert_eq(g_charge_prose_bytes - pb2, 0, "...and is charged nothing");
+    charge_window_close();
+    session_free(t);
+
+    # --- The drain really opens a window, and really sets the re-arm flag.
+    #
+    # Forgetting `charge_window_open` inside drain_pending_rx is NOT a compile
+    # error (unlike forgetting event_pass_begin, which leaves `budget`
+    # undefined), so this is the only thing holding it in place. Driven through
+    # the real function against real records, because the whole point of the
+    # charge meter is that it counts what actually happened.
+    var salt2 = alloc(SALT_LEN);
+    var k2 = 0;
+    while (k2 < SALT_LEN) { store8(salt2 + k2, 44 + k2); k2 = k2 + 1; }
+    var victim = _mk_sess("Meterr", 6);
+    var vb = sess_ident(victim);
+    memcpy(vb, salt2, SALT_LEN);
+    ident_derive(salt2, "meterpassphrase", 15, vb + IDENT_SK, vb + IDENT_PK);
+    store64(victim + SS_ROOM, 0 - 1);
+    store64(victim + SS_HP, 9); store64(victim + SS_MAXHP, 9);
+    store64(victim + SS_AUTHED, 1);
+    assert_eq(player_save(victim), 1, "the meter fixture record saves");
+
+    # Eight sessions, each parked in PHASE_PASS with 8 wrong-passphrase lines
+    # queued: 64 dear lines offered in one walk. The old line budget would admit
+    # DRAIN_LINES_MAX = 16 of them.
+    g_session_head = 0;
+    var made = 0;
+    while (made < 8) {
+        var a = _armed_pass_sess("Meterr", 6, 4);   # <= MAX_LOGIN_FAILS
+        session_list_push(a);
+        made = made + 1;
+    }
+    var d0 = g_charge_derives;
+    drain_pending_rx();
+    var admitted = g_charge_derives - d0;
+    assert(admitted > 0, "the drain admits at least one line — the progress clause holds");
+    assert(admitted < DRAIN_LINES_MAX,
+           "the drain is bounded by the CHARGE window, not by DRAIN_LINES_MAX = 16");
+    assert(admitted * CHG_DERIVE <= PASS_CHARGE_MAX + CHG_DERIVE + CHG_VERIFY,
+           "one window's spend never exceeds the cap plus one dear line");
+    assert(g_rx_backlog > 0,
+           "refused lines set the re-arm flag — epoll cannot see bytes in SS_RX_BUF");
+    assert_eq(g_charge_cap, 0, "the drain closes its window on the way out");
+    g_session_head = 0;
+
+    # --- The CONDEMNED arm. This is the 1.7.0 finding that the drain's SS_QUIT
+    # branch never consulted any budget: drop_session's first act is an
+    # unconditional player_save, i.e. an ed25519_sign, so N condemned
+    # AUTHENTICATED sessions cost N signs in one walk with nothing bounding N.
+    # Measured 81 ms at 64 and ~325 ms projected at MAX_SESSIONS — inside the
+    # very function E2 added a line budget to. The line budget and the charge
+    # window both LOOKED like they covered this walk; neither did, because the
+    # expensive work here is not a line.
+    #
+    # Without this test the teardown charge survived mutation, so it is the only
+    # thing holding the fix in place.
+    g_session_head = 0;
+    var csalt = alloc(SALT_LEN);
+    var ci = 0;
+    while (ci < SALT_LEN) { store8(csalt + ci, 91 + ci); ci = ci + 1; }
+    var cond = 0;
+    while (cond < 8) {
+        var c = _freeable_sess();
+        var cn = load64(c + SS_NAME_BUF);
+        memcpy(cn, "Doomed", 6);
+        store8(cn + 6, 65 + cond);
+        store64(c + SS_NAME_LEN, 7);
+        var cb = sess_ident(c);
+        memcpy(cb, csalt, SALT_LEN);
+        ident_derive(csalt, "doomedpassphrase", 16, cb + IDENT_SK, cb + IDENT_PK);
+        store64(cb + IDENT_CREATED, 1000000);
+        store64(c + SS_ROOM, 0 - 1);
+        store64(c + SS_HP, 5); store64(c + SS_MAXHP, 5);
+        store64(c + SS_AUTHED, 1);      # authed => drop_session will SIGN a save
+        store64(c + SS_QUIT, 1);        # condemned => the unbudgeted arm
+        session_list_push(c);
+        cond = cond + 1;
+    }
+    var sg0 = g_charge_signs;
+    drain_pending_rx();
+    var signs = g_charge_signs - sg0;
+    assert(signs > 0, "at least one condemned session is torn down per pass");
+    assert(signs < 8,
+           "the condemned teardown is CHARGED — 8 authed drops are not all done in one walk");
+    assert(signs * CHG_SIGN <= PASS_CHARGE_MAX + CHG_SIGN,
+           "teardown spend never exceeds the cap plus one save");
+    assert(g_rx_backlog > 0, "the un-reaped condemned keep the loop from sleeping");
+    g_session_head = 0;
+
+    return 0;
+}
+
+# === 1.7.0 — authentication is evaluated before integrity. ===
+#
+# `player_auth_load` must decide both "is this record intact" and "is this the
+# right passphrase", and BOTH have to pass. It used to ask the 7107 us question
+# (ed25519_verify) before the 1077 us one (ident_derive + compare), so a wrong
+# passphrase paid for an answer that could not change the outcome. 8006 us ->
+# 1066 us on the line an unauthenticated peer can queue for free.
+#
+# A pure reordering has no observable result to assert — every return code is
+# unchanged, by design, which is exactly what makes it safe. So the guard is the
+# CALL COUNT: a wrong passphrase must perform zero verifies. That is
+# deterministic (no clock, no timing), and reverting the reorder flips it to one.
+#
+# This is why `g_charge_verifies` exists in session.cyr. It is the 1.7.0 charge
+# meter's counter, and it doubles as the only honest instrument for holding an
+# ordering in place.
+fn test_auth_order(): i64 {
+    test_group("auth-order");
+
+    # A real record, signed with a key derived from a known passphrase.
+    var s = _mk_sess("Orderly", 7);
+    var salt = alloc(SALT_LEN);
+    var i = 0;
+    while (i < SALT_LEN) { store8(salt + i, 70 + i); i = i + 1; }
+    var blk = sess_ident(s);
+    memcpy(blk, salt, SALT_LEN);
+    ident_derive(salt, "orderlypass", 11, blk + IDENT_SK, blk + IDENT_PK);
+    store64(s + SS_ROOM, 0 - 1);
+    store64(s + SS_HP, 12); store64(s + SS_MAXHP, 12);
+    store64(s + SS_AUTHED, 1);
+    assert_eq(player_save(s), 1, "the order fixture record saves");
+
+    # --- The guard. A WRONG passphrase must not reach ed25519_verify at all.
+    var v0 = g_charge_verifies;
+    var d0 = g_charge_derives;
+    assert_eq(player_auth_load(_mk_sess("Orderly", 7), "wrongpassphrase", 15), 0,
+              "a wrong passphrase is still rejected");
+    assert_eq(g_charge_verifies - v0, 0,
+              "a wrong passphrase performs ZERO ed25519_verify calls");
+    assert_eq(g_charge_derives - d0, 1,
+              "...and exactly one derive — the cheap question is the one asked");
+
+    # --- The right passphrase must still pay for integrity. If this reads 0 the
+    # verify has been skipped altogether, which would be a forged-record hole
+    # rather than an optimisation — so the two assertions bracket the change.
+    var v1 = g_charge_verifies;
+    assert_eq(player_auth_load(_mk_sess("Orderly", 7), "orderlypass", 11), 1,
+              "the right passphrase still authenticates");
+    assert_eq(g_charge_verifies - v1, 1,
+              "a correct passphrase DOES verify the signature — integrity is not skipped");
+
+    # --- A passphrase rejected on LENGTH costs neither operation. This is H5
+    # (1.6.2) and it still holds after the reorder: the bounds moved with the
+    # block they guard, so they are still the first thing evaluated.
+    var v2 = g_charge_verifies;
+    var d2 = g_charge_derives;
+    assert_eq(player_auth_load(_mk_sess("Orderly", 7), "ab", 2), 0,
+              "an under-length passphrase is rejected");
+    assert_eq(g_charge_verifies - v2, 0, "a too-short passphrase performs no verify");
+    assert_eq(g_charge_derives - d2, 0, "...and no derive either — H5 still first");
+
+    # --- Tamper detection survives the reorder for the realistic case: edit a
+    # field, leave salt+pubkey alone. The owner's passphrase still matches the
+    # untouched pubkey, so the verify still runs and still reports tampering.
+    # (A full salt+pubkey substitution degrades to a wrong-passphrase result —
+    # documented at the reorder, and out of reach without write access to
+    # data/players/.)
+    _path_for("Orderly", 7, g_persist_path);
+    var tn = file_read_all(g_persist_path, g_persist_slurp, SLURP_CAP - 1);
+    var hp_at = _find_cstr(g_persist_slurp, tn, "hp = 12");
+    assert(hp_at >= 0, "the fixture record contains the hp field to corrupt");
+    store8(g_persist_slurp + hp_at + 5, 57);          # hp = 12 -> hp = 92
+    file_write_all(g_persist_path, g_persist_slurp, tn);
+    var v3 = g_charge_verifies;
+    assert_eq(player_auth_load(_mk_sess("Orderly", 7), "orderlypass", 11), 0 - 2,
+              "a field-tampered record is still refused as tampered");
+    assert_eq(g_charge_verifies - v3, 1,
+              "...and the tamper is caught BY the verify, which therefore ran");
+
+    return 0;
+}
+
 # === 1.6.14 — the dormant tail. ===
 fn test_hygiene_tail(): i64 {
     test_group("hygiene-tail");
@@ -4245,6 +4630,8 @@ fn main() {
     test_passwd_meter();
     test_carry_cap();
     test_hygiene_tail();
+    test_auth_order();
+    test_charge_window();
 
     return assert_summary();
 }

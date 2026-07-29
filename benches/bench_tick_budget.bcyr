@@ -1,33 +1,45 @@
-# cyrius-yeomans-descent — one whole event-loop pass, against the ADR 0001
-# drift budget (1.7.0).
+# cyrius-yeomans-descent — one event-loop pass, against the drift allowance
+# (1.7.0).
 #
 # This bench exists because of what it caught. Every per-tick budget in the tree
 # was individually justified in a comment, and NOTHING summed them. The gate
-# sweep measured one pass with every budget at its cap at **252 ms** — 504% of
-# the 50 ms p99 drift allowance in
-# docs/adr/0001-tick-based-combat.md, and 10% of the entire 2.5 s tick — from
-# sixteen connections sending wrong passphrases. No account required.
+# sweep measured one pass with every budget at its cap at 261 ms, from sixteen
+# connections sending wrong passphrases. No account required.
 #
 # The defect was a comment that did its arithmetic against the wrong number.
 # `DRAIN_LINES_MAX` budgeted `16 x ~1.08 ms (a keypair derivation)`. A keypair
 # derivation is not the costliest line an unauthenticated connection can send —
-# a wrong passphrase against a name that EXISTS is, because it pays a full
-# `player_auth_load` (read + toml parse + 3 hex decodes + ed25519_verify). That
-# is ~8 ms, seven times the assumed cost, and the correct figure was already
-# written down twice elsewhere in the same file (server.cyr:347 "measured
-# 7.66 ms", server.cyr:371 "~8.1 ms for a wrong-passphrase verify"). The budget
-# comment used neither.
+# a wrong passphrase against a name that EXISTS is, because it paid a full
+# `player_auth_load`. That was ~8 ms, seven times the assumed cost, and the
+# correct figure was already written down twice in the same file (server.cyr
+# "measured 7.66 ms" and "~8.1 ms for a wrong-passphrase verify"). The budget
+# comment used neither. So: **a per-component budget justified in prose is not a
+# budget.** A comment cannot fail CI. This can.
 #
-# So the lesson this bench encodes is narrow and specific: **a per-component
-# budget justified in prose is not a budget.** bench_combat gates the combat
-# tick. bench_persist gates one save and reasons about four. Neither could see
-# that the sum was 5x over, because a sum was never taken. This one takes the
-# sum, drives the REAL functions both event loops call, and fails CI when a pass
-# exceeds what ADR 0001 promises.
+# WHAT IS GATED, AND WHY IT IS NOT "THE WHOLE PASS".
 #
-# It is deliberately built to fail against the pre-1.7.0 code. A bench that went
-# green on a tree with a known 252 ms pass would be measuring something other
-# than the defect.
+# The first version of this bench summed all four components against 50 ms and
+# called the result 504%. That was the same species of loose as the comment it
+# indicts, and it is worth spelling out because it would otherwise get
+# reintroduced. `record_tick_drift(now - next_tick)` (server.cyr) takes a
+# PRE-WORK sample, and the F8 comment beside it says any overrun shorter than one
+# interval is "invisible to the drift metric by construction". So:
+#
+#   - The drift allowance constrains work done BEFORE the tick check:
+#     handle_accept, the event batch, and — since 1.7.0 moved it there —
+#     drain_pending_rx. That is what this bench GATES.
+#   - save_sweep and sweep_idle run inside advance_tick. They are tick-BODY
+#     occupancy: real cost, different quantity, measured against the 2.5 s
+#     interval rather than the drift allowance. Those are REPORTED, not gated.
+#
+# Gating the sum of the two would mix in 43.3 ms of legitimate combat fan-out
+# (bench_combat BIGPLAYERS, passing) that nothing in this release can reduce, and
+# the pressure would then be to quietly size the threshold to whatever the tree
+# happens to measure. That is exactly how a budget stops meaning anything.
+# **Gate what the fix guarantees; report the rest.**
+#
+# Pre-1.7.0 the gated quantity was ~247 ms; the property that this bench fails
+# against the old code is preserved.
 
 include "lib/thread.cyr"
 include "lib/thread_local.cyr"
@@ -46,42 +58,31 @@ include "src/persist.cyr"
 include "src/server.cyr"
 
 # TB_ prefix throughout: enum constants share ONE FLAT namespace across the whole
-# program, so an unprefixed `DRIFT_BUDGET_US` here could silently capture a
-# same-named constant in src/.
+# program, so a bare `DRIFT_BUDGET_US` here could silently capture a same-named
+# constant in src/ — bench_combat.bcyr already defines a bare `BUDGET_NS` while
+# including src/server.cyr, which is precisely this hazard.
 enum TickBudgetBench {
-    # ADR 0001's p99 tick-drift allowance. The whole point of the file.
-    TB_DRIFT_BUDGET_US = 50000;
-    # Sessions used to fill each budget. Each is parked in PHASE_PASS against a
-    # real signed record with wrong-passphrase lines queued, which is the
-    # costliest line an unauthenticated connection can queue.
-    TB_ATTACKERS = 16;
-    # Dirty / idle sessions offered to the save and reap sweeps. More than the
-    # caps, so the sweeps are measured saturated rather than under-fed.
-    TB_SAVERS = 8;
+    TB_ATTACKERS = 16;   # sessions used to try to fill each window
+    TB_SAVERS    = 8;    # dirty/idle sessions offered to the sweeps (> the caps)
+    TB_NDERIVE   = 20;   # reps for the calibration probe
+    # The calibration tripwire. Every charge in ChargeUnits is a reference-host
+    # measurement, and on a much slower box each one under-values the real cost,
+    # so the true bound is looser than the constants claim. An absolute threshold
+    # cannot catch that; a ratio can. 2x is the point at which the derived
+    # constants stop describing this machine.
+    TB_CALIB_MAX_PCT = 200;
 }
 
 var g_tb_fail = 0;
 
-# Report one component of the pass. `budget_us` of 0 means "no budget of its own
-# — it is a contributor to the aggregate", which is the honest description of
-# most of these: individually none of them is the problem.
-fn tb_report(label, us, budget_us): i64 {
-    print("  ", 2); print(label, strlen(label));
-    print(" : ", 3); print_num(us / 1000); print(" ms", 3);
-    if (budget_us > 0) {
-        print("   (", 4); print_num(us * 100 / budget_us); print("% of the 50 ms budget)", 23);
-        if (us >= budget_us) {
-            g_tb_fail = 1;
-            print("   OVER", 7);
-        }
-    }
-    println("");
+fn tb_line(label, us): i64 {
+    print("    ", 4); print(label, strlen(label));
+    print(" : ", 3); print_num(us / 1000); println(" ms");
     return 0;
 }
 
-# A session parked in PHASE_PASS with `nlines` wrong-passphrase lines queued in
-# rx. SS_FD is -1 so every flush fails harmlessly rather than writing to a real
-# socket; the cost being measured is the dispatch, not the write.
+# A session parked in PHASE_PASS with `nlines` wrong-passphrase lines queued.
+# SS_FD is -1 so flushes fail harmlessly — the cost measured is the dispatch.
 fn tb_armed_pass(nlines): i64 {
     var s = fl_alloc(SS_SIZE);
     memset(s, 0, SS_SIZE);
@@ -96,9 +97,9 @@ fn tb_armed_pass(nlines): i64 {
     store64(s + SS_FD, 0 - 1);
     store64(s + SS_ROOM, 0 - 1);
     store64(s + SS_PHASE, PHASE_PASS);
-    # Queue nlines wrong passphrases. Each is >= PASS_MIN so it survives the
-    # H5 (1.6.2) length pre-check and actually reaches ed25519_verify — a line
-    # rejected on length costs nothing and would understate the worst case.
+    # Each line is >= PASS_MIN so it survives the H5 (1.6.2) length pre-check and
+    # actually reaches the identity check. A line rejected on length costs
+    # nothing and would understate the worst case.
     var rx = load64(s + SS_RX_BUF);
     var o = 0;
     var line = 0;
@@ -139,44 +140,81 @@ fn tb_saver(seed): i64 {
     store64(s + SS_AUTHED, 1);
     store64(s + SS_PHASE, PHASE_CMD);
     store64(s + SS_SAVE_DIRTY, 1);
-    store64(s + SS_LAST_SAVE_MS, 0);   # never saved → due (1.6.8's G-fix)
+    store64(s + SS_LAST_SAVE_MS, 0);   # never saved -> due
     return s;
-}
-
-fn tb_clear_sessions(): i64 {
-    g_session_head = 0;
-    return 0;
 }
 
 fn main(): i64 {
     alloc_init();
     persist_init();
-    # The loaders publish g_rooms / g_obj_tpls / g_mob_tpls, which the dispatch
-    # and save paths both read. Without them a `look` faults and the measurement
-    # is of a crash, not a tick.
     if (world_load_rooms(DP_ROOMS) != WL_OK) { println("  setup: rooms failed to load"); return 1; }
     world_load_objs(DP_OBJS);
     world_load_mobs(DP_MOBS);
     g_epfd = 0;
 
-    println("one event-loop pass, every budget at its cap:");
-
-    # A real signed record for the attackers to fail against. This is the part
-    # that makes the worst case reachable without an account: an attacker needs
-    # ONE name that exists, and creating one is free.
+    # A real signed record for the attackers to fail against. This is what makes
+    # the worst case reachable without an account: the attacker needs ONE name
+    # that exists, and creating one is free.
     var v = tb_saver(11);
     store64(v + SS_NAME_LEN, 6);
     memcpy(load64(v + SS_NAME_BUF), "Victim", 6);
     if (player_save(v) != 1) { println("  setup: could not write the victim record"); return 1; }
 
-    # Warm every lazy init (the filestore opens on first append) so the first
-    # measured component is not paying one-time setup.
+    # Warm every lazy init (the filestore opens on first append).
     var warm = tb_armed_pass(1);
     session_list_push(warm);
     drain_pending_rx();
-    tb_clear_sessions();
+    g_session_head = 0;
 
-    # --- 1. drain_pending_rx: the tick-side budget, DRAIN_LINES_MAX lines.
+    # === CALIBRATION TRIPWIRE ==============================================
+    # Does the charge table still describe THIS machine? Every constant in
+    # ChargeUnits is a reference-host figure; on much slower hardware each one
+    # under-values the real cost and the true bound is looser than claimed.
+    println("charge-table calibration:");
+    var sk = alloc(64);
+    var pk = alloc(32);
+    var cs = alloc(SALT_LEN);
+    var ci = 0;
+    while (ci < SALT_LEN) { store8(cs + ci, 3 + ci); ci = ci + 1; }
+    ident_derive(cs, "calibrationpass", 15, sk, pk);      # warm
+    var ct0 = clock_now_ns();
+    ci = 0;
+    while (ci < TB_NDERIVE) { ident_derive(cs, "calibrationpass", 15, sk, pk); ci = ci + 1; }
+    var derive_us = (clock_now_ns() - ct0) / 1000 / TB_NDERIVE;
+    var charged_us = CHG_DERIVE * CHARGE_UNIT_US;
+    var pct = derive_us * 100 / charged_us;
+    print("    ident_derive here : ", 24); print_num(derive_us);
+    print(" us   charged: ", 17); print_num(charged_us);
+    print(" us   (", 8); print_num(pct); println("% of charge)");
+    if (pct > TB_CALIB_MAX_PCT) {
+        println("    RESULT: FAIL — this host is far slower than the charge table assumes;");
+        println("            every charge under-values real cost, so the bound is looser");
+        println("            than ChargeUnits claims. Re-derive the table on this host.");
+        g_tb_fail = 1;
+    } else {
+        println("    RESULT: PASS (charge table still describes this host)");
+    }
+
+    # === GATED: work done BEFORE the tick check =============================
+    println("pre-tick-check work (what the drift allowance constrains):");
+
+    # --- The event batch, driven through the REAL window the loops open. Using
+    # event_pass_begin() rather than a bare count is the point: a bare count
+    # leaves g_charge_cap at 0, which is unmetered, and would measure 1.6.15.
+    var eb = event_pass_begin();
+    var t1 = clock_now_ns();
+    var j = 0;
+    while (j < TB_ATTACKERS) {
+        var keep[8];
+        eb = event_batch_step(0, tb_armed_pass(2), EPOLLIN, 0, eb, &keep);
+        j = j + 1;
+    }
+    var event_us = (clock_now_ns() - t1) / 1000;
+    event_pass_end();
+    tb_line("event_batch_step (one window)  ", event_us);
+
+    # --- The drain, which since 1.7.0 also runs per PASS rather than per tick,
+    # and opens its own window.
     var i = 0;
     while (i < TB_ATTACKERS) {
         session_list_push(tb_armed_pass(2));
@@ -185,27 +223,28 @@ fn main(): i64 {
     var t0 = clock_now_ns();
     drain_pending_rx();
     var drain_us = (clock_now_ns() - t0) / 1000;
-    tb_clear_sessions();
-    tb_report("drain_pending_rx  (tick side, DRAIN_LINES_MAX)     ", drain_us, 0);
+    g_session_head = 0;
+    tb_line("drain_pending_rx (one window)  ", drain_us);
 
-    # --- 2. event_batch_step: EVENT_LINES_MAX lines, spent BEFORE the tick
-    # check, which is what makes this the half that can swallow a tick whole.
-    # Driving the shared step rather than either loop: the loops sit behind a
-    # socket and a signalfd and are not reachable from a bench, which is exactly
-    # why G1 (1.6.12) extracted this function.
-    var t1 = clock_now_ns();
-    var budget = EVENT_LINES_MAX;
-    var j = 0;
-    while (j < TB_ATTACKERS) {
-        var keep[8];
-        budget = event_batch_step(0, tb_armed_pass(2), EPOLLIN, 0, budget, &keep);
-        j = j + 1;
+    var gated_us = event_us + drain_us;
+    print("    ---", 7); println("");
+    print("    GATED: pre-tick-check total : ", 34);
+    print_num(gated_us / 1000); print(" ms   (", 8);
+    print_num(gated_us * 100 / ADR1_DRIFT_US); print("% of ", 5);
+    print_num(ADR1_DRIFT_US / 1000); println(" ms)");
+    if (gated_us >= ADR1_DRIFT_US) {
+        println("    RESULT: FAIL — one pass delays a scheduled tick by more than the");
+        println("            drift allowance. Each component is justified in a comment;");
+        println("            the SUM is the quantity that actually matters.");
+        g_tb_fail = 1;
+    } else {
+        println("    RESULT: PASS");
     }
-    var event_us = (clock_now_ns() - t1) / 1000;
-    tb_report("event_batch_step  (before the tick check)          ", event_us, 0);
 
-    # --- 3. save_sweep at SAVE_BATCH_MAX. Offered more dirty sessions than the
-    # cap so the sweep is measured saturated.
+    # === REPORTED, NOT GATED: tick-body occupancy ===========================
+    # Real cost, different quantity. A pre-work drift sample cannot see it (F8),
+    # so it is measured against the 2.5 s interval, not the drift allowance.
+    println("tick-body occupancy (reported — the drift metric cannot see this):");
     g_save_interval_ticks = 1;
     i = 0;
     while (i < TB_SAVERS) {
@@ -215,34 +254,26 @@ fn main(): i64 {
     var t2 = clock_now_ns();
     save_sweep();
     var save_us = (clock_now_ns() - t2) / 1000;
-    tb_report("save_sweep        (SAVE_BATCH_MAX signed saves)    ", save_us, 0);
+    tb_line("save_sweep (SAVE_BATCH_MAX)    ", save_us);
 
-    # --- 4. sweep_idle at IDLE_REAP_MAX. drop_session's first act is a save, so
-    # a reap costs about what a save costs; the sessions are still on the list
-    # from step 3 and are now made stale.
     var s = g_session_head;
     while (s != 0) {
-        store64(s + SS_LAST_MS, 1);        # last byte exchanged: long ago
+        store64(s + SS_LAST_MS, 1);
         store64(s + SS_SAVE_DIRTY, 1);
         s = load64(s + SS_NEXT);
     }
     var t3 = clock_now_ns();
     sweep_idle(0, g_idle_timeout_ms + 100000);
     var idle_us = (clock_now_ns() - t3) / 1000;
-    tb_clear_sessions();
-    tb_report("sweep_idle        (IDLE_REAP_MAX reaps, each saves)", idle_us, 0);
+    g_session_head = 0;
+    tb_line("sweep_idle (IDLE_REAP_MAX)     ", idle_us);
+    println("    plus combat fan-out, 256 co-located: 43 ms (bench_combat, passing)");
+    print("    tick-body total (excl. combat) : ", 37);
+    print_num((save_us + idle_us) / 1000); print(" ms of the ", 11);
+    print_num(g_tick_ms); println(" ms interval");
+    println("    NOT GATED HERE — see the header. Bounding combat fan-out is a 2.0 item.");
 
-    # --- The number nobody was computing.
-    var total_us = drain_us + event_us + save_us + idle_us;
-    println("  ---");
-    tb_report("ONE PASS, ALL BUDGETS AT CAP                      ", total_us, TB_DRIFT_BUDGET_US);
-
-    if (g_tb_fail != 0) {
-        println("  RESULT: FAIL — one pass exceeds the ADR 0001 50 ms p99 drift budget.");
-        println("          Every component above is individually justified in a comment.");
-        println("          The sum is what ADR 0001 actually constrains.");
-        return 1;
-    }
+    if (g_tb_fail != 0) { return 1; }
     println("  RESULT: PASS");
     return 0;
 }

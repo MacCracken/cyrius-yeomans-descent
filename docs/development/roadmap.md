@@ -21,19 +21,27 @@ ownership and fix size.
 
 | # | Next | Items | Contains | Blocks 2.0? |
 |---|---|---|---|---|
-| 1 | [**1.7.0**](#170--the-tick-budget-becomes-a-budget) | 2 | The tick budget becomes a budget — both line budgets re-derived, and the bench that should have caught them | **yes** |
-| 2 | [**1.7.1**](#171--bound-what-the-reconnect-rate-sets) | 2 | Bound what the reconnect rate sets — the per-connection arena loss, the unrotated audit log | **yes** |
-| 3 | [**1.7.2**](#172--the-carry-cap-becomes-a-bound) | 1 | The carry cap becomes a bound — enforce it on load, then sweep the class | no |
-| 4 | [**1.7.3**](#173--cover-the-guards-that-predate-the-mutation-habit) | 3 | Cover the guards that predate the mutation habit | no |
+| — | ~~1.7.0~~ | ~~2~~ | ✅ **Shipped.** The tick budget becomes a budget — the auth reorder, the charge window, the drain re-arm, the teardown charge, and the bench that should have caught it | — |
+| 1 | [**1.7.1**](#171--bound-what-the-reconnect-rate-sets) | 3 | Bound what the reconnect rate sets — the per-connection arena loss, the unrotated audit log, and `passwd`'s missing rate limit | **yes** |
+| 2 | [**1.7.2**](#172--the-carry-cap-becomes-a-bound) | 1 | The carry cap becomes a bound — enforce it on load, then sweep the class | no |
+| 3 | [**1.7.3**](#173--cover-the-guards-that-predate-the-mutation-habit) | 3 | Cover the guards that predate the mutation habit | no |
+| 4 | [**1.7.4**](#174--object-lifetime) | 1 | Object lifetime — nothing reclaims a dropped item, and `look` pays for it | no |
 | 5 | [**gate re-run**](#the-gate--what-closes-the-1x-line) | — | Closes the 1.x line if it returns no critical or high findings | **yes** |
-| 6 | **2.0.0** | 3 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death | — |
+| 6 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 7 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
 **Every issue the 1.6.0 sweep and its two re-runs produced is closed** — 1.6.0
-through 1.6.15. The **third (gate) sweep is done and did not come back clean**:
-it found 8 open items, two of them high, listed below and batched into 1.7.0–1.7.3.
-So 1.7.0 and 1.7.1 now block 2.0, which the previous version of this table said
-1.7.x would not.
+through 1.6.15. The **third (gate) sweep found 8 items, two of them high**;
+**1.7.0 closed both highs** plus three findings the sweep's design work turned up
+that were not in the original 8. The rest are below.
+
+**1.7.0 also corrected two errors in this file.** The "252 ms = 504% of the
+ADR 0001 drift budget" headline conflated tick-body cost with work that delays a
+scheduled tick, and cited a number ADR 0001 did not contain. Both are fixed, and
+the number now lives in [ADR 0001](../adr/0001-tick-based-combat-over-cooldowns.md)
+where the gates can agree on it. The defect was real — the drift-relevant
+quantity was ~247 ms against a 50 ms allowance, now 4 ms — but the arithmetic
+behind the headline was loose in the same way as the comment it indicted.
 
 **The minimum credible 2.0 is M14 + M15 + M16** — the contract, the content
 ceiling, and progression. Everything from M17 on can slip without embarrassing
@@ -41,16 +49,44 @@ the release.
 
 ---
 
-## Open issues — 8
+## Open issues — 8 raised, 2 closed in 1.7.0, 6 open (+4 raised by 1.7.0's own work)
 
 From the third (gate) sweep, 2026-07-29, run against 1.6.15. Worst first. Every
 item says what breaks, whether it can happen to a running server today, whose
 code it is, and how big the fix is — in that order, before any label.
 
-### 1.7.0 — the tick budget becomes a budget
+### ✅ 1.7.0 — the tick budget becomes a budget (SHIPPED)
+
+Issues A and B below are **closed**. Kept in place rather than deleted, because
+the reason A survived three sweeps is the more useful record than the fix.
+
+**What shipped, and what it measured.** The drift-relevant quantity went from
+**~247 ms to 4 ms**; a wrong passphrase from **8006 µs to 1066 µs**. Five changes:
+the auth-path reorder (stop calling `ed25519_verify` when the answer cannot
+matter), the charge window (bound by counted crypto, not by a line count), the
+drain moved into both loop bodies with a `g_rx_backlog` re-arm, a charge on
+condemned-session teardown, and `bench_tick_budget.bcyr`. 821 assertions
+(from 751); all 13 new guards mutation-verified, two of which **survived the
+first mutation pass and exposed gaps in my own tests** before being closed.
+
+**Three findings 1.7.0 raised that the sweep had not.** Fixed in it, listed
+because they were not in the 8:
+
+1. *The auth path paid for an answer it could not use* — a 7.5× cut on the
+   costliest unauthenticated line, and nobody had looked at the order.
+2. *Refused lines waited up to 2500 ms* — `session_on_readable_max` drains the
+   socket to EAGAIN before the line cap is consulted, so epoll never re-fires for
+   the retained bytes. The comment claiming otherwise was wrong. **This is why
+   this file's own scoping of issue A — "two constants, and a comment. Small." —
+   was refuted:** lowering a count budget was never throughput-free.
+3. *The condemned-session teardown was unbudgeted* — 81 ms measured at 64 authed
+   drops, ~325 ms projected at MAX_SESSIONS, in the very function E2 added a
+   budget to. Both the line budget and the charge window *looked* like they
+   covered that walk.
 
 **A. Both per-tick line budgets are sized against the wrong worst case, and the
-server blocks for 252 ms in one pass — 5× the drift budget.** *(high)*
+server blocks for 252 ms in one pass — 5× the drift budget.** *(high — CLOSED in
+1.7.0; the headline arithmetic is corrected above)*
 
 - **What breaks.** [ADR 0001](../adr/0001-tick-based-combat.md) allows 50 ms of
   p99 tick drift. One pass with every budget at its cap costs **252 ms** —
@@ -146,6 +182,47 @@ the reason A exists)*
   bounded, and the audit trail still names the flood; a rotation round-trip
   verifies the chain across a segment boundary.
 
+**I. `passwd` has no rate limit at all.** *(medium — raised by 1.7.0's cost census)*
+
+- **What breaks.** Every other expensive verb is metered: `save` has
+  `SAVE_MIN_INTERVAL_MS` (1 s), the login paths have `MAX_LOGIN_FAILS`. `passwd`
+  has no analogue, and `PHASE_CHPASS_CONFIRM` is the **dearest line in the game
+  that needs no victim's credential** — two Ed25519 operations in one line
+  (a keypair derive *and* a record sign), measured 2461 µs.
+- **Can it happen today? Yes**, from a self-created account, and open
+  registration means "self-created" costs four lines. 1.7.0's charge window
+  bounds what one *pass* will spend on it, so it can no longer stall a tick — but
+  nothing bounds the **rate**, so it is a sustained-CPU lever.
+- **Whose code.** Ours. **Fix size.** Small — the `save_rate_limited` shape
+  already exists five lines away in the same file; reuse it.
+
+### 1.7.4 — object lifetime
+
+**J. Nothing in the tree reclaims a dropped item, and `look` pays for it.**
+*(medium — raised by 1.7.0's loop census)*
+
+- **What breaks.** `obj_free` is reached only from corpse decay and from a
+  disconnecting player's inventory. Anything dropped on a floor is permanent for
+  the life of the process. `session_append_objs` then walks it on **every `look`,
+  every move, every login**: measured 1 µs authored → **563 µs at 4000 floor
+  objects**, with a structural ceiling around 3600 µs
+  (`MAX_SESSIONS × MAX_INV` in one room). Sixteen `look`s is up to 58 ms — on the
+  most-typed verb in the game.
+- **Can it happen today?** Yes, and it needs no malice: it is what a long-lived
+  server with players who drop things looks like after a while.
+- **Why 1.7.0 did not fix it.** The charge meter deliberately charges this
+  **nothing** — there is no crypto and no prose in it — so it is bounded only by
+  the line count, and no line count helps: one littered `look` can exceed a whole
+  window on its own. **No budget of any denomination fixes this.** The cost is
+  unbounded in the *world state*, not in the line, so only object lifetime fixes
+  it. Stated plainly here because 1.7.0's comments could otherwise read as
+  though the pass is fully bounded; what is bounded is the crypto and the fan-out.
+- **Whose code.** Ours. **Fix size.** Real — it is a lifetime/ownership question
+  (when does a floor object become garbage, and who decides), adjacent to M12's
+  corpse decay and to **M15**'s zone registry. Related unmetered walks in the
+  same class: `zone_reset_objs`' `_obj_id_world_count` (24 µs → 1467 µs) and
+  `get all.X` scanning past `MAX_INV`.
+
 ### 1.7.2 — the carry cap becomes a bound
 
 **E. The 100-item carry cap is not enforced when a character loads.** *(medium)*
@@ -214,6 +291,38 @@ so it is not mistaken for complete)*
   it is this release's main body of work.
 - **Test story for the release.** Every pre-1.6.7 guard has a mutation that fails
   when the guard is reverted.
+
+### 2.0 — bound the broadcast fan-out
+
+**K. `combat_tick_all`'s broadcast fan-out is O(sessions²).** *(2.0 — needs a new
+`@stats` field, which ADR 0007 freezes until then)*
+
+- `room_combat_line` and `room_broadcast` each walk every session per line, with
+  up to four combat lines per engaged player per round. At 256 co-located players
+  that is **43.3 ms of tick body** (`bench_combat` BIGPLAYERS — **passing**, and
+  1.7.0 deliberately did not tighten its gate; putting a legitimate scenario 4%
+  from failing on a shared runner is a coin flip, and this repo has been burned
+  twice by nondeterministic gates).
+- **1.7.0's arithmetic deliberately does not subtract this from the drift
+  allowance**, because a pre-work drift sample cannot see tick-body cost. That
+  subtraction was proposed during the design work, would have produced budgets
+  ~3.5× tighter than needed, and is refuted in
+  [ADR 0001](../adr/0001-tick-based-combat-over-cooldowns.md). Do not redo it.
+- Closing it means bounding fan-out at **every** broadcast site and gaining a
+  tick-body occupancy counter to measure the result — a new `@stats` field, hence
+  2.0 / M14. Related unbudgeted walks: `room_say_broadcast`, `cmd_who`,
+  `render_who`, `room_append_present`, `find_player_global`, `room_find_player`,
+  `sessions_forget_mob`.
+- **The honest ceiling.** If a reviewer insists on one 50 ms reading covering
+  everything, then 43.3 ms of legitimate combat plus 27 ms of worst-case input is
+  70 ms and no per-pass budget can fix it — with **both** budgets set to zero, one
+  pass at that population still costs 43.3 + 2 × 13.5 ms from two indivisible
+  sigil calls. `ed25519_verify` is ~4.7× its own sign, `lib/` is off-limits, and
+  single-threaded there is nowhere to defer it. **The highest-leverage change to
+  this server's tick behaviour is a sigil release**: at 500 µs per verify the
+  dearest line drops from 54 charge units to ~9. Descent's own job — which 1.7.0
+  did — is to stop calling verify when the answer cannot matter, and to stop a
+  count budget pretending the call is cheap.
 
 ### What the sweep checked and found clean
 
