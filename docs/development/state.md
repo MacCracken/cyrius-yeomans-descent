@@ -47,6 +47,13 @@ expensive-line path; "every loop that dispatches lines" lists every place a cap
 must be aggregate rather than per-item. Both were one command away, and three
 releases asked neither.
 
+**A 1-in-20 flake, caught by CI.** The killing-blow test assumed `SS_HIT = 100`
+meant "always hits". `combat_try_hit` returns 0 on a **natural 1 whatever the
+bonus**, so one round was a 5% coin flip — green here, red on CI. It retries now.
+Second time CI has caught a test depending on something it did not control (the
+first was `clock_now_ms()` being uptime, in 1.6.8); a local pass proves nothing
+about either.
+
 **Testing note.** Six of thirteen mutations needed the test rewritten first, and
 the reasons rhyme with the bug: the first `event-budget` test **reimplemented
 the batch arithmetic** rather than calling it, so three mutations passed unseen;

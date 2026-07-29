@@ -3466,11 +3466,27 @@ fn test_tail_guards(): i64 {
             var kh = g_session_head;
             store64(ks + SS_NEXT, 0);
             g_session_head = ks;
-            _tx_reset(ks);
-            combat_round(ks);
+
+            # Retry until the blow lands. SS_HIT = 100 does NOT mean "always
+            # hits": combat_try_hit returns 0 on a natural 1 whatever the bonus
+            # is, so a single round is a 1-in-20 flake — which is exactly how
+            # this failed on CI while passing here. The mob has 1 HP and the
+            # damage profile is enormous, so the first HIT is the kill; looping
+            # makes the assertion about the killing blow's TAIL, which is what
+            # it was always meant to be about, rather than about a d20.
+            var tries = 0;
+            var killed = 0;
+            while (killed == 0) {
+                if (tries > 60) { killed = 0 - 1; continue; }
+                _tx_reset(ks);
+                combat_round(ks);
+                if (_contains(load64(ks + SS_TX_BUF), load64(ks + SS_TX_LEN), "collapses") == 1) {
+                    killed = 1;
+                }
+                tries = tries + 1;
+            }
             g_session_head = kh;
-            assert_eq(_contains(load64(ks + SS_TX_BUF), load64(ks + SS_TX_LEN), "collapses"), 1,
-                      "the mob died this round");
+            assert_eq(killed, 1, "the mob died within 60 rounds (a natural 1 only misses)");
             assert_eq(_contains(load64(ks + SS_TX_BUF), load64(ks + SS_TX_LEN), "[ hp "), 1,
                       "and the killing blow still prints the condition line");
             assert_eq(_contains(load64(ks + SS_TX_BUF), load64(ks + SS_TX_LEN), "> "), 1,

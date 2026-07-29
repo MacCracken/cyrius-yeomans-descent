@@ -100,6 +100,20 @@ reports.
     and it **refuses to assert** if the read ever saturates.
   - And `login.fail` was covered only for creation. Covering one of two
     symmetric paths is the mistake this entire release is about.
+- **A 1-in-20 flake, caught by CI.** The killing-blow test set `SS_HIT = 100` on
+  the assumption that made it "always hit". It does not: `combat_try_hit`
+  returns 0 on a **natural 1 regardless of the bonus**, so one round was a 5%
+  coin flip. It passed here and failed on CI, which simply rolled the 1.
+
+  Now it retries until the blow lands — the mob has 1 HP and an enormous damage
+  profile, so the first *hit* is the kill, and the assertion is about the killing
+  blow's **tail**, which is what it was always meant to be about rather than
+  about a d20. Verified by forcing every roll to a natural 1 (the test then fails
+  cleanly on its bound, so it is not vacuous) and by five consecutive green runs.
+
+  Worth noting alongside the uptime bug that CI caught in 1.6.8: both were tests
+  that depended on something the test did not control. A local pass says nothing
+  about either.
 
 **Not closed.** The 1.x line still needs a re-run that comes back with no
 critical or high findings. Two re-runs have now each found serious defects the
