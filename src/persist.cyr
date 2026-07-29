@@ -137,8 +137,81 @@ fn persist_init(): i64 {
     # chain in data/audit.libro is unchanged and verifies the same.
     g_audit_chain = chain_new_streaming();
     g_audit_store = filestore_open(str_from(DP_AUDIT));
+    _audit_resume_head();
     g_persist_ready = 1;
     return 0;
+}
+
+# === H11 (1.6.6) — resume the chain from the durable head, not from genesis. ===
+#
+# `filestore_open` opens the JSONL store for append and tells the in-memory chain
+# nothing. Every restart therefore began at genesis: the first entry of the new
+# run recorded `prev_hash = ""` instead of the last entry of the previous run, so
+# a verifier walking data/audit.libro sees a **broken link at every restart
+# boundary** — and cannot distinguish "the server restarted here" from "someone
+# removed entries here". That is precisely the property the chain exists to
+# provide, so it was tamper-evident only within a single process lifetime.
+#
+# We read the tail rather than the whole file. `filestore_load_all` would work
+# and is what a query-shaped consumer would use, but it materialises every entry
+# ever written at boot — reintroducing the unbounded growth 1.6.1 removed. Only
+# the LAST line's hash matters, so seek to the end, pull back a window, and take
+# the final complete record.
+#
+# Best-effort by design: a missing, empty or unreadable store leaves the chain at
+# genesis, which is correct for a first run and no worse than the old behaviour
+# for anything else.
+fn _audit_resume_head(): i64 {
+    if (g_audit_chain == 0) { return 0; }
+    var fd = file_open(DP_AUDIT, O_RDONLY, 0);
+    if (fd < 0) { return 0; }
+    var size = syscall(SYS_LSEEK, fd, 0, 2);          # SEEK_END
+    if (size <= 0) { file_close(fd); return 0; }
+    var want = SLURP_CAP - 1;
+    if (size < want) { want = size; }
+    syscall(SYS_LSEEK, fd, size - want, 0);           # SEEK_SET
+    var n = sys_read(fd, g_persist_slurp, want);
+    file_close(fd);
+    if (n <= 0) { return 0; }
+    var h = _audit_last_hash(g_persist_slurp, n);
+    if (h == 0) { return 0; }
+    chain_set_prev_hash(g_audit_chain, h);
+    return 0;
+}
+
+# Extract the `"hash":"<hex>"` of the LAST complete JSONL record in buf[0,n).
+# Returns a str, or 0 if no complete record is present. Scans backwards for the
+# final occurrence so a partial leading line (the window may start mid-record)
+# is ignored, and requires a trailing newline so a torn final write is skipped.
+fn _audit_last_hash(buf, n): i64 {
+    var end = n;
+    while (end > 0) {
+        if ((load8(buf + end - 1) & 0xFF) == 10) { break; }
+        end = end - 1;
+    }
+    if (end == 0) { return 0; }
+    var key = "\"hash\":\"";
+    var klen = strlen(key);
+    var found = 0 - 1;
+    var i = 0;
+    while (i + klen <= end) {
+        var j = 0;
+        var same = 1;
+        while (j < klen) {
+            if ((load8(buf + i + j) & 0xFF) != (load8(key + j) & 0xFF)) { same = 0; j = klen; }
+            else { j = j + 1; }
+        }
+        if (same == 1) { found = i + klen; }
+        i = i + 1;
+    }
+    if (found < 0) { return 0; }
+    var stop = found;
+    while (stop < end) {
+        if ((load8(buf + stop) & 0xFF) == 34) { break; }   # closing quote
+        stop = stop + 1;
+    }
+    if (stop <= found) { return 0; }
+    return str_new(buf + found, stop - found);
 }
 
 # Append a security event to the libro audit chain (+ flush to the
@@ -682,6 +755,17 @@ fn login_begin_newpass(s): i64 {
 fn login_on_pass(s, buf, len): i64 {
     var rc = player_auth_load(s, buf, len);
     if (rc == 1) {
+        # H11 (1.6.6) — refuse a second concurrent session for one character,
+        # checked AFTER the passphrase proves who they are (so this cannot be
+        # used to probe who is online) but BEFORE session_resume_world places
+        # them, and before any tick can save the duplicate over the live record.
+        if (session_already_online(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), s) == 1) {
+            session_echo_on(s);
+            session_appendtx_cstr(s, "\r\nThat character is already connected from another session.\r\n");
+            store64(s + SS_QUIT, 1);
+            audit_event(SEV_WARNING, "login.dup", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+            return 0;
+        }
         store64(s + SS_FAILS, 0);
         store64(s + SS_PHASE, PHASE_CMD);
         session_echo_on(s);   # 0.8.1 — restore echo now the passphrase is in

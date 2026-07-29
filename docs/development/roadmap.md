@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-28 (v1.6.5 — loader + save-failure integrity; sweep batches A–D scheduled)
+> **Last Updated**: 2026-07-28 (v1.6.6 — sweep batch A shipped; B–D remain)
 >
 > Milestone plan through v1.0 (shipped) and on to v2.0. State lives in [`state.md`](state.md);
 > this file is the sequencing — what ships, in what order, against
@@ -50,7 +50,7 @@ MUD rather than a well-built room-crawler.
 | **1.6.3** | Accept-path fd-exhaustion spin + session cap + `save` rate limit | ✅ 2026-07-28 |
 | **1.6.4** | `passwd` candidate isolation + the M13 assist made real | ✅ 2026-07-28 |
 | **1.6.5** | Loaders publish only on success · `player_save` failures no longer silent | ✅ 2026-07-28 |
-| **1.6.6** | Sweep batch A — state integrity | planned |
+| **1.6.6** | Sweep batch A — state integrity | ✅ 2026-07-28 |
 | **1.6.7** | Sweep batch B — content + parser correctness | planned |
 | **1.6.8** | Sweep batch C — resource & timing hygiene | planned |
 | **1.6.9** | Sweep batch D — coverage + docs, then close the sweep | planned |
@@ -98,9 +98,9 @@ coherent theme and one coherent test story.
 **None is DoS-class or memory-unsafe** — those are all closed. **2.0 work does
 not start until 1.6.9 lands.**
 
-### 1.6.6 — Batch A: state integrity
+### 1.6.6 — Batch A: state integrity ✅ shipped
 
-The three that can still corrupt or duplicate player state.
+All three landed; see the 1.6.6 CHANGELOG entry.
 
 - **Single-session guard.** `login_on_name` checks only `player_exists`; nothing
   scans `g_session_head` for an already-authed session with the same name. Both

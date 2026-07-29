@@ -266,6 +266,51 @@ fn listener_rearm(): i64 {
     return 0;
 }
 
+# === H11 (1.6.6) — is this character already logged in on another session? ===
+#
+# `login_on_name` only ever asked `player_exists`; nothing looked at who was
+# already connected. Two sessions on the same character each ran `_restore_inv`
+# and each minted a full copy of every saved item — reproduced: one authored
+# `notice` became two on disk, signed and persisted, doubling per cycle. And
+# `zone_reset_room_objs` only refills MISSING ids, never removes extras, so the
+# duplicates parked in rooms were never reclaimed: an unbounded fl_alloc growth
+# path driven by ordinary play.
+#
+# The second half is worse than duplication. Both sessions write the same
+# `data/players/<name>.cyml` with no compare-and-swap, so whichever disconnects
+# last wins — the stale session's `drop_session` → `player_save` silently reverts
+# the live session's room, drops, HP and class.
+#
+# Refusing the newcomer is the conservative answer. Takeover ("boot the old
+# session and adopt the character") is friendlier but needs semantics for
+# in-flight combat and an in-progress `passwd`, which is a 2.0 conversation.
+# Name comparison is byte-exact: `login_name_ok` constrains names to alnum, and
+# `_path_for` lowercases only for the FILENAME, so two differently-cased spellings
+# of one character share a record — compare case-insensitively to match.
+fn session_already_online(name, len, except_s): i64 {
+    var t = g_session_head;
+    while (t != 0) {
+        if (t != except_s) {
+            if (load64(t + SS_AUTHED) == 1) {
+                if (load64(t + SS_NAME_LEN) == len) {
+                    var nb = load64(t + SS_NAME_BUF);
+                    var i = 0;
+                    var same = 1;
+                    while (i < len) {
+                        if (ascii_lower(load8(nb + i) & 0xFF) != ascii_lower(load8(name + i) & 0xFF)) {
+                            same = 0;
+                            i = len;
+                        } else { i = i + 1; }
+                    }
+                    if (same == 1) { return 1; }
+                }
+            }
+        }
+        t = load64(t + SS_NEXT);
+    }
+    return 0;
+}
+
 # M7-B presence gate — is any in-world session standing in this zone? A
 # session with SS_ROOM in [0, room_count) is placed in the world (login
 # leaves it at -1). Single-writer (ADR 0003), so this snapshot can't race.

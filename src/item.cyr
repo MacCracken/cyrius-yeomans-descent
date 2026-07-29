@@ -194,7 +194,13 @@ fn world_load_objs(path): i64 {
         var t = ot_at(i);
         var id = toml_get(pairs, "id");
         if (id == 0) { return WL_ERR_NOID; }
-        store64(t + OT_ID_LEN, copy_str_capped(t + OT_ID, OT_ID_CAP, id));
+        # H11 (1.6.6) — OT_ID_CAP - 1, not OT_ID_CAP. The template wrote up to
+        # 32 bytes while item_new copies an instance's OI_TPL_ID at
+        # OI_TPL_ID_CAP - 1 (31), so a 32-byte authored id was truncated on the
+        # way into the instance and could never match its own template on
+        # reload — the save record stores inventory BY that id. Capping both at
+        # CAP - 1 keeps them NUL-terminated and round-trippable.
+        store64(t + OT_ID_LEN, copy_str_capped(t + OT_ID, OT_ID_CAP - 1, id));
         var name = toml_get(pairs, "name");
         if (name != 0) { store64(t + OT_NAME_LEN, copy_str_capped(t + OT_NAME, OT_NAME_CAP - 1, name)); }
         var kw = toml_get(pairs, "keywords");

@@ -1795,6 +1795,92 @@ fn test_load_and_save_failure(): i64 {
     return 0;
 }
 
+# === H11 (1.6.6) — Batch A: state integrity ===
+fn test_state_integrity(): i64 {
+    test_group("state-integrity");
+    persist_init();
+
+    # --- A1: one character, one session. Two sessions on the same character each
+    # ran _restore_inv and each minted a full copy of the saved inventory — and
+    # zone_reset_room_objs only refills MISSING ids, never removes extras, so the
+    # duplicates were never reclaimed. Both also wrote the same record with no
+    # compare-and-swap, so the stale session's drop_session reverted the live
+    # one's room, drops, HP and class.
+    var a = _mk_sess("Twin", 4);
+    store64(a + SS_AUTHED, 1);
+    var saved_head = g_session_head;
+    store64(a + SS_NEXT, 0);
+    g_session_head = a;
+    assert_eq(session_already_online("Twin", 4, 0), 1, "an authed session is found by name");
+    assert_eq(session_already_online("Twin", 4, a), 0, "and excludes itself");
+    assert_eq(session_already_online("Other", 5, 0), 0, "a different name does not match");
+    # Case-insensitive: _path_for lowercases only the FILENAME, so two spellings
+    # share one record and must be treated as the same character.
+    assert_eq(session_already_online("TWIN", 4, 0), 1, "matching is case-insensitive");
+    # An unauthenticated session with the same name is not yet that character.
+    store64(a + SS_AUTHED, 0);
+    assert_eq(session_already_online("Twin", 4, 0), 0, "an unauthed session does not hold the name");
+    g_session_head = saved_head;
+
+    # --- A2: a template id must survive the round trip into an instance. The
+    # template wrote up to OT_ID_CAP (32) while item_new copies at
+    # OI_TPL_ID_CAP - 1 (31), so a 32-byte id was truncated and could never match
+    # its own template on reload — and the save record stores inventory BY id.
+    # A real Hub id is ~6 bytes, so it round-trips either way and proves nothing:
+    # the truncation is only observable at exactly OT_ID_CAP. Drive the REAL
+    # loader over a fixture whose id is 32 bytes — writing the copy by hand here
+    # would bypass the very line under test.
+    assert(world_load_objs("tests/fixtures/longid.objs.cyml") > 0, "the maximal-id fixture loads");
+    var probe = ot_at(0);
+    assert_eq(load64(probe + OT_ID_LEN), OT_ID_CAP - 1,
+              "a 32-byte id is stored at CAP-1, leaving room for the NUL");
+    var sit = item_new(probe);
+    assert_eq(oi_tpl_id_len(sit), load64(probe + OT_ID_LEN),
+              "and round-trips into the instance intact");
+    obj_free(sit);
+    # Restore the real object table for the groups that follow.
+    assert(world_load_objs(DP_OBJS) > 0, "the real object table reloads");
+
+    var tpl = ot_at(0);
+    var it = item_new(tpl);
+    assert_eq(oi_tpl_id_len(it), load64(tpl + OT_ID_LEN),
+              "the instance carries the template id at full length");
+    var k = 0;
+    var same = 1;
+    while (k < load64(tpl + OT_ID_LEN)) {
+        if ((load8(oi_tpl_id_ptr(it) + k) & 0xFF) != (load8(tpl + OT_ID + k) & 0xFF)) { same = 0; }
+        k = k + 1;
+    }
+    assert_eq(same, 1, "and byte-for-byte the same id");
+    assert(load64(tpl + OT_ID_LEN) < OT_ID_CAP, "template ids leave room for a NUL");
+    obj_free(it);
+
+    # --- A3: the audit chain resumes from the durable head. filestore_open told
+    # the in-memory chain nothing, so every restart began at genesis and a
+    # verifier walking data/audit.libro saw a broken link at each restart
+    # boundary — indistinguishable from someone removing entries.
+    #
+    # The end-to-end proof is three real server processes (0 breaks with the fix,
+    # 2 without). Here, assert the tail parser those runs depend on.
+    var line = "{\"id\":\"x\",\"prev_hash\":\"aa\",\"hash\":\"beefcafe\"}\n";
+    var h = _audit_last_hash(line, strlen(line));
+    assert(h != 0, "a complete record yields a hash");
+    assert_eq(str_eq_cstr(h, "beefcafe"), 1, "and it is the record's own hash");
+
+    # The LAST record wins — the read window may begin mid-file.
+    var two = "{\"hash\":\"first000\"}\n{\"hash\":\"second11\"}\n";
+    assert_eq(str_eq_cstr(_audit_last_hash(two, strlen(two)), "second11"), 1,
+              "the last complete record wins");
+
+    # A torn final write (no trailing newline) is skipped, not half-read.
+    var torn = "{\"hash\":\"good0000\"}\n{\"hash\":\"trunc";
+    assert_eq(str_eq_cstr(_audit_last_hash(torn, strlen(torn)), "good0000"), 1,
+              "a torn trailing record is ignored");
+    assert_eq(_audit_last_hash("no newline here", 15), 0, "no complete record yields nothing");
+
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -2010,6 +2096,7 @@ fn main() {
     test_assist_real();
     test_chpass_isolation();
     test_load_and_save_failure();
+    test_state_integrity();
 
     return assert_summary();
 }

@@ -4,6 +4,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.6] — 2026-07-28
+
+**Sweep batch A — state integrity.** Three findings that could corrupt,
+duplicate or silently weaken persisted state.
+
+### Fixed
+
+- **A character could be logged in twice, duplicating its whole inventory.**
+  `login_on_name` asked only `player_exists`; nothing looked at who was already
+  connected. Both sessions ran `_restore_inv` and each minted a full copy of
+  every saved item — and `zone_reset_room_objs` only refills **missing** ids,
+  never removes extras, so duplicates parked in rooms were never reclaimed: an
+  unbounded `fl_alloc` growth path driven by ordinary play. The second half is
+  worse than duplication — both sessions write the same record with no
+  compare-and-swap, so whichever disconnects last wins, and the stale session's
+  `player_save` silently reverts the live one's room, drops, HP and class.
+
+  `session_already_online` now refuses the newcomer, checked **after** the
+  passphrase proves identity (so it cannot be used to probe who is online) and
+  **before** `session_resume_world` places them. Matching is case-insensitive:
+  `_path_for` lowercases only the *filename*, so two spellings share one record.
+  Takeover semantics — boot the old session and adopt the character — need rules
+  for in-flight combat and an in-progress `passwd`, so that stays a 2.0 question.
+- **A maximal template id could not round-trip.** The object loader wrote ids at
+  `OT_ID_CAP` (32) while `item_new` copies an instance's at `OI_TPL_ID_CAP - 1`
+  (31), so a 32-byte authored id was truncated on the way into the instance and
+  could never match its own template on reload — and the save record stores
+  inventory **by that id**. Both now cap at `CAP - 1`, keeping ids
+  NUL-terminated and round-trippable.
+- **The audit chain restarted at genesis on every boot.** `filestore_open` tells
+  the in-memory chain nothing, so the first entry of each run recorded
+  `prev_hash = ""` instead of the previous run's head. A verifier walking
+  `data/audit.libro` therefore saw a **broken link at every restart boundary**,
+  indistinguishable from someone removing entries — the chain was tamper-evident
+  only within a single process lifetime.
+
+  `_audit_resume_head` now seeds the streaming chain from the durable head. It
+  reads the file **tail** rather than calling `filestore_load_all`, which would
+  materialise every entry ever written at boot and reintroduce exactly the
+  unbounded growth 1.6.1 removed. Best-effort: a missing, empty or torn store
+  leaves the chain at genesis, which is correct for a first run.
+
+  Verified end to end across three separate server processes: **0 linkage breaks
+  with the fix, 2 without** — one per restart boundary.
+
+### Notes
+
+- Suite **431 → 448**. New fixture `tests/fixtures/longid.objs.cyml`.
+- **Two of my first three mutations did not discriminate, and both were test
+  bugs.** The template-id test used a real Hub id (~6 bytes), which round-trips
+  whether the cap is 31 or 32 — the truncation is only observable at exactly
+  `OT_ID_CAP`. Rewriting it to hand-write the copy did not help either: that
+  bypassed the line under test. It now drives the **real loader** over a fixture
+  with a 32-byte id, and fails 2 assertions when reverted. The audit-tail
+  mutation I first chose was behaviour-neutral; replaced with one that takes the
+  first hash instead of the last, which fails 1.
+- `session_already_online` fails 2 when neutered.
+
 ## [1.6.5] — 2026-07-28
 
 **A failed load leaves no world; a failed save is never reported as success.**

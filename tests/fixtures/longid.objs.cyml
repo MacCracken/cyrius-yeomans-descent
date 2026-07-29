@@ -1,0 +1,11 @@
+zone = "probe"
+name = "H11 fixture — maximal object id"
+[[entries]]
+kind = "obj"
+id = "abcdefghijklmnopqrstuvwxyz012345"
+name = "a probe token"
+keywords = "probe token slab"
+---
+A featureless slab used only by the test suite. Its id is exactly OT_ID_CAP
+bytes, which is the only length at which the template/instance cap mismatch
+is observable — real Hub ids are far shorter and round-trip either way.

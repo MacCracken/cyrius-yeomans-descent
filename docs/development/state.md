@@ -3,14 +3,32 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-28 (v1.6.5 — sweep batches A–D scheduled through 1.6.9)
+> **Last refresh**: 2026-07-28 (v1.6.6 — sweep batch A shipped; B–D remain)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.6.5 tree.
+> tests, boot guide) describes the **current** 1.6.6 tree.
 
 ## Version
+
+**1.6.6** — sweep batch A, state integrity, 2026-07-28. **448 assertions**;
+`cyrius audit` exits 0; `--agnos` warning-free.
+
+- **Double login duplicated a whole inventory** and raced the save file — the
+  stale session's `player_save` reverted the live one's room, drops, HP and
+  class. `session_already_online` refuses the newcomer after auth.
+- **A 32-byte template id could not round-trip** into an instance, so it could
+  never match its own template on reload — and inventory persists *by id*.
+- **The audit chain restarted at genesis every boot**, so the durable chain had
+  a broken link at each restart boundary, indistinguishable from deletion.
+  Verified end to end: 0 breaks with the fix, 2 without, across three processes.
+
+**Testing note worth carrying:** two of the first three mutations here did not
+discriminate, and both were **test** bugs — a real Hub id is too short to expose
+the truncation, and hand-writing the copy in the test bypassed the line under
+test. The fix is to drive the real loader over a purpose-built fixture. A
+mutation that fails to fail is a signal about the test, not the code.
 
 **1.6.5** — loader + save-failure integrity, 2026-07-28. **431 assertions**;
 `cyrius audit` exits 0; `--agnos` warning-free.
@@ -399,7 +417,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **431** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **448** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
