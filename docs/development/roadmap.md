@@ -1,118 +1,294 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-29 (v1.6.12 — sweep shipped; the line closes on a clean re-run)
+> **Last Updated**: 2026-07-29 (v1.6.12)
 >
-> Milestone plan through v1.0 (shipped) and on to v2.0. State lives in [`state.md`](state.md);
-> this file is the sequencing — what ships, in what order, against
-> what dependency gates. Design reference: [`../architecture/overview.md`](../architecture/overview.md).
+> **This file is the remaining work.** It opens with
+> [What is left](#what-is-left) — every open item, assigned to a release, worst
+> first. History is below that and clearly marked as history.
 >
-> Per-tag chronology lives in [`../../CHANGELOG.md`](../../CHANGELOG.md);
-> current-cycle status in [`state.md`](state.md). ADRs cross-referenced
-> at [`../adr/`](../adr/).
+> Per-tag chronology: [`../../CHANGELOG.md`](../../CHANGELOG.md). Live tree state
+> (versions, deps, layout): [`state.md`](state.md). Design:
+> [`../architecture/overview.md`](../architecture/overview.md). ADRs:
+> [`../adr/`](../adr/).
 
 ---
 
-## Release plan
+## What is left
 
-**Shipped: 0.1.0 → 1.6.12.** Thirty-eight releases — M0–M7 to the 1.0 server,
-the 0.8.x polish and 0.9.x hardening, M10–M13 across the 1.x line, and the
-1.6.0–1.6.12 audit sweep. Per-tag detail is in
-[`../../CHANGELOG.md`](../../CHANGELOG.md); the sweep's shape is
-[below](#the-16x-audit-sweep); one-line milestone summaries are in
-[Closed milestones](#closed-milestones).
+Everything not yet done, in the order it should happen. Nothing below is
+"probably fine" — each item links to a full write-up with impact, reachability,
+ownership and fix size.
 
-### 2.0 line — planned
+| # | Release | Items | Contains | Blocks 2.0? |
+|---|---|---|---|---|
+| ~~1~~ | [~~**1.6.13**~~](#1613--shipped--2026-07-29) | ~~3~~ | ✅ **shipped** — carry cap, pre-auth timeout, config whitespace | — |
+| 2 | [**1.6.14**](#1614--correctness--hygiene-tail) | 5 | Class stat clamps, class-ID terminator, ARM epoll offsets, dead symbols, per-accept alloc — all dormant | no |
+| 3 | [**1.6.15**](#1615--documentation-truth-pass) | 1 | README says v1.2.0; architecture doc describes combat we never built | no |
+| 4 | [**re-run sweep**](#the-gate--what-closes-the-1x-line) | — | **The gate.** Closes the 1.x line if it returns no critical or high findings | **yes** |
+| 5 | **2.0.0** | 3 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death | — |
+| 6 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
-The 1.x line is **maintenance and foundations**: everything that touches no
-ADR-0007-frozen surface. 2.0 is where the surface opens and the game becomes a
-MUD rather than a well-built room-crawler.
+**Nothing open can affect a running server any more.** 1.6.13 closed the last
+one. Everything remaining in 1.6.14–1.6.15 is dormant (cannot fire in the
+shipped configuration), or documentation.
 
-| Tag | Theme | Status |
-|---|---|---|
-| **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
-| **2.1.0** | M17 — equipment slots + item modifiers · M18 — operator identity + control channel | planned |
-| **2.2.0** | M19 — threat, aggression, resistance · M20 — currency and shops | planned |
-| **2.3.0** | M21 — titles, channels, ignore · M22 — offline state (mail / boards / guilds) | planned |
-| **2.4.0** | M23 — parties and group play | planned |
+**Blocked, not schedulable here:** one issue is upstream in libro and needs a
+**2.8.5** release. Descent's own share of it is already zero.
 
 **The minimum credible 2.0 is M14 + M15 + M16** — the contract, the content
-ceiling, and progression. Everything from M17 on can slip to 2.x without
-embarrassing the release.
+ceiling, and progression. Everything from M17 on can slip without embarrassing
+the release.
 
 ---
 
-## In progress
+## Open issues — the work in 1.6.14 → 1.6.15
 
-**No active cycle.** The tree builds, `cyrius audit` exits 0, and 706 assertions
-+ 5 benches pass. Live state — versions, surface area, dep gaps — is in
-[`state.md`](state.md); per-release history is in
-[`../../CHANGELOG.md`](../../CHANGELOG.md). This section is only ever "what is
-being worked on now", and the running commentary that used to accumulate here
-has been removed: two of the stale-doc findings in 1.6.9 and 1.6.11 came from
-exactly this kind of duplication.
+**Reconciled against the original 1.6.0 sweep output on 2026-07-29.** All 56 raw
+/ 44 verified findings from that sweep have been matched against the current
+tree. This is the complete set of what is known to be wrong — not a summary and
+not a selection.
 
-**Next is another re-run sweep** — the gate. Everything both re-runs produced is
-closed; what remains is a pass that comes back with no critical or high findings.
-See [The gate](#the-gate--still-open).
+**Why the reconciliation was needed.** The 1.6.5 roadmap said *"44 survived
+adversarial verification. Twenty-two are closed. Twelve remain."* Those numbers
+do not subtract. The batch plan was written by grouping what was to hand rather
+than by reconciling against the verified set, so real findings were never
+tracked — and some of what the later re-run sweeps "discovered" had been in the
+original output all along. **Never write a remaining-work count that is not
+derived from the source list.**
 
-**Then 2.0.0**, starting with **M14 — ADR 0008 + save schema v2**, which
-everything else in the 2.0 line routes through. Read the
-[critical path](#critical-path) first: saves are signed with a key derived from
-the player's passphrase, which the server never holds, so **migration is
-lazy-at-login and additive only**.
+### Never tracked — from the 1.6.0 sweep, missed by the batch plan
 
-The public surface stays frozen until then
-([ADR 0007](../adr/0007-frozen-1.0-surface.md)): command verbs, the
-`@`-namespace, save schema v1, Telnet/wire behaviour, the zone-file format, and
-the `YD_*` knob set.
+These were verified real in the original sweep and never made it onto any batch.
+
+- **#21 — a hoarding player stops saving, permanently.** The worst of them, and
+  it is item 1 below.
+- **#43 — no pre-auth timeout.** 1.6.3 added `MAX_SESSIONS`, which was half of
+  this finding; the other half — a *separate, shorter* timeout for sessions that
+  have not authenticated — was never implemented. An unauthenticated socket
+  holds an fd and a session slot for the full 5-minute idle window. Item 2.
+- **#38 — config values are not whitespace-trimmed.** A stray CR in a zone file
+  makes a value unparseable, and an unparseable value silently takes the default.
+  1.6.7 fixed the *signed* half of this finding and 1.6.12's notes deferred the
+  *strictness* half to M14-D; the **trim** was never done. Item 3.
+- **#31 / #32 — the README and the architecture doc are wrong.** Item 8.
+- **#30 — dead symbols with comments claiming they are live.** Item 9.
 
 ---
 
-## The 1.6.x audit sweep
+---
 
-**Status: shipped 1.6.0–1.6.12. The line is not closed — see *The gate* below.**
+### 1.6.13 — shipped ✅ 2026-07-29
 
-Per-release detail is in [`../../CHANGELOG.md`](../../CHANGELOG.md); this is the
-shape of it, because the shape is the part worth remembering.
+The carry cap (a hoarding player silently stopped saving), the pre-auth timeout,
+and config whitespace trimming. All three came from the 1.6.0 sweep and none had
+ever been tracked. Detail in the 1.6.13 CHANGELOG entry.
 
-The 1.6.0 audit produced 56 findings, 44 verified, closed across 1.6.0–1.6.9 in
-batches grouped by *kind of work* rather than severity, so each release had one
-coherent theme and one coherent test story:
+---
+
+### 1.6.14 — correctness + hygiene tail
+
+#### Character stats from `classes.cyml` aren't range-checked on creation
+
+
+
+**What breaks.** 1.6.7 taught the config reader to accept negative numbers, and
+1.6.11 clamped `hp` and `energy` on the creation path — but `str`, `dex`, `con`
+and `tec` were missed, and the damage-dice profile (`ndice`/`dsize`) is unbounded
+on both the class and mob paths. The *load* path clamps all of them; the
+*creation* path does not, so the same field is checked when a saved character is
+read and unchecked when a new one is made.
+
+**Can it happen today?** **Only via an authored file.** `data/classes.cyml` and
+the zone files are operator content, not player input — so this is a typo away,
+not an attack. An unbounded `ndice` also feeds a `roll()` loop.
+
+**Whose.** Ours — `src/classes.cyr` (`apply_class`), `src/mob.cyr`.
+
+**Fix size.** Small — four `_clamp` calls and a dice bound, mirroring what
+`player_auth_load` already does.
+
+---
+
+#### Class IDs are not zero-terminated
+
+
+
+**What breaks.** A class id is copied into a 32-byte slot using all 32 bytes,
+leaving no terminator. The two fields beside it (name, role) copy at most 31 for
+exactly that reason.
+
+**Can it happen today?** **No — dormant.** Every reader uses the stored length,
+so nothing treats an id as a terminated string. It is a trap for the first piece
+of code that does.
+
+**Whose.** Ours — `src/classes.cyr:131`.
+
+**Fix size.** One character: `CL_ID_CAP` → `CL_ID_CAP - 1`.
+
+---
+
+#### An ARM build would read session pointers from the wrong offset
+
+
+
+**What breaks.** The event loop hardcodes the x86 layout of the kernel's
+`epoll_event` struct — 12 bytes, pointer at offset 4. On aarch64 Linux the struct
+is unpacked: 16 bytes, pointer at offset 8. The server would read a session
+pointer out of the wrong bytes and dereference garbage.
+
+**Can it happen today?** **No — dormant.** Descent builds x86_64 and agnos only.
+It fires the first time anyone runs `--aarch64`.
+
+**Whose.** Ours, and avoidably so: **the Cyrius stdlib already handles this**. It
+ships a per-architecture `epoll_event_new` (x86_64 writes data at +4, aarch64 at
++8, with a comment explaining the split). Descent *uses* that helper to **write**
+events and then hardcodes its own constants to **read** them back. The write path
+is portable; only the read path is not.
+
+**Fix size.** Small: derive the size and data offset per target the way the
+stdlib does, instead of the local `EPOLL_EVENT_SIZE = 12`.
+
+---
+
+#### Dead symbols carrying comments that say they are live
+
+
+
+**What breaks.** `mt_level`, `session_class` and `room_set_obj_head` are defined
+and never called; `parser_free` and `g_zone_name` are near-dead. Some carry
+comments asserting they are in use.
+
+**Can it happen today?** No. It is a correctness-of-the-map problem: this tree has
+already produced several findings that were *only* comments contradicting code.
+
+**Whose.** Ours.
+
+**Fix size.** Small: delete them, or wire them up and make the comments true.
+
+---
+
+#### `epoll_event_new` allocates 16 bytes per accepted connection
+
+
+
+**What breaks.** Every accept and every EPOLLOUT arm/disarm allocates a fresh
+16-byte event struct from the non-reclaiming bump allocator.
+
+**Can it happen today?** **Yes, but trivially** — 16 bytes per connection.
+Listed for completeness, not because it needs doing.
+
+**Whose.** Shared: the allocation is in the stdlib helper; the call frequency is
+ours.
+
+**Fix size.** Small — reuse one scratch event struct.
+
+---
+
+---
+
+### 1.6.15 — documentation truth pass
+
+#### The README and the architecture doc describe a different game
+
+
+
+**What breaks.** `README.md` still says **v1.2.0** and "298 assertions" (actual:
+1.6.12, 706). `docs/architecture/overview.md` documents a combat model the code
+does not implement — DEX-modified hit rolls, STR/TEC damage scaling, carrying
+capacity — and mentions rest/sleep verbs that do not exist.
+
+**Can it happen today?** Not a runtime bug. It is the first thing a new
+contributor reads, and it is wrong.
+
+**Whose.** Ours.
+
+**Fix size.** Small, and mechanical.
+
+---
+
+---
+
+### Blocked on upstream — not schedulable here
+
+#### Repeated failed logins burn memory that is never given back
+
+
+
+**What breaks.** Every audit event costs ~1.6 kB from the bump allocator, which
+has no `free`. 1.6.12 cut this to one event per connection instead of five, but
+the per-event cost itself is inside libro's `filestore_append`, which rebuilds a
+string builder on every append.
+
+**Can it happen today?** **Yes, slowly.** Bounded per connection, unbounded
+across reconnects. It needs sustained CPU saturation to matter, and the server is
+already unusable from CPU at that point — so the distinctive harm is that memory
+does not come back when the attack stops. A restart clears it.
+
+**Whose.** **Upstream — libro.** `CLAUDE.md` forbids touching `lib/`. Descent's
+own contribution is already zero.
+
+**Fix size.** Needs a **libro 2.8.5** release, same shape as the 1.6.1 chain fix.
+Not ours to land.
+
+---
+
+---
+
+### Deferred by design, not forgotten
+
+Two config-validation gaps are deliberately left open because fixing them would
+reject zone files that load today, and ADR 0007 §5 freezes the zone format for
+all of 1.x. Both are folded into **M14-D**, where a format version gives them
+something to hang off:
+
+- **Unparseable config values silently take the default** instead of erroring, so
+  a typo'd field reads as "absent".
+- **`parse_uint` has no overflow check** (`v * 10 + d`), so an absurd literal
+  wraps to an arbitrary in-range value rather than being rejected. The
+  `reset_secs` clamp makes that *harmless*, not *correct*.
+
+
+---
+
+## The gate — what closes the 1.x line
+
+**The 1.x line closes when a re-run sweep comes back with no critical or high
+findings.** That has not happened. It is item 4 in [What is left](#what-is-left)
+and it is the only item that blocks 2.0.
+
+Two re-runs have been done and both found serious defects the previous pass had
+missed — a remote crash on `examine` (found at 1.6.9) and an unbounded event
+batch costing 4.12 s of blocked loop (found at 1.6.12). Everything both produced
+is fixed. The bar stays where it is because the evidence so far is that each pass
+finds real things.
+
+### How the sweep went — for context, not for tracking
+
+The 1.6.0 audit produced 56 findings, 44 verified. Closed across thirteen
+releases (1.6.0–1.6.12) in batches grouped by *kind of work* rather than
+severity, so each release had one coherent theme and one test story:
 
 | | | |
 |---|---|---|
-| **1.6.6** A | state integrity | double login, template-id round trip, audit-chain resume |
-| **1.6.7** B | content + parser | the `N.X` qualifier, `put`/`give`, signed `toml_int` |
-| **1.6.8** C | resource + timing | broadcast coalescing, metered autosave, the tick schedule |
-| **1.6.9** D | coverage, then re-run | `bench_persist`, `bench_loaders`, a soak, a docs sweep |
-| **1.6.10** E | the re-run's critical + highs | `SS_QUIT` on the tick path, the drain budget, creation caps |
-| **1.6.11** — | the re-run's tail | `render_who`, key wipes, loader unpublish, `put` round-trip |
-| **1.6.12** — | the re-run's *second* critical | the event batch, both loops, `passwd` |
+| **1.6.6** | state integrity | double login, template-id round trip, audit-chain resume |
+| **1.6.7** | content + parser | the `N.X` qualifier, `put`/`give`, signed config ints |
+| **1.6.8** | resource + timing | broadcast coalescing, metered autosave, the tick schedule |
+| **1.6.9** | coverage, then re-run | save/login/loader benches, a soak, a docs sweep |
+| **1.6.10** | re-run #1's critical + highs | disconnect on the tick path, drain budget, creation caps |
+| **1.6.11** | re-run #1's tail | `@who` bounds, key wipes, loader unpublish, `put` round-trip |
+| **1.6.12** | re-run #2's critical | the event batch, both loops, `passwd` |
 
-**Two re-runs, two sets of serious defects the previous pass missed.** 1.6.9's
-re-run found a remote crash on a first-class command verb (`examine`
-dereferencing `room_at(-1)`) that the original sweep never saw. 1.6.12's re-run
-found an unbounded event batch — 4.12 s per batch — plus an unmetered `passwd`.
+**Two lessons the sweep cost real releases to learn.**
 
-**The lesson, twice over: fixing an instance is not fixing the class.** 1.6.12's
-critical was the fourth appearance of one defect — *a per-item cap is not a bound
-on a loop that walks many items* — after three releases each capped a neighbour
-of the open hole. Both questions that would have found it were one command away:
-`grep -n ident_derive src/` enumerates every expensive-line path, and "every loop
-that dispatches lines" enumerates every place a cap must be aggregate. When a
-finding looks familiar, enumerate the class before writing the patch.
+*Fixing an instance is not fixing the class.* 1.6.12's critical was the fourth
+appearance of one defect — *a per-item cap is not a bound on a loop that walks
+many items* — after three releases each capped a neighbour of the open hole.
+`grep -n ident_derive src/` and "every loop that dispatches lines" were always
+the whole answer.
 
-### The gate — still open
-
-**The 1.x line closes when a re-run sweep comes back with no critical or high
-findings.** That has not happened. Everything both re-runs produced is fixed and
-`cyrius audit` is green, but each pass so far has found real defects, so the bar
-stays where it is.
-
-Everything currently known to be wrong is listed, worst first, in
-[Open issues — needs repair](#open-issues--needs-repair). Nothing there is
-critical or high; the two that can affect a running server are an inventory that
-grows until saves stop, and an upstream libro allocation.
+*A finding count is not a measure of what is broken.* It measures the instruments
+you had. 1.6.9 built the first benchmarks that ever touched the save, login and
+loader paths, and re-run #2 immediately found things there.
 
 ---
 
@@ -156,146 +332,6 @@ The groundwork that already exists stays valid whichever way this resolves:
 reset, and the libro audit chain as the operator-action log.
 
 ---
-
-## Open issues — needs repair
-
-Everything currently known to be wrong, worst first. Each entry says **what
-breaks**, **whether it can happen to a running server today**, **whose code it
-is**, and **how big the fix is** — in that order, because that is the order you
-need to decide whether to care.
-
-Verified against source at 1.6.12. Anything that turned out to be already fixed
-has been deleted, not left here with a note.
-
----
-
-### 1. A player who fills their inventory can never save again
-
-**What breaks.** The save record is built into a fixed 4096-byte buffer
-(`SAVE_CAP`). Inventory is written as a comma-joined list of item ids and
-**nothing caps how many items a player may carry**. Once the list pushes the
-record past the buffer, `_build_record` returns -1 and `player_save` reports
-failure — and it does so on *every* subsequent save, forever, because the
-inventory never shrinks on its own. The player keeps playing; nothing they do
-after that point is persisted.
-
-**Can it happen today?** **Yes.** No attacker needed — a player who hoards.
-Roughly 190+ items on the shipped Hub id lengths. The failure is loud in the
-audit log (`save.fail.sweep`) and silent to the player.
-
-**Whose.** Ours — `src/persist.cyr`, the inventory loop in `_build_record`.
-
-**Fix size.** Small: cap carried items (a `MAX_INV` checked in `cmd_get` /
-`cmd_give`), or drop the overflow with a message rather than failing the whole
-record. The cap is the honest fix; refusing the save is the current behaviour and
-it is the wrong one.
-
----
-
-### 2. Repeated failed logins burn memory that is never given back
-
-**What breaks.** Every audit event costs ~1.6 kB from the bump allocator, which
-has no `free`. 1.6.12 cut this to one event per connection instead of five, but
-the per-event cost itself is inside libro's `filestore_append`, which rebuilds a
-string builder on every append.
-
-**Can it happen today?** **Yes, slowly.** Bounded per connection, unbounded
-across reconnects. It needs sustained CPU saturation to matter, and the server is
-already unusable from CPU at that point — so the distinctive harm is that memory
-does not come back when the attack stops. A restart clears it.
-
-**Whose.** **Upstream — libro.** `CLAUDE.md` forbids touching `lib/`. Descent's
-own contribution is already zero.
-
-**Fix size.** Needs a **libro 2.8.5** release, same shape as the 1.6.1 chain fix.
-Not ours to land.
-
----
-
-### 3. Character stats from `classes.cyml` aren't range-checked on creation
-
-**What breaks.** 1.6.7 taught the config reader to accept negative numbers, and
-1.6.11 clamped `hp` and `energy` on the creation path — but `str`, `dex`, `con`
-and `tec` were missed, and the damage-dice profile (`ndice`/`dsize`) is unbounded
-on both the class and mob paths. The *load* path clamps all of them; the
-*creation* path does not, so the same field is checked when a saved character is
-read and unchecked when a new one is made.
-
-**Can it happen today?** **Only via an authored file.** `data/classes.cyml` and
-the zone files are operator content, not player input — so this is a typo away,
-not an attack. An unbounded `ndice` also feeds a `roll()` loop.
-
-**Whose.** Ours — `src/classes.cyr` (`apply_class`), `src/mob.cyr`.
-
-**Fix size.** Small — four `_clamp` calls and a dice bound, mirroring what
-`player_auth_load` already does.
-
----
-
-### 4. Class IDs are not zero-terminated
-
-**What breaks.** A class id is copied into a 32-byte slot using all 32 bytes,
-leaving no terminator. The two fields beside it (name, role) copy at most 31 for
-exactly that reason.
-
-**Can it happen today?** **No — dormant.** Every reader uses the stored length,
-so nothing treats an id as a terminated string. It is a trap for the first piece
-of code that does.
-
-**Whose.** Ours — `src/classes.cyr:131`.
-
-**Fix size.** One character: `CL_ID_CAP` → `CL_ID_CAP - 1`.
-
----
-
-### 5. An ARM build would read session pointers from the wrong offset
-
-**What breaks.** The event loop hardcodes the x86 layout of the kernel's
-`epoll_event` struct — 12 bytes, pointer at offset 4. On aarch64 Linux the struct
-is unpacked: 16 bytes, pointer at offset 8. The server would read a session
-pointer out of the wrong bytes and dereference garbage.
-
-**Can it happen today?** **No — dormant.** Descent builds x86_64 and agnos only.
-It fires the first time anyone runs `--aarch64`.
-
-**Whose.** Ours, and avoidably so: **the Cyrius stdlib already handles this**. It
-ships a per-architecture `epoll_event_new` (x86_64 writes data at +4, aarch64 at
-+8, with a comment explaining the split). Descent *uses* that helper to **write**
-events and then hardcodes its own constants to **read** them back. The write path
-is portable; only the read path is not.
-
-**Fix size.** Small: derive the size and data offset per target the way the
-stdlib does, instead of the local `EPOLL_EVENT_SIZE = 12`.
-
----
-
-### 6. `epoll_event_new` allocates 16 bytes per accepted connection
-
-**What breaks.** Every accept and every EPOLLOUT arm/disarm allocates a fresh
-16-byte event struct from the non-reclaiming bump allocator.
-
-**Can it happen today?** **Yes, but trivially** — 16 bytes per connection.
-Listed for completeness, not because it needs doing.
-
-**Whose.** Shared: the allocation is in the stdlib helper; the call frequency is
-ours.
-
-**Fix size.** Small — reuse one scratch event struct.
-
----
-
-### Deferred by design, not forgotten
-
-Two config-validation gaps are deliberately left open because fixing them would
-reject zone files that load today, and ADR 0007 §5 freezes the zone format for
-all of 1.x. Both are folded into **M14-D**, where a format version gives them
-something to hang off:
-
-- **Unparseable config values silently take the default** instead of erroring, so
-  a typo'd field reads as "absent".
-- **`parse_uint` has no overflow check** (`v * 10 + d`), so an absurd literal
-  wraps to an arbitrary in-range value rather than being rejected. The
-  `reset_secs` clamp makes that *harmless*, not *correct*.
 
 ## Milestones — 1.x (all shipped)
 
@@ -448,6 +484,11 @@ A release qualifies for 2.0 when:
 
 ## Deferred to 2.x and beyond
 
+*Wanted, but blocked on something — a dependency, a foundation, or an upstream
+port. Distinct from [Unclaimed](#unclaimed--available-on-demand), which is
+unblocked, and from [Out of scope](#out-of-scope), which is a decision against.*
+
+
 - **Joshua integration** — blocked on an upstream Cyrius port and a spec rewrite. See the backlog above. Operator control (M18) deliberately does not wait for it.
 - **PvP** — needs threat, equipment and levels to be meaningful first. Post-2.0.
 - **Crafting** — needs currency, shops and item modifiers underneath it.
@@ -455,6 +496,41 @@ A release qualifies for 2.0 when:
 - **Skills separate from levels** — a second progression axis; not worth it until the first one is proven.
 - **aarch64** — B4 must be fixed before any ARM target runs, but no target is planned.
 - Everything in the v1.0 **Out of scope** list below still stands, except that PvP and MUD protocol extensions move from "not our problem" to "post-2.0, on merit".
+
+---
+
+## Unclaimed — available on demand
+
+**No decision has been made against anything here, and nothing blocks it.** These
+are known, scoped, and simply not needed yet. Picking one up requires a reason to
+want it and nothing else — no argument, no re-litigation, no "we decided that was
+out of scope."
+
+This bucket exists because the alternative is a deferral that lives only in a
+source comment, where nobody can find it and a future reader treats it as
+settled. If something lands here, that is a statement about *demand*, not about
+merit.
+
+- **Telnet NAWS, TERMINAL-TYPE and LINEMODE.** The negotiator currently refuses
+  every option except ECHO and SGA, which is correct RFC 1143 behaviour and is
+  not a stub — an unsupported option is *supposed* to be refused. Adding one
+  means: a preference entry in `opt_pref_us` / `opt_pref_him`
+  (`src/telnet.cyr`), subnegotiation handling for NAWS and TERMINAL-TYPE (the
+  SB state machine already collects the payload — nothing consumes it), and
+  whatever the feature actually wants the data for.
+
+  Sizes: **NAWS** (client window size) is small and is what you would want first
+  if room descriptions or tables ever need to wrap to width. **TERMINAL-TYPE**
+  is small and would let ANSI colour be conditional rather than unconditional.
+  **LINEMODE** is the largest — it means owning the full line discipline
+  server-side, which is the work option 1 of the old B1 finding described, and
+  it only matters if descent ever re-adopts character-at-a-time mode.
+
+  **Note the disagreement this resolves:** [ADR 0002](../adr/0002-raw-tcp-telnet-protocol.md)
+  lists "terminal-type discovery" as *in scope* for the protocol, while
+  `src/telnet.cyr` deferred it to "a later milestone" that never existed. The ADR
+  is the one that was right — it is available, not excluded. The source comment
+  now points here instead of at an imaginary milestone.
 
 ---
 
@@ -509,6 +585,11 @@ new wire/auth surface — which it will, since it replaces the `YD_ADMIN` gate.
 ---
 
 ## Out of scope
+
+*Decided against, with a reason. Reversing one of these needs a new argument —
+which is exactly why nothing gets parked here for lack of demand. If it is
+merely unwanted-for-now, it belongs in
+[Unclaimed](#unclaimed--available-on-demand).*
 
 - **Windows client support.** Telnet clients exist on every platform; not our problem.
 - **Native web client.** Telnet-over-WebSocket bridges (existing OSS) cover this without us shipping browser code.

@@ -141,6 +141,30 @@ fn toml_int(pairs, key, def): i64 {
     if (v == 0) { return def; }
     var p = str_data(v);
     var len = str_len(v);
+    # G3 (1.6.13) — trim ASCII whitespace before parsing.
+    #
+    # A value with a trailing CR (any file saved with CRLF endings) was
+    # unparseable, and an unparseable value silently takes the default — so
+    # editing a zone file on Windows could rewrite a setting to something the
+    # author never wrote, with no error anywhere. This was in the 1.6.0 sweep and
+    # was never tracked: 1.6.7 fixed the *signed* half of that finding and the
+    # *strictness* half went to M14-D, but the trim was nobody's.
+    #
+    # Trimming is separate from strictness on purpose. Whitespace is not a typo —
+    # it is an artefact of how the file was saved, and the author's intent is
+    # unambiguous. Rejecting genuinely malformed values still needs a format
+    # version to hang off (M14-D).
+    while (len > 0) {
+        var c0 = load8(p) & 0xFF;
+        if (c0 != 32) { if (c0 != 9) { if (c0 != 13) { if (c0 != 10) { len = len; break; } } } }
+        p = p + 1;
+        len = len - 1;
+    }
+    while (len > 0) {
+        var c1 = load8(p + len - 1) & 0xFF;
+        if (c1 != 32) { if (c1 != 9) { if (c1 != 13) { if (c1 != 10) { len = len; break; } } } }
+        len = len - 1;
+    }
     if (len <= 0) { return def; }
     if ((load8(p) & 0xFF) == 45) {          # '-'
         if (len == 1) { return def; }

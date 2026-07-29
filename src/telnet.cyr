@@ -236,7 +236,12 @@ fn opt_set_him(ts, opt, st): i64 {
 # Policy at M1-D: the server echoes input (ECHO) and suppresses go-ahead
 # (SGA) so modern char-at-a-time clients behave; we also accept the peer
 # suppressing GA. Everything else is refused. NAWS / TERMINAL-TYPE /
-# LINEMODE are intentionally untracked until a later milestone needs them.
+# LINEMODE are refused, which is correct RFC 1143 behaviour for an option we do
+# not implement — not a stub. They are listed under "Unclaimed — available on
+# demand" in docs/development/roadmap.md: unblocked, scoped, and waiting on a
+# reason to want them rather than on a milestone. (This comment used to defer
+# them to "a later milestone", which never existed — the deferral lived here and
+# nowhere else, and ADR 0002 lists terminal-type discovery as in scope.)
 fn opt_pref_us(opt): i64 {
     # ECHO is intentionally NOT preferred: we never volunteer to echo, so an
     # unsolicited client DO ECHO is refused (WONT ECHO) and the client keeps

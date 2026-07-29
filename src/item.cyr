@@ -370,6 +370,42 @@ fn append_item_name(s, o): i64 {
     return 0;
 }
 
+# === G1 (1.6.13) — the carry cap. ===
+#
+# Nothing limited how much a player could carry, and the save record is a fixed
+# 4096-byte buffer. Measured on this tree: with the longest id the object format
+# permits (31 bytes), `_build_record` starts refusing at **113 items** — and it
+# refuses the WHOLE record, so from that point the character silently stops
+# persisting. It is not permanent (dropping one item recovers it, also measured)
+# but the player is never told, so in practice it is invisible progress loss.
+#
+# The cap is a count, not a byte budget, because the check has to be cheap and
+# has to happen at the moment the player reaches for something. 100 is safe for
+# ANY authored id length: the record leaves 3427 bytes for the inventory field,
+# and 100 ids at the 31-byte maximum plus separators is 3200. With the Hub's
+# short ids the true ceiling is over 400, so this costs real play nothing.
+#
+# Deliberately NOT enforced on the load path (`_restore_inv`): a record that
+# already holds more than this must come back intact. The cap stops you
+# ACQUIRING more, it never destroys what you have.
+enum InvCap { MAX_INV = 100; }
+
+# How many items this session is carrying.
+fn inv_count(s): i64 {
+    var n = 0;
+    var o = load64(s + SS_INV);
+    while (o != 0) { n = n + 1; o = oi_next(o); }
+    return n;
+}
+
+# Is this session at the carry cap? Tells the player once, rather than failing
+# their save silently an hour later.
+fn inv_full(s): i64 {
+    if (inv_count(s) < MAX_INV) { return 0; }
+    session_appendtx_cstr(s, "Your hands and pockets are full.\r\n");
+    return 1;
+}
+
 # === get_from — move item(s) from `from_slot` to `to_slot`. ===
 # qall=1 with noun_l==0 → everything (skipping corpses); qall=1 with a
 # noun → every match; qall=0 → the first match. `where` names the source
@@ -384,6 +420,10 @@ fn get_from(s, from_slot, to_slot, qall, np, nl, nth, where): i64 {
             if (oi_is_corpse(o) == 1) { take = 0; }                 # never auto-take corpses
             if (nl > 0) { if (kw_matches(np, nl, oi_kw_ptr(o)) == 0) { take = 0; } }
             if (take == 1) {
+                # G1 — stop at the cap mid-sweep rather than silently overfilling.
+                if (to_slot == s + SS_INV) {
+                    if (inv_full(s) == 1) { o = 0; continue; }
+                }
                 ilist_remove(from_slot, o);
                 ilist_push(to_slot, o);
                 session_appendtx_cstr(s, "You take ");
@@ -406,6 +446,9 @@ fn get_from(s, from_slot, to_slot, qall, np, nl, nth, where): i64 {
     if (oi_is_corpse(o) == 1) {
         session_appendtx_cstr(s, "You can't carry that.\r\n");
         return 0;
+    }
+    if (to_slot == s + SS_INV) {
+        if (inv_full(s) == 1) { return 0; }   # G1
     }
     ilist_remove(from_slot, o);
     ilist_push(to_slot, o);
@@ -603,6 +646,12 @@ fn cmd_give(s, pa): i64 {
         return 0;
     }
 
+    # G1 — the RECIPIENT's cap. Handing someone their 101st item would push them
+    # over a limit they cannot see and did not choose.
+    if (inv_count(target) >= MAX_INV) {
+        session_appendtx_cstr(s, "They can't carry any more.\r\n");
+        return 0;
+    }
     ilist_remove(inv_slot, o);
     ilist_push(target + SS_INV, o);
 

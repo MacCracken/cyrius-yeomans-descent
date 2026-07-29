@@ -687,9 +687,30 @@ fn test_idle(): i64 {
     var s = fl_alloc(SS_SIZE);
     memset(s, 0, SS_SIZE);
     store64(s + SS_LAST_MS, 1000);
-    assert_eq(session_is_idle(s, 1000 + 299999, 300000), 0, "just under 5m: live");
-    assert_eq(session_is_idle(s, 1000 + 300000, 300000), 1, "exactly 5m: idle");
-    assert_eq(session_is_idle(s, 1000 + 600000, 300000), 1, "well past: idle");
+
+    # A LOGGED-IN player gets the full 5 minutes. SS_AUTHED must be set — this
+    # assertion used to run on a zeroed slab and so was silently testing the
+    # unauthenticated path against the authenticated rule.
+    store64(s + SS_AUTHED, 1);
+    assert_eq(session_is_idle(s, 1000 + 299999, 300000), 0, "authed, just under 5m: live");
+    assert_eq(session_is_idle(s, 1000 + 300000, 300000), 1, "authed, exactly 5m: idle");
+    assert_eq(session_is_idle(s, 1000 + 600000, 300000), 1, "authed, well past: idle");
+
+    # G2 (1.6.13) — an UNAUTHENTICATED connection gets a much shorter deadline.
+    # 1.6.3 capped the session COUNT and the original finding's other half — a
+    # separate pre-auth timeout — was never implemented.
+    store64(s + SS_AUTHED, 0);
+    assert_eq(session_is_idle(s, 1000 + PREAUTH_TIMEOUT_MS - 1, 300000), 0,
+              "unauthed, just under the pre-auth deadline: live");
+    assert_eq(session_is_idle(s, 1000 + PREAUTH_TIMEOUT_MS, 300000), 1,
+              "unauthed, at the pre-auth deadline: reaped long before 5m");
+    assert(PREAUTH_TIMEOUT_MS < 300000, "and the pre-auth deadline is genuinely shorter");
+
+    # The shorter deadline must never LENGTHEN anyone's grace: if the operator
+    # sets an idle timeout below it, the smaller of the two still wins.
+    store64(s + SS_AUTHED, 0);
+    assert_eq(session_is_idle(s, 1000 + 5000, 4000), 1,
+              "a tighter operator timeout still applies to unauthed sessions");
     fl_free(s);
     return 0;
 }
@@ -1769,22 +1790,23 @@ fn test_load_and_save_failure(): i64 {
     # record still held the OLD pubkey, so the next login rejected the new
     # passphrase and the retired one still worked.
     #
-    # Force the failure the way M11-D's bound does: an inventory too large for
-    # SAVE_CAP makes _build_record return -1.
-    var s = _mk_sess("Rekeyfail", 9);
+    # Force the failure with an UNWRITABLE PATH, not an oversized inventory.
+    #
+    # This test used to overfill the inventory, because that made _build_record
+    # return -1. G1 (1.6.13) deliberately removed that failure mode — an
+    # over-long inventory now truncates and saves rather than refusing the whole
+    # record forever — so the old trigger is gone by design. `_path_for` copies
+    # the name straight into the path, so a name containing '/' points at a
+    # directory that does not exist and `file_write_all` fails. That is a
+    # truer test anyway: H10 exists for ENOSPC / EIO / a failed rename, which
+    # are I/O failures, and this injects one.
+    var s = _mk_sess("no/such/dir/Rekeyfail", 20);
     var blk = sess_ident(s);
     random_bytes(blk, SALT_LEN);
     ident_derive(blk, "origpass12", 10, blk + IDENT_SK, blk + IDENT_PK);
     store64(blk + IDENT_CREATED, 1);
     store64(s + SS_AUTHED, 1); store64(s + SS_ROOM, 0 - 1); store64(s + SS_CLASS, 0);
-    var k = 0;
-    while (k < 400) {
-        var o = corpse_new("bulkitem", 8);
-        store64(o + OI_TPL_ID_LEN, copy_bytes_capped(o + OI_TPL_ID, OI_TPL_ID_CAP - 1, "bulkitem", 8));
-        ilist_push(s + SS_INV, o);
-        k = k + 1;
-    }
-    assert_eq(player_save(s), 0 - 1, "the oversized record genuinely fails to save");
+    assert_eq(player_save(s), 0 - 1, "the save genuinely fails (unwritable path)");
 
     # Capture the live pubkey, then attempt the re-key.
     var before = alloc(PK_LEN);
@@ -2193,6 +2215,20 @@ fn test_item_verbs(): i64 {
     assert_eq(toml_int(_pairs_of("ac = \"-\"\n"), "ac", 8), 8, "a bare sign falls back");
     assert_eq(toml_int(_pairs_of("ac = \"-x\"\n"), "ac", 8), 8, "a signed non-number falls back");
     assert_eq(toml_int(_pairs_of("hp = \"3\"\n"), "ac", 8), 8, "an absent key falls back");
+
+    # G3 (1.6.13) — whitespace is trimmed before parsing. A trailing CR is what
+    # any editor on Windows leaves, and before this an unparseable value silently
+    # took the DEFAULT — so saving a zone file on the wrong platform could rewrite
+    # a setting to a number the author never typed, with no error anywhere.
+    assert_eq(toml_int(_pairs_of("ac = \"7\r\"\n"), "ac", 8), 7, "a trailing CR does not become the default");
+    assert_eq(toml_int(_pairs_of("ac = \" 7\"\n"), "ac", 8), 7, "nor a leading space");
+    assert_eq(toml_int(_pairs_of("ac = \"7 \"\n"), "ac", 8), 7, "nor a trailing space");
+    assert_eq(toml_int(_pairs_of("ac = \"\t-3 \"\n"), "ac", 8), 0 - 3, "and a padded negative still parses");
+    # Whitespace-only is not a number; it is still the default.
+    assert_eq(toml_int(_pairs_of("ac = \"   \"\n"), "ac", 8), 8, "whitespace alone falls back");
+    # Trimming is NOT strictness: genuine garbage still takes the default, which
+    # is the half deliberately deferred to M14-D.
+    assert_eq(toml_int(_pairs_of("ac = \"7x\"\n"), "ac", 8), 8, "real garbage still falls back (M14-D)");
 
     return 0;
 }
@@ -3758,6 +3794,136 @@ fn test_passwd_meter(): i64 {
     return 0;
 }
 
+# === G1 (1.6.13) — the carry cap, and the net under it. ===
+fn test_carry_cap(): i64 {
+    test_group("carry-cap");
+    persist_init();
+    if (g_obj_tpl_count == 0) { assert(0, "carry-cap: needs object templates"); return 0; }
+    if (g_room_count == 0)    { assert(0, "carry-cap: needs a world"); return 0; }
+
+    var s = _mk_sess("Hoarder", 7);
+    store64(s + SS_ROOM, 0);
+    store64(s + SS_PHASE, PHASE_CMD);
+    store64(s + SS_FD, 0 - 1);
+
+    # --- The counter, and the cap predicate.
+    assert_eq(inv_count(s), 0, "an empty inventory counts zero");
+    var i = 0;
+    while (i < MAX_INV) { ilist_push(s + SS_INV, item_new(ot_at(0))); i = i + 1; }
+    assert_eq(inv_count(s), MAX_INV, "counts up to the cap");
+    _tx_reset(s);
+    assert_eq(inv_full(s), 1, "and reports full at the cap");
+    assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "full"), 1,
+              "telling the player, which is the whole point — the old failure was silent");
+
+    # --- `get` refuses at the cap rather than overfilling.
+    var room_slot = room_at(0) + RM_OBJ_HEAD;
+    _drain_ilist(room_slot);
+    var floor_item = item_new(ot_at(0));
+    ilist_push(room_slot, floor_item);
+    var pa = parser_new();
+    var cmd = alloc(160);
+    var co = _str_into(cmd, 0, "get ");
+    co = _str_into(cmd, co, _kw1(oi_kw_ptr(floor_item), alloc(64)));
+    _tx_reset(s);
+    parser_parse(pa, cmd, co);
+    cmd_get(s, pa);
+    assert_eq(inv_count(s), MAX_INV, "get does not push past the cap");
+    assert_eq(_on_ilist(room_slot, floor_item), 1, "and the item stays on the floor");
+
+    # --- `get all` stops at the cap mid-sweep instead of silently overfilling.
+    var j = 0;
+    while (j < 5) { ilist_push(room_slot, item_new(ot_at(0))); j = j + 1; }
+    _tx_reset(s);
+    parse_lit(pa, "get all");
+    cmd_get(s, pa);
+    assert_eq(inv_count(s), MAX_INV, "get all stops at the cap");
+
+    # --- Below the cap it still works — the guard must not break ordinary play.
+    var head = load64(s + SS_INV);
+    ilist_remove(s + SS_INV, head);
+    obj_free(head);
+    assert_eq(inv_count(s), MAX_INV - 1, "one slot free");
+    _tx_reset(s);
+    parse_lit(pa, "get all");
+    cmd_get(s, pa);
+    assert_eq(inv_count(s), MAX_INV, "and exactly one more item is taken");
+
+    # --- The cap keeps the record inside SAVE_CAP even at the WORST id length.
+    # This is the number that makes 100 the right cap: the object format allows
+    # 31-byte ids, and the record refused outright from the 113th such item.
+    _drain_ilist(s + SS_INV);
+    var salt = alloc(SALT_LEN);
+    var q = 0;
+    while (q < SALT_LEN) { store8(salt + q, 60 + q); q = q + 1; }
+    var blk = sess_ident(s);
+    memcpy(blk, salt, SALT_LEN);
+    ident_derive(salt, "hoardpassphrase", 15, blk + IDENT_SK, blk + IDENT_PK);
+    store64(s + SS_ROOM, 0 - 1);
+    store64(s + SS_HP, 20); store64(s + SS_MAXHP, 20);
+    store64(s + SS_AUTHED, 1);
+    i = 0;
+    while (i < MAX_INV) {
+        var w = item_new(ot_at(0));
+        store64(w + OI_TPL_ID_LEN,
+                copy_bytes_capped(w + OI_TPL_ID, OI_TPL_ID_CAP - 1,
+                                  "abcdefghijklmnopqrstuvwxyz01234", 31));
+        ilist_push(s + SS_INV, w);
+        i = i + 1;
+    }
+    assert(_build_record(s) > 0, "a FULL inventory of maximum-length ids still serializes");
+
+    # --- The net: past the budget the record TRUNCATES, it does not refuse.
+    # Before 1.6.13 this returned -1 and kept returning -1, so the character
+    # stopped persisting entirely — room, HP, class and all — with nothing said.
+    i = 0;
+    while (i < 60) {
+        var x = item_new(ot_at(0));
+        store64(x + OI_TPL_ID_LEN,
+                copy_bytes_capped(x + OI_TPL_ID, OI_TPL_ID_CAP - 1,
+                                  "abcdefghijklmnopqrstuvwxyz01234", 31));
+        ilist_push(s + SS_INV, x);
+        i = i + 1;
+    }
+    assert(inv_count(s) > MAX_INV, "now deliberately over the cap (as a stale record could be)");
+    assert(_build_record(s) > 0, "the record still serializes — truncated, not refused");
+    assert(_build_record(s) > 0, "and again: the failure is not sticky");
+
+
+    # --- `give` respects the RECIPIENT's cap. Handing someone their 101st item
+    # would push them past a limit they neither see nor chose — and the GIVER is
+    # the one told, since they are the one acting.
+    _drain_ilist(s + SS_INV);
+    var gh = g_session_head;
+    var giver = _mk_sess("Giver2", 6);
+    store64(giver + SS_ROOM, 0); store64(giver + SS_PHASE, PHASE_CMD); store64(giver + SS_FD, 0 - 1);
+    var taker = _mk_sess("Taker2", 6);
+    store64(taker + SS_ROOM, 0); store64(taker + SS_PHASE, PHASE_CMD); store64(taker + SS_FD, 0 - 1);
+    store64(giver + SS_NEXT, taker); store64(taker + SS_NEXT, 0);
+    g_session_head = giver;
+    var k2 = 0;
+    while (k2 < MAX_INV) { ilist_push(taker + SS_INV, item_new(ot_at(0))); k2 = k2 + 1; }
+    var gift = item_new(ot_at(0));
+    ilist_push(giver + SS_INV, gift);
+    var gcmd = alloc(160);
+    var gco = _str_into(gcmd, 0, "give ");
+    gco = _str_into(gcmd, gco, _kw1(oi_kw_ptr(gift), alloc(64)));
+    gco = _str_into(gcmd, gco, " to Taker2");
+    _tx_reset(giver);
+    parser_parse(pa, gcmd, gco);
+    cmd_give(giver, pa);
+    assert_eq(inv_count(taker), MAX_INV, "give does not push the recipient past the cap");
+    assert_eq(_on_ilist(giver + SS_INV, gift), 1, "the gift stays with the giver");
+    assert_eq(_contains(load64(giver + SS_TX_BUF), load64(giver + SS_TX_LEN), "can't carry"), 1,
+              "and the giver is told why");
+    g_session_head = gh;
+    _drain_ilist(giver + SS_INV);
+    _drain_ilist(taker + SS_INV);
+    _drain_ilist(s + SS_INV);
+    _drain_ilist(room_slot);
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -3989,6 +4155,7 @@ fn main() {
     test_tail_guards();
     test_event_budget();
     test_passwd_meter();
+    test_carry_cap();
 
     return assert_summary();
 }

@@ -4,6 +4,80 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.13] — 2026-07-29
+
+**The three open issues that could reach an operator or a player.** All three
+came from the 1.6.0 sweep and none had ever been tracked — they were found by
+reconciling that sweep's output against the tree, after the 1.6.5 roadmap wrote
+a remaining-work count that did not subtract.
+
+### Fixed
+
+- **A player who filled their inventory silently stopped saving.** The save
+  record is a fixed 4096-byte buffer and nothing capped how much a player could
+  carry. Measured on this tree: with the longest id the object format permits
+  (31 bytes), `_build_record` starts refusing at **113 items** — and it refuses
+  the *whole* record, so from that point the character's room, HP, class and
+  every future change stopped persisting.
+
+  One correction to the original finding, which called it permanent: it is not.
+  Dropping a single item recovers it — also measured. The real defect is that it
+  is **silent**. The player is never told, the audit log is the only witness, and
+  nothing suggests "drop something" as the remedy.
+
+  Two halves, because either alone is insufficient:
+  - **A carry cap of 100.** Chosen to be safe at *any* authored id length: the
+    record leaves 3427 bytes for inventory and 100 ids at the 31-byte maximum
+    plus separators is 3200. With the Hub's short ids the true ceiling is over
+    400, so this costs real play nothing. Enforced on `get`, `get all` and
+    `give` — the last against the **recipient's** cap, since handing someone
+    their 101st item pushes them past a limit they neither see nor chose.
+  - **The record truncates instead of refusing.** M11-D's bound turned an
+    over-long inventory into `SAVE_ERR`, which `player_save` reported as total
+    failure. Losing the tail of an over-long inventory is a bounded, one-time,
+    audited loss; losing every future save is unbounded and silent. The cap
+    should make this unreachable — it is the net under it.
+
+  Deliberately **not** enforced on the load path: a record that already holds
+  more than the cap comes back intact. The cap stops you acquiring more; it
+  never destroys what you have.
+- **An unauthenticated connection held a slot for five minutes.** 1.6.3 added
+  `MAX_SESSIONS`, which was half of the original finding; the other half — a
+  *separate, shorter* deadline for connections that have not logged in — was
+  never implemented, and the finding was closed anyway.
+
+  The two deadlines are not the same job. A logged-in player is idle because
+  they walked away and should be given room; a connection that has not named
+  itself in **30 seconds** is broken or probing. The shorter of the two always
+  wins, so a tighter operator timeout still applies.
+- **A stray carriage return in a config file silently changed a value.** Config
+  values were not whitespace-trimmed, and an unparseable value silently takes
+  the default — so a zone or class file saved with CRLF endings could rewrite a
+  setting to a number the author never typed, with no error anywhere. An
+  operator editing on Windows was enough.
+
+  Trimming is separate from strictness on purpose: whitespace is an artefact of
+  how the file was saved and the intent is unambiguous, whereas rejecting
+  genuinely malformed values still needs a format version to hang off (M14-D).
+  Asserted both ways — `"7\r"` now parses as 7, `"7x"` still falls back.
+
+### Testing
+
+- 706 → **732 assertions**; new `carry-cap` group, and the `idle` group split
+  across both deadlines.
+- 10 mutations, all discriminating.
+- **Two existing tests had to change, and both were right to break.** The H10
+  re-key rollback test forced its save failure with an oversized inventory —
+  exactly the failure mode this release removes by design — so it now injects an
+  I/O failure instead, via a path that cannot be written. That is a truer test:
+  H10 exists for ENOSPC / EIO / a failed rename. And the `idle` test asserted
+  the 5-minute rule against a zeroed slab, so it had been testing the
+  *unauthenticated* path against the *authenticated* rule all along; it now sets
+  `SS_AUTHED` and covers both.
+- The cap and the record budget were **measured, not estimated**: a probe built
+  records with growing inventories at both the shortest and longest authored id
+  lengths to find the exact overflow point before the cap was chosen.
+
 ## [1.6.12] — 2026-07-29
 
 **The class, not the instance.** The second re-run sweep found a **critical** and

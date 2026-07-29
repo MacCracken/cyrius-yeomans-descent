@@ -3,7 +3,7 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.6.12 — sweep shipped; the gate is a clean re-run)
+> **Last refresh**: 2026-07-29 (v1.6.13 — nothing open can reach a live server; the gate is a clean re-run)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
@@ -11,25 +11,22 @@
 
 ## Version
 
-**1.6.12** — 2026-07-29. **706 assertions**; `cyrius audit` exits 0; 5/5 benches.
+**1.6.13** — 2026-07-29. **732 assertions**; `cyrius audit` exits 0; 5/5 benches.
 
-The 1.6.x audit sweep is shipped end to end (1.6.0–1.6.12). Per-release detail
-is in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the sweep's shape is on the
-[roadmap](roadmap.md#the-16x-audit-sweep) — this file is a snapshot, not a log,
-and the per-release history that used to live here has been removed for the same
-reason the roadmap's was: keeping three copies of the same chronology is how the
-stale-doc findings of 1.6.9 and 1.6.11 happened.
+Closed the three open issues that could reach an operator or a player, all three
+from the 1.6.0 sweep and none ever tracked: a **carry cap** (a player past ~113
+items silently stopped saving — the record refused whole, and the player was
+never told), a **30 s pre-auth timeout** (1.6.3 shipped only half of that
+finding), and **whitespace trimming on config values** (a CRLF-saved zone file
+could rewrite a setting with no error).
 
-**The 1.x line is not closed.** Two re-run sweeps have each found serious defects
-the previous pass missed — a remote crash on `examine` (1.6.9) and an unbounded
-event batch (1.6.12). Everything both produced is fixed. **The line closes when a
-re-run comes back with no critical or high findings**, and that has not happened.
+**Nothing open can affect a running server now.** What remains is dormant or
+documentation — see
+[roadmap: what is left](roadmap.md#what-is-left).
 
-**Open issues** — what is known to be wrong, worst first, with impact and
-ownership for each: [`roadmap.md`](roadmap.md#open-issues--needs-repair). Nothing
-is critical or high. The two that can affect a running server are an inventory
-that grows until saves stop working, and ~1.6 kB per audit event inside libro
-(needs an upstream **2.8.5**; descent's own share is already zero).
+**The 1.x line still needs a clean re-run sweep to close.** Two re-runs have each
+found serious defects the previous pass missed; the bar is a pass with no
+critical or high findings.
 
 ---
 
@@ -164,7 +161,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (706 assertions, 44 groups)
+  cyrius-yeomans-descent.tcyr   unit suite (732 assertions, 45 groups)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -207,7 +204,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **706** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **732** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -464,7 +461,7 @@ guard these.
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test                                      # 706 assertions, all pass
+cyrius test                                      # 732 assertions, all pass
 ./build/cyrius-yeomans-descent serve 4000
 # new name → passphrase (echo-suppressed) → class → play; `save`/`passwd`/`quit`,
 # reconnect → restored + "last seen". kill -9 after a save → restart → no loss.

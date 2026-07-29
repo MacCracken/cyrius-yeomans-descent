@@ -1369,8 +1369,29 @@ fn session_consume_rx(s): i64 {
 # Pure predicate over SS_LAST_MS (updated on every inbound byte). The
 # tick sweep (server.cyr) uses it to reap slowloris-style quiet clients.
 # Returns 1 if (now - last) >= timeout_ms.
+# G2 (1.6.13) — an unauthenticated session gets a much shorter deadline.
+#
+# 1.6.3 added MAX_SESSIONS, which was half of the original finding; the other
+# half — a *separate, shorter* timeout for connections that have not logged in —
+# was never implemented, and the finding was closed anyway. So a socket that
+# connects and never authenticates held an fd and a session slot for the full
+# five minutes, the same as a player mid-game.
+#
+# The two deadlines are not the same job. A logged-in player is idle because
+# they walked away and should be given room; a connection that has not named
+# itself in 30 seconds is either broken or probing, and neither deserves a slot.
+# Hardcoded rather than a knob: ADR 0007 §6 freezes the YD_* set for 1.x.
+enum PreAuthConst { PREAUTH_TIMEOUT_MS = 30000; }
+
+# Has this session been silent past its deadline? Logged-in players get
+# `timeout_ms`; a session that has not authenticated gets the shorter of that
+# and PREAUTH_TIMEOUT_MS — never longer. See the block above for why they differ.
 fn session_is_idle(s, now_ms, timeout_ms): i64 {
-    if (now_ms - load64(s + SS_LAST_MS) >= timeout_ms) { return 1; }
+    var limit = timeout_ms;
+    if (load64(s + SS_AUTHED) == 0) {
+        if (PREAUTH_TIMEOUT_MS < limit) { limit = PREAUTH_TIMEOUT_MS; }
+    }
+    if (now_ms - load64(s + SS_LAST_MS) >= limit) { return 1; }
     return 0;
 }
 

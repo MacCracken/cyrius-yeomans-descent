@@ -509,10 +509,26 @@ fn _build_record(s): i64 {
     var first = 1;
     while (it != 0) {
         if (oi_tpl_id_len(it) > 0) {
-            # Stop short of the tail the signature line still needs. The
-            # appenders below would refuse to overflow anyway, but bailing here
-            # keeps the inventory from being truncated mid-id.
-            if (off > SAVE_CAP - SIG_TAIL) { off = SAVE_ERR; }
+            # G1 (1.6.13) — TRUNCATE the inventory here, do not poison the record.
+            #
+            # This used to set SAVE_ERR, which M11-D then turned into "refuse the
+            # whole record". So a player over the byte budget stopped persisting
+            # entirely — not just the overflow items, but their room, HP, class
+            # and every future change. Measured: the record is refused from the
+            # 113th item (at the 31-byte id maximum) and keeps being refused
+            # until something is dropped, with nothing said to the player.
+            #
+            # Losing the tail of an over-long inventory is a bounded, one-time
+            # loss. Losing every future save is unbounded and silent, and it is
+            # the worse of the two by a wide margin. The carry cap in item.cyr
+            # should make this unreachable; this is the net under it, and it
+            # writes an audit entry so the operator can see it happened.
+            if (off > SAVE_CAP - SIG_TAIL) {
+                audit_event(SEV_WARNING, "save.inv.truncated",
+                load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+                it = 0;
+                continue;
+            }
             if (_sv_bad(off) == 1) { it = 0; continue; }
             if (first == 0) { off = _ac(off, ","); }
             off = _ap(off, oi_tpl_id_ptr(it), oi_tpl_id_len(it));
