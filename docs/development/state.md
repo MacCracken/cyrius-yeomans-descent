@@ -3,563 +3,100 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.6.12 — re-run #2 closed; the gate is still a clean re-run)
+> **Last refresh**: 2026-07-29 (v1.6.12 — sweep shipped; the gate is a clean re-run)
 >
-> Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
-> releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
-> below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.6.12 tree.
+> A **snapshot of the current tree**, not a history. Per-release chronology lives
+> in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
+> [`roadmap.md`](roadmap.md).
 
 ## Version
 
-**1.6.12** — re-run #2's findings; the unmetered-work CLASS, 2026-07-29. **706
-assertions**; `cyrius audit` exits 0; 5/5 benches.
-
-The second re-run found a **critical** and a **high**, and both were the same
-defect this line had already fixed three times on neighbouring paths:
-
-> **A per-item cap is not a bound on a loop that walks many items.**
-
-H5 (1.6.2) capped one session per readable event; E1/E2 (1.6.10) capped the
-tick-side drain; F7 (1.6.11) capped the idle reap. **Nothing ever capped the
-event batch** — the path that runs first and most often — and nothing capped
-`passwd`, structurally identical to the two login paths that were capped.
-
-- **The epoll event batch** *(critical)* drained 64 events × 8 lines with the
-  tick-deadline check outside the loop: **4.12 s per batch**, 164% of the whole
-  tick interval, from 6.6 kB of input. And ADR 0003's two loops had diverged —
-  the agnos sweep had no per-pass cap of any kind (~16.5 s at MAX_SESSIONS).
-  Both now call one extracted `event_batch_step`. Measured **559 ms → 17 ms**.
-- **`passwd`** *(high)* derived a keypair per attacker line, unbounded: 1000
-  lines = 1103 ms with the counter still at zero. Capped, but it abandons the
-  re-key rather than disconnecting — the session is a real player.
-- **Attacker-paced audit events** aggregated to one per session: ~755 kB/s of
-  unreclaimable arena cut 5×, flood signal intact, `passwd.fail` unchanged.
-
-**The gate is still open.** Two re-runs, two sets of serious findings the
-previous pass missed. The line closes when a re-run comes back with no critical
-or high findings; that has not happened, and the evidence so far says each pass
-finds real defects.
-
-**Method note worth carrying.** The fix for a repeated defect is to enumerate
-the class, not to patch the report. `grep -n ident_derive src/` lists every
-expensive-line path; "every loop that dispatches lines" lists every place a cap
-must be aggregate rather than per-item. Both were one command away, and three
-releases asked neither.
-
-**A 1-in-20 flake, caught by CI.** The killing-blow test assumed `SS_HIT = 100`
-meant "always hits". `combat_try_hit` returns 0 on a **natural 1 whatever the
-bonus**, so one round was a 5% coin flip — green here, red on CI. It retries now.
-Second time CI has caught a test depending on something it did not control (the
-first was `clock_now_ms()` being uptime, in 1.6.8); a local pass proves nothing
-about either.
-
-**Testing note.** Six of thirteen mutations needed the test rewritten first, and
-the reasons rhyme with the bug: the first `event-budget` test **reimplemented
-the batch arithmetic** rather than calling it, so three mutations passed unseen;
-`EVENT_LINES_MAX` is exactly 2× `RX_MAX_LINES`, so a loop test only ever
-exercises a full slice; asserting the budget *delta* cannot see a step that
-charges a flat 1 per session; and the audit probe read 4096 bytes of an 8.3 MB
-store, making every comparison equal — it now refuses to assert if the read
-saturates.
-
-**1.6.11** — the sweep tail, plus a corrected record, 2026-07-29. **669
-assertions**; `cyrius audit` exits 0; 5/5 benches.
-
-- **`render_who` was NOT a false positive, and 1.6.9 said it was.** The reviewer
-  checked `cmd_who` — a different function three hundred lines away that has
-  always bounded both ends — and published the refutation. `render_who` (the
-  `@who` verb) tested only `room >= 0` before dereferencing. Fixed; the claim is
-  corrected in place rather than deleted.
-- **`world_start_room()` named room 0 in a zero-room world** — a valid-looking
-  index into a null table, which every `room >= 0` guard downstream believed.
-- **Three loaders left a stale table published** on their pre-alloc error paths.
-  Measured: after a nonexistent objs file the count was still 10, mobs 4,
-  classes 4 — while the caller was told the load failed.
-- **Secret keys went back to the freelist unwiped** — the live `SS_IDENT` block
-  and the `passwd` candidate. The 1.6.4 entry claimed the candidate was wiped in
-  four places; three of the four were true.
-- **The idle reap was a second unmetered signing site** in the same tick H16
-  metered, reachable without an attacker (a restart puts everyone on one
-  deadline).
-- **`put X in <carried bag>` was one-way and then silent data loss** — the save
-  never walked container contents and `obj_free` recursed through them.
-- Plus: parser token lengths, the M10 sanitizer on echoed tokens, class/mob stat
-  clamps, the killing blow's missing prompt, and a **false justification**
-  removed from the H14 comment.
-
-**The line is not closed until the re-run says so.** Everything the 1.6.9 sweep
-produced is now fixed, but the bar is a fresh pass against the repaired tree
-coming back with no critical or high findings — and the reason that bar exists
-is that the first sweep declared itself finished while a remote crash sat on
-`examine`.
-
-**Testing note worth carrying.** Two harness bugs, both of which *truncated* the
-run instead of failing it: a session built by `_tx_sess` has `SS_FD = 0`, so
-`session_free` **closed stdin** and the suite simply stopped printing; the same
-session has `SS_TS = 0`, so `telnet_state_free` dereferenced null. A test that
-dies silently reads exactly like a test that passed.
-
-**1.6.10** — sweep batch E, the re-run's findings, 2026-07-29. **636
-assertions**; `cyrius audit` exits 0; 5/5 benches.
-
-- **`MAX_LOGIN_FAILS` was enforced nowhere.** `SS_QUIT` was read on the epoll
-  event path only, so a session with queued rx kept being fed 8 lines a tick
-  *after* the server condemned it — ~64 ms each per tick, **~4.1 s per tick at
-  64 sessions**. A cap believed live since 1.6.2. The tick tears them down now.
-- **`drain_pending_rx` had no aggregate budget** — `RX_MAX_LINES` is per
-  session and the walk covers all of them. **2.2 s in one tick at
-  `MAX_SESSIONS`**, unauthenticated, from ~1 MB of input. Now a line budget
-  shared across the walk, mirroring what H16 did for `save_sweep`.
-- **Character creation had no attempt cap and no audit trail**, and **two
-  sessions could create the same character** — H11 (1.6.6) covered login only,
-  and the window is the whole confirm sequence, not a race. Both closed in
-  `login_on_confirm`, verified live.
-- **The zone reset re-minted authored objects.** Now a world-wide max-exist
-  count. Closes the pre-existing relocate driver **and the one 1.6.7's `put`
-  introduced** — `objs +1` per reset before, `objs +0` after.
-- **An abandoned stun never decayed**, so a mob bashed and then left alone was
-  inert forever. Decay moved to the actor tick and single-sourced there.
-
-**Still open: one more re-run.** Batch E closed the critical and every high the
-1.6.9 sweep produced, but the bar for closing the 1.x line is a *re-run that
-comes back clean*, and that has not been done against this tree. The first sweep
-declared itself finished while a remote crash sat on `examine`; a sweep that has
-not been re-run has proved nothing. 1.6.11 carries the low/nit tail and that
-re-run.
-
-**Testing note worth carrying.** Twenty-two mutations, and **eight failed to
-discriminate on the first pass — every one a test bug, not a dead guard.**
-`var sessions[64]` is 64 *bytes* (the first line of CLAUDE.md's Key Principles,
-and I still hit it); `ilist_find_kw_nth` with a zero-length noun matches nothing,
-so an object test silently selected no target and skipped the branch under test,
-masking three mutations at once; a budget that is a multiple of `RX_MAX_LINES`
-never exercises a partial cap; and a double-decay bug is invisible without an
-*engaged* mob. Separately, `create-guards` saved a record and so failed on its
-own second run — a test that is not idempotent is a landmine.
-
-**1.6.9** — sweep batch D, coverage + the re-run, 2026-07-29. **581 assertions**;
-`cyrius audit` exits 0; 5/5 benches.
-
-- **`examine <anything>` was a remote crash** on a zone-less server — a
-  configuration the server explicitly supports and logs. `room_at(-1)` computes
-  `g_rooms + (-1 * RM_SIZE)`; every other room-touching verb checks
-  `world_room_count() == 0` first and `cmd_examine` did not. Reproduced live
-  (process dead), fixed, re-verified live (process alive, every variant answers).
-  **The 1.6.0 sweep missed this entirely.**
-- **1.6.8 delayed `say` by up to a full tick** — measured **2099 ms → 0 ms**.
-  H15's coalescing was right for the tick's quadratic burst and wrong for
-  commands, which arrive on the epoll path. The event path now drains the dirty
-  set too; no syscalls given back.
-- **`bench_persist` + `bench_loaders`** close the save / login / loader blind
-  spots, reporting **bump bytes per op** as well as ns/op. Both verified to fail
-  when what they guard is reverted. New number worth knowing: **a login costs
-  ~6× a save** (≈7.7 ms, ≈3.9 kB) — which is what makes the uncapped
-  creation-attempt path in batch E legible.
-- **Docs sweep.** `state.md` had been documenting `cyrius test src/test.cyr` as
-  CI's form — the exact bug 1.2.0 fixed. Plus 17 missing test groups, a 3×-stale
-  bench figure, a wrong struct size, and five source comments linking to a
-  roadmap anchor that no longer exists.
-
-**The 1.x line did NOT close.** The re-run's whole purpose was to test whether it
-could, and the answer is no: several findings survived adversarial verification,
-including two rated critical. They are filed as **batch E (1.6.10)** on the
-roadmap. The two fixed here are the ones that were a live crash and a live
-regression.
-
-**What the re-run actually established.** Not "the finding count fell" — the
-first sweep's count was never a measure of what was there, since it missed a
-remote crash on a first-class verb. What it established: every fix from batches
-A–C is still in place (the regression dimension re-checked each CHANGELOG claim
-from 1.6.0 onward), and the new findings cluster where the first sweep had no
-instrument. Batch D is where those instruments got built.
-
-**1.6.8** — sweep batch C, resource + timing hygiene, 2026-07-28. **573
-assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
-
-- **Room broadcasts were quadratic in `write(2)`** — 2E² − E per tick for E
-  co-located engaged players, measured at **81.4 ms p99 at 256 players, 163% of
-  the ADR 0001 budget in a single tick**. Now one write per session per tick:
-  **28.3 ms**. 128 players went 20.1 → 7.0 ms, 32 went 1.31 → 0.53 ms.
-- **The obvious version of that fix silently truncates.** `TX_CAP` is 4096 and
-  `session_appendtx` drops the overflow through a return value nobody reads, so
-  a whole tick's coalesced prose overflows at **36** co-located players. Shipped
-  with a capacity valve plus a partial-drain compaction; only the *write* was
-  ever deferred, never the append.
-- **`save_sweep` signed every dirty session in one tick** — 41 ms at 32, **332 ms
-  at 256**. Invisible to `@stats`, because the schedule is absolute and a
-  sub-interval overrun is absorbed by the next `epoll_wait` timeout: the tick was
-  not late, it was gone for a third of a second. Metered to 4 saves/tick.
-- **The tick snap-forward read a pre-tick clock** — a schedule bug, not the
-  measurement bug it was filed as. The drift metric was already right, and
-  "fixing" it the filed way would corrupt a frozen `@stats` field; there is a
-  test that fails anyone who tries.
-- **`_build_record` leaked 248 B of bump arena per save.** Now zero.
-- **`reset_secs` had no floor and an unchecked `× 1000`** — clamped. 1.6.7's
-  signed-`toml_int` change had opened a fresh path into it.
-
-**Two residuals, both recorded on the roadmap rather than closed:** `parse_uint`
-still wraps silently (folded into M14-D), and **~1632 B/save of bump arena is
-inside libro** — `filestore_append` rebuilds a `str_builder` per append — which
-needs an upstream 2.8.5, the same shape as the 1.6.1 chain fix. The per-save
-growth is reduced, not stopped.
-
-**A second testing note, from CI.** `save_sweep_due` shipped relying on `now - 0`
-being bigger than five minutes for a never-saved session. `clock_now_ms()` is
-**`CLOCK_MONOTONIC` — ms since boot**, so that is a claim about the host's
-uptime, and it is false on a fresh one: every character created in the first
-five minutes of uptime would have skipped the autosave. Only CI has an uptime
-that short, which is exactly why it caught it. Timing tests here now use
-synthetic clock values; a test that reads the real clock is measuring the
-machine, not the code.
-
-**Testing note worth carrying:** the mutation that makes the new hex encoder emit
-uppercase — which would make every save record on disk fail its own signature —
-**passed a test whose comment claimed it covered "every byte value"**. The probe
-held all 256 values but only ever encoded the first 64, so the high nibble never
-reached 10 and the `a`-`f` branch never ran. A test that claims coverage it does
-not have is worse than no test; only mutating the constant and watching nothing
-happen surfaced it.
-
-**1.6.7** — sweep batch B, content + parser correctness, 2026-07-28. **500
-assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
-
-- **The `N.X` qualifier was parsed everywhere and honoured nowhere.** `qual_parse`
-  has returned `QUAL_NTH` since M2-E and every caller dropped the count, so
-  `get 2.ration` took the first and `kill 2.scavver` searched for a mob whose
-  keywords are spelled "2.scavver". Both scans are ordinal-aware now
-  (`ilist_find_kw_nth`, `mob_in_room_by_kw_nth`) and `qual_single` folds a token
-  down for every one-target verb. Unqualified nouns still resolve to ordinal 1,
-  so it is additive against the frozen surface.
-- **`put` and `give` answered the M2 placeholder** — *"the Under-Grid is empty —
-  items arrive at M3"* — four releases after M3 shipped. Both implemented.
-  `put` nests one level deep on purpose: `obj_free` recurses through
-  `OI_CONTENTS`, so depth 1 plus a self-containment guard makes unbounded stack
-  and cycles impossible by construction.
-- **`wear` / `remove` / `wield` now say why they cannot.** Still unimplemented —
-  there are no equipment slots, and adding a wear-flag field is a zone-format
-  change 1.x cannot make. That is **M17 (2.1.0)**, and the verbs now say so
-  instead of claiming the world is empty.
-- **`bash` and `emp` described a corpse.** Both printed their stun prose after a
-  killing blow. `ability_strike` reports the kill; both callers gate on it.
-  Verified *not* a UAF — every ability sets the stun before the strike.
-- **`toml_int` accepts a sign** (closes backlog **B7**, and **M14-C** early).
-
-**Carried forward on purpose:** the batch-B finding also asked that `toml_int`
-reject garbage instead of silently defaulting. It does not, and 1.6.x will not
-change that — rejecting a value rejects zone files that load today, and ADR 0007
-§5 freezes the zone format for all of 1.x. Strictness needs a format version to
-hang off; folded into **M14-D**, not a later 1.6.x batch.
-
-**1.6.6** — sweep batch A, state integrity, 2026-07-28. **448 assertions**;
-`cyrius audit` exits 0; `--agnos` warning-free.
-
-- **Double login duplicated a whole inventory** and raced the save file — the
-  stale session's `player_save` reverted the live one's room, drops, HP and
-  class. `session_already_online` refuses the newcomer after auth.
-- **A 32-byte template id could not round-trip** into an instance, so it could
-  never match its own template on reload — and inventory persists *by id*.
-- **The audit chain restarted at genesis every boot**, so the durable chain had
-  a broken link at each restart boundary, indistinguishable from deletion.
-  Verified end to end: 0 breaks with the fix, 2 without, across three processes.
-
-**Testing note worth carrying:** two of the first three mutations here did not
-discriminate, and both were **test** bugs — a real Hub id is too short to expose
-the truncation, and hand-writing the copy in the test bypassed the line under
-test. The fix is to drive the real loader over a purpose-built fixture. A
-mutation that fails to fail is a signal about the test, not the code.
-
-**1.6.5** — loader + save-failure integrity, 2026-07-28. **431 assertions**;
-`cyrius audit` exits 0; `--agnos` warning-free.
-
-- **Four content loaders published their globals before validating.** A rejected
-  file left a live half-table, so `cmd_serve` reported the failure while every
-  `world_room_count() == 0` guard downstream was defeated at the same instant —
-  a player could log in and be stranded in whatever prefix parsed. Three now
-  publish on success only; `world_load_rooms` cannot (it is two-pass and pass 2
-  walks the count), so its eight error returns route through `_wl_rooms_fail`.
-- **`player_save` failures were discarded at four of five sites**, including the
-  `passwd` commit — which claimed the record was re-keyed while the on-disk copy
-  kept the old pubkey. Now checked, with a rollback of the live ident block, and
-  the rest audit their failures.
-
-**Next: the sweep is not finished.** Batch E (**1.6.10**) carries what the
-1.6.9 re-run turned up — an unbounded per-tick drain budget, a `MAX_LOGIN_FAILS`
-cap that is not actually enforced, an uncapped character-creation path, and a
-duplicate-identity hole on CREATE that 1.6.6 closed only for login. See [`roadmap.md`](roadmap.md#sweep-backlog--the-remaining-16x-batches).
-**2.0 / M14 does not start until 1.6.9 lands** and a re-run sweep produces no
-critical or high findings.
-
-**1.6.4** — `passwd` isolation + the assist made real, 2026-07-28. **420
-assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
-
-- **The `passwd` candidate lived in `g_persist_dec`**, a global that
-  `player_auth_load` decodes into and `_build_record` signs into — held across a
-  network round trip. Any interleaved save or login destroyed it, including a
-  *failed* login against any account. On a passphrase collision it installed 64
-  signature bytes as the secret key: permanent character loss plus a false
-  `SEV_SECURITY "load.tamper"` entry. Now a per-session `SS_IDENT_CAND` block,
-  wiped and freed on commit, both rewinds, and `session_free`.
-- **The M13 assist was prose.** It set `MI_TARGET` and printed a line; nothing
-  swung, because the only HP-subtracting line is driven by the *player's*
-  target. And the latch froze the mob out of wander permanently, since it was
-  never attacked and so never fell below the flee threshold. Reaping stale
-  latches restores wander; `mob_swing` makes the feature real. The 1.5.0
-  changelog claim is now true.
-
-**1.6.1** — audit-chain bound, via upstream libro 2.8.4, 2026-07-28. **388
-assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
-
-descent's in-memory audit chain grew forever and could not be bounded from here.
-libro 2.8.4 adds `chain_new_streaming()`: entries link exactly as before — the
-durable chain verifies identically — but none are retained, only the head hash.
-descent is a pure write-through consumer (it never reads the chain), so this is
-the right shape.
-
-**Measurement note, worth keeping:** RSS does **not** move (+624 kB vs a +636 kB
-baseline) and is the wrong instrument. Entry `Str`s come from the bump allocator,
-which has no free, and freelist memory is never returned to the OS. What was
-removed is the *unbounded* term — a vec slot and an 88-byte struct per event.
-`chain_len` is the honest instrument. The `Str` residue needs an allocator-level
-fix and is recorded upstream.
-
-Also: the 1.6.0 hardening fixes were retagged **M14-A/B/C → H1/H2/H3** — `M14`
-already belongs to the 2.0 contract, and two different M14-Cs existed in one tree.
-
-**1.6.0** — hardening sweep, closing the 1.x line, 2026-07-28. Toolchain
-`6.4.83` → **`6.4.86`**, libro `2.8.2` → **`2.8.3`**. **385 assertions**;
-`cyrius audit` exits 0; `--agnos` warning-free; p99 **1299 µs**.
-
-Three fixes, each mutation-verified:
-
-- **A use-after-free 1.5.0 activated.** `drop_session` never cleared mobs'
-  `MI_TARGET`, which was harmless while that field was only ever *compared* —
-  until M13's `_mob_assist` started dereferencing it. `fl_free` recycles the
-  block into the next `session_new`, so the read could land on a live, different
-  player. New `mobs_forget_session`, the mirror of `sessions_forget_mob`.
-- **Inventory leaked at disconnect** — `session_free` never touched `SS_INV`.
-  Remotely driven and unbounded. Safe to free because saves store inventory by
-  template id, not by instance.
-- **`hp` was never clamped against `maxhp`**, and nothing downstream lowers it.
-  The 0.9.0 rule extended to *relational* invariants.
-
-**Measurement note worth keeping:** RSS cannot show the leak fix — `fl_free`
-never `munmap`s, so a 41-login soak reads +636 kB before and after. Use
-`g_mob_live` / `g_obj_live`.
-
-**1.5.0** — M13, the actor tick, 2026-07-28. **373 assertions**; `cyrius audit`
-exits 0; host and `--agnos` warning-free; p99 **1338 µs** against the 50 ms
-budget, so mob agency is not measurable at Hub scale.
-
-Mobs were furniture. They now take a turn each tick: pace, join a room-mate's
-fight, or break off below 20% HP. Two things the milestone did not anticipate,
-both load-bearing:
-
-- **Wander needs a leash.** The first live run walked the Foundry Sentinel —
-  authored into `foundry.overseer` — the length of the zone and into `hub.gate`,
-  the newbie start room. A roaming population diffuses evenly and erases the
-  authored difficulty curve. Mobs are now bounded to within one room of
-  `MI_HOME`. The proper per-template "does not roam" flag is a `kind = "mob"`
-  key and therefore frozen surface — M19's, not 1.x's.
-- **The zone reset had to change first.** Respawn counted mobs *standing in* a
-  room, so a mob that wandered off left a deficit and every reset spawned a
-  replacement — population climbing by one per reset, forever. `_mob_alive_count`
-  now counts by `MI_HOME`.
-
-`mob_unlink` is split from `mob_remove` (wander relinks; retire frees).
-Conflating them double-frees on every move, which does not fail a test — it
-corrupts the freelist into an infinite loop.
-
-**1.4.0** — M12, instance lifecycle, 2026-07-28. **346 assertions**; `cyrius
-audit` exits 0; host and `--agnos` warning-free; `bench_combat` p99 1422 µs
-against 1427 µs before, so the new per-tick corpse sweep is not measurable.
-
-The milestone under-stated its own problem. `alloc()` has **no `free()`** — it is
-a bump allocator — so this was never "add a reclaim path": mob, object and corpse
-instances had to *move* onto `fl_alloc`/`fl_free`, the only reclaiming allocator
-descent has. `fl_alloc` reuses freed blocks **without zeroing**, which the old
-bump-allocated code silently depended on, so `mob_spawn` now memsets.
-
-Corpses were the worse half: never removed from a room at all. They now decay
-after `CORPSE_TICKS = 120` (~5 min), taking un-looted contents with them.
-Hardcoded on purpose — a `YD_CORPSE_TICKS` knob would be an ADR-0007 §6
-frozen-surface change and belongs to 2.0.
-
-The use-after-free trap was real and landed first: `mob_died` cleared only the
-*killing* session's `SS_TARGET`, so a second attacker kept a pointer. Inert
-precisely because nothing was reclaimed; the first free would have resolved it
-to a live, *different* mob, since `fl_free` returns the block to a size class the
-next `mob_spawn` re-issues.
-
-**1.3.0** — the 1.3.0 pair, 2026-07-28. **M10 (wire-safe prose)** and
-**M11 (migration-gate repair)**. Suite 298 → **333 assertions**; `cyrius audit`
-exits 0; host and `--agnos` both build warning-free.
-
-M10 fixed the one *live* defect: `telnet_feed` decodes `IAC IAC` to a literal
-0xFF (correct RFC 854), `session_push_line_byte` drops only `b < 32` so it
-survived, and `cmd_say` handed it straight to every listener — a player could
-inject a bare Telnet command byte into another player's protocol stream. New
-`session_appendtx_prose` doubles 0xFF and drops C0/DEL, and is a *bounded*
-writer: `LINE_CAP` and `TX_CAP` are both 4096, so a full line of 0xFF escapes to
-8192 and a truncation between a pair would re-create the defect. Verified
-end-to-end with two real clients — before `AA\xffBB`, after `AA\xff\xffBB`.
-C1 (0x80-0x9F) is deliberately kept: those are UTF-8 continuation bytes.
-
-M11 repaired four latent defects in the save migration gate, each of which would
-otherwise have shipped *with* the 2.0 bump it protects — see the CHANGELOG.
-Worth carrying forward: **M11-A is unprovable until M14.** While
-`SCHEMA_VERSION == 1` the old and new missing-stamp defaults agree, so its test
-is a pin, not a proof. Same shape for M11-C and M11-D: they guard surfaces v1
-cannot reach, so both are unit-tested directly — an end-to-end test passes
-against the unfixed code and proves nothing.
-
-**1.2.0** — toolchain + dep upgrade and the first clean audit, 2026-07-28. Cyrius
-`6.3.32` → **`6.4.83`**, libro `2.7.10` → **`2.8.2`** (sigil **3.12.1**, patra
-**1.12.12**, sakshi, bayan transitively). No observable game-surface change — the
-frozen 1.0 surface ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) holds.
-
-`main` **did not build** at the 1.1.5 tag: cyrius 6.4.65 replaced hardcoded
-thread-local slot indices with a `thread_local_alloc()` allocator, sigil 3.12.1
-calls it, and the committed `lib/thread_local.cyr` predated it — and 6.4.x
-*refuses to emit* on a reachable undefined function rather than emitting `ud2`.
-Re-vendoring at the new pin fixed it.
-
-Three further defects the upgrade exposed, all now fixed:
-
-- descent included the **monolithic `lib/sigil.cyr`** on top of the thin
-  capability sub-bundles libro 2.8.0 resolves — redefining every symbol and
-  dragging in unused x509/RSA bignum tables. **Static data 13.4 MB → 83 KB
-  (.bss), duplicate-symbol warnings 267 → 0.**
-- `cyml`/`toml` **left the stdlib** (carved into bayan); the stale committed
-  copies shadowed bayan's, so the zone/class loaders ran on whichever
-  `cyml_parse` the include order picked. `bayan` is now a direct dep.
-- the parser's `MAX_TOKENS` **collided** with patra's `MAX_TOKENS = 128` in
-  Cyrius's flat enum namespace → renamed `PA_MAX_TOKENS`.
-
-Two more defects the audit turned up, both independent of the upgrade:
-
-- **CI never ran the tests.** The step was `cyrius test src/test.cyr`, and
-  `src/test.cyr` is a no-op stub — CI compiled it, exited 0, and the
-  298-assertion suite never executed. Fixed to bare `cyrius test` (+ an
-  `cyrius audit` step). Every green CI run before 1.2.0 was silent about tests.
-- **`player_exists()` was wrong on agnos** — `sys_stat`'s *arity* differs by
-  target (agnos `(path, pathlen, statbuf)` vs `(path, buf)`), so the statbuf
-  pointer landed in `pathlen`. That branch decides returning-player vs.
-  character-creation. `--agnos` had been warning; the host build could not see it.
-
-Also: `benches/bench_combat.bcyr` had stopped compiling (missing the persist
-prelude → `undefined variable 'DP_ROOMS'`); `VERSION_STRING` had silently drifted
-to `1.1.3`, two releases behind; `signal_ignore(SIGPIPE)` added as hardening (see
-the CHANGELOG for its honest, unreproduced scope); 12 dead leaves pruned from the
-committed `lib/`. **`cyrius audit` now exits 0** — 298 tests, 3/3 benches, fmt +
-lint + docs clean (111 public fns documented), host and agnos both building
-warning-free. See [CHANGELOG 1.2.0](../../CHANGELOG.md).
-
-**1.0.1** — gateway-verified maintenance, 2026-06-10. No observable change from
-1.0.0 — the frozen 1.0 surface ([ADR 0007](../adr/0007-frozen-1.0-surface.md))
-holds (no new verbs / save fields / zone fields / env knobs; no source change).
-Records Yeoman's Descent as the verified target of the **agora Descent link**
-(agora 1.4.0, its ADR 0017): agora bridges a logged-in citizen here as a
-*transparent TCP byte-proxy*, so the MUD's own telnet negotiation + Ed25519
-login flow through unchanged — the MUD authenticates the player itself. Sigil
-identity hand-off from agora is **deferred** (needs an external-identity path the
-frozen surface doesn't expose — a future two-repo bite). Verified end-to-end by
-agora's `20-descent.sh` smoke. Toolchain pin 6.1.23 (unchanged); tests unchanged
-and green.
-
-**0.9.1** — surface freeze, 2026-06-10. The public surface is enumerated and
-locked for 1.0 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)): command verbs +
-`@`-namespace, save-record schema v1, Telnet/wire behaviour, zone format, env
-knobs. Save records now stamp `schema = 1` (signed); the loader rejects records
-newer than `SCHEMA_VERSION` and reads 0.7.0–0.9.0 (no `schema`) as v1 — the
-post-1.0 migration hook. The `@`-admin namespace (`@stats`/`@who`/`@reset`) is
-gated behind `YD_ADMIN` (default off): disabled → unknown commands, hidden from
-`help`; operator auth stays deferred to M8. **Behaviour change**: `@stats` now
-needs `YD_ADMIN=1`. 298 tests pass; admin gate live-verified both ways.
-
-**0.9.0** — security sweep, 2026-06-10. A CVE-informed audit of the
-network-input + save-file surface. Four issues found and fixed, all reachable
-from a raw TCP connection or a planted save: two heap overflows (`ident_derive`
-copied the passphrase using the raw line length — **pre-auth**; `player_auth_load`
-hex-decoded `salt`/`pubkey`/`sig` with no length bound **before** signature
-verification), an OOB read (unvalidated `class` index → `g_classes + cls*CL_SIZE`),
-and a DoS (unvalidated `ndice` → unbounded `roll()` loop). Root cause: a save's
-Ed25519 signature proves its *author*, not its field *values*, so every loaded
-field is now bounded/validated. Ed25519 malleability (CVE-2020-36843 class) was
-researched and judged non-applicable (integrity use, not uniqueness; verifier is
-vendored sigil). 293 tests pass (9 new `security`); remote pre-auth vector
-live-verified non-crashing. Pin → 6.1.23.
-
-**0.8.3** — operator verbs, 2026-06-10. `@who` lists in-world sessions (name +
-room) and `@reset` forces an immediate zone reset (idempotent top-up, re-arms
-the timer, logs it) — read-only Joshua groundwork (`render_who`/`render_reset`
-in server.cyr). The `@`-namespace is still unguarded; M8 adds operator auth.
-284 tests pass; live-verified.
-
-**0.8.2** — content patch, 2026-06-10. The Hub gets lived-in: six new flavor/
-loot object templates (notice, tankard, ration, ingot, optic, shrine-token) and
-`objects =` spawns across 11 rooms (13 objects) give M7-D's object respawn
-something to act on — ambient loot renders on `look` and restocks on each zone
-reset. Content-only; 284 tests pass, boot spawns 13 objects.
-
-**0.8.1** — login/identity polish, 2026-06-10. Passphrases no longer echo
-(server sends `IAC WILL/WONT ECHO` around every passphrase prompt — login,
-new-character, and the new `passwd` verb), so conformant clients hide the
-keystrokes (the deferred ADR-0004 item). Returning players get a `Last seen N
-ago` greeting from the record's prior `last_login`. The `passwd` verb re-keys a
-character in-world (fresh salt + new passphrase → new Ed25519 identity, re-signed
-+ saved, audited; old passphrase dies immediately) via two echo-suppressed phases
-`PHASE_CHPASS_NEW`/`_CONFIRM`. 284 tests pass; live-verified (echo bytes + passwd
-+ last-seen + old-pass rejection). No new milestone. Toolchain pin → 6.1.22.
-
-**0.8.0** — M7 close, 2026-06-10. Zones heal themselves. The zone header's
-`reset_secs` (Hub: 900) drives a reset that respawns mobs and loot to the
-authored layout — but `maybe_zone_reset` (in `advance_tick`) defers while any
-in-world player occupies the zone, retrying each tick until it empties. Mob
-respawn tops each room up to its authored multiset (`zone_reset_mobs`: spawn
-`authored − alive`, never duplicating); object respawn reapplies room `objects`
-spawns without double-up (`zone_reset_objs`, matched by the new `OI_TPL_ID`).
-Each reset logs `[<epoch>] zone=<id> reset (rooms=N, mobs=M, objs=O)` for
-Joshua (M8). `YD_RESET_SECS` overrides the cadence for testing. **Gate met**:
-empty zone resets in window, occupied zone defers, log matches state. 272
-tests pass; live presence-gate verified. Also bumped the toolchain pin to
-**6.1.21** and removed a duplicate room-id lookup (`world_room_by_id` →
-`room_index_by_id`).
-
-**0.7.0** — M6 close, 2026-06-09. Players persist across restart. Identity is
-a sigil Ed25519 keypair derived from the player's passphrase ([ADR 0004](../adr/0004-identity-and-authentication.md)):
-a new name forges + confirms a passphrase, a known name presents it; only
-salt+pubkey are stored, the secret key is re-derived and never written. State
-saves to a signed per-player `data/players/<name>.cyml` via atomic `.tmp`+rename
-([ADR 0006](../adr/0006-persistence-shape.md)), triggered on `save` / disconnect
-/ creation / a debounced 5-min tick sweep; load verifies the signature, restores
-attrs + room (by id) + inventory, and drops the player back where they logged
-off. A libro hash chain (`data/audit.libro`) logs every login/save/security
-event. **Gate met**: `kill -9` mid-session → restart → no data loss. New module
-`src/persist.cyr`; 256 tests pass. Combat (0.5.0) and earlier intact.
-
-**0.6.1** — polish patch, 2026-06-09. Combat reads as lived-in: onlookers
-see fights in third person (`room_combat_line`), mobs show qualitative
-health (`mob_condition`, in `look` / `examine`), and every class recovers
-HP out of combat (CON-scaled, in `classes_upkeep`). No new milestone, no
-new deps. Details below are the 0.6.0 (M5) baseline this builds on.
-
-**0.6.0** — M5 close, 2026-06-09. The four classes are playable. Character
-creation asks your calling (Pikeman / Splicer / Courier / Chaplain,
-`src/classes.cyr` + `data/classes.cyml`); each brings its own attributes,
-combat profile, and three abilities on an energy + tick-cooldown + status
-framework that composes with the 2.5 s auto-attack. Every class clears the
-Hub solo and kills the Foundry Sentinel without dying — the Pikeman tanks,
-the Splicer bursts, the Courier strikes from stealth, the Chaplain
-sustains. Combat (0.5.0), world (0.4.0), parser (0.3.0), wire (0.2.0), and
-tick (0.1.0) underneath are intact. **Players still vanish on restart —
-persistence (M6) is next.**
+**1.6.12** — 2026-07-29. **706 assertions**; `cyrius audit` exits 0; 5/5 benches.
+
+The 1.6.x audit sweep is shipped end to end (1.6.0–1.6.12). Per-release detail
+is in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the sweep's shape is on the
+[roadmap](roadmap.md#the-16x-audit-sweep) — this file is a snapshot, not a log,
+and the per-release history that used to live here has been removed for the same
+reason the roadmap's was: keeping three copies of the same chronology is how the
+stale-doc findings of 1.6.9 and 1.6.11 happened.
+
+**The 1.x line is not closed.** Two re-run sweeps have each found serious defects
+the previous pass missed — a remote crash on `examine` (1.6.9) and an unbounded
+event batch (1.6.12). Everything both produced is fixed. **The line closes when a
+re-run comes back with no critical or high findings**, and that has not happened.
+
+**Open issues** — what is known to be wrong, worst first, with impact and
+ownership for each: [`roadmap.md`](roadmap.md#open-issues--needs-repair). Nothing
+is critical or high. The two that can affect a running server are an inventory
+that grows until saves stop working, and ~1.6 kB per audit event inside libro
+(needs an upstream **2.8.5**; descent's own share is already zero).
+
+---
+
+## Lessons carried
+
+Durable and hard-won; each cost at least one release to learn. Collected here
+because they are about *how to work on this tree*, not about any one release.
+
+**Fixing an instance is not fixing the class.** 1.6.12's critical was the fourth
+appearance of one defect — *a per-item cap is not a bound on a loop that walks
+many items* — after three releases each capped a neighbour of the open hole.
+When a finding feels familiar, enumerate the class first: `grep -n ident_derive
+src/` lists every expensive-line path; "every loop that dispatches lines" lists
+every place a cap must be aggregate. Both were one command away.
+
+**A signature proves authorship, not field validity.** Players own their signing
+key (ADR 0004), so every loaded field needs a range check *and* the relational
+invariants need checking too (hp vs maxhp, room index vs room count).
+
+**A mutation that fails to fail is a signal about the test.** Roughly a third of
+every batch's mutations needed the test rewritten before they discriminated, and
+in every case the test was the thing that was wrong. Recurring causes:
+- `var buf[N]` is N **bytes**, not N entries — the first line of CLAUDE.md's Key
+  Principles, and it still smashed a stack in 1.6.10.
+- A test that **reimplements** the logic instead of calling it (1.6.12's first
+  event-budget test hid three mutations this way). Extract a seam and drive the
+  real function — `tick_reschedule`, `event_batch_step`.
+- A budget that is an exact multiple of the per-item cap never exercises a
+  partial cap, so the parameter looks honoured even when ignored.
+- Asserting a derived total instead of the thing itself (a budget *delta* cannot
+  see a step that charges a flat 1 per item).
+- `ilist_find_kw_nth` with a zero-length noun matches **nothing**, so a lookup
+  that looks like "the first item" silently selects none.
+
+**A test that dies silently reads exactly like a test that passed.** Two harness
+bugs truncated a run rather than failing it: a session built by `_tx_sess` has
+`SS_FD = 0`, so `session_free` closed **stdin**; and `SS_TS = 0` made
+`telnet_state_free` dereference null. Anything handed to `drop_session` goes
+through `_freeable_sess`.
+
+**Tests must not depend on what they do not control.** CI has caught two: a
+5-minute cadence tested against `clock_now_ms()`, which is **uptime since boot**,
+not epoch (1.6.8); and a "guaranteed hit" that isn't, because `combat_try_hit`
+misses on a natural 1 whatever the bonus (1.6.12). A local pass proved nothing
+about either. Timing groups use synthetic clocks; RNG-dependent assertions retry.
+
+**A test that is not idempotent is a landmine.** `create-guards` saved a record
+and so failed on its own second run — green once, red forever after.
+
+**RSS is the wrong instrument for a bump-arena leak** and the right one for a
+freelist leak. `alloc()` never returns memory and `fl_free` never munmaps, so use
+`alloc_used()` for the former (that is what `bench_persist` reports) and a
+control arm for the latter — 1.6.9's soak isolated its growth by running the same
+churn *without* authenticating.
+
+**A comment asserting the opposite of its code is a finding.** This tree has
+produced several, including a factually false justification in a comment I had
+written myself two releases earlier.
+
+---
 
 ## Toolchain
 
-- **Cyrius pin**: `6.4.83` (`cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.4.86` (`cyrius.cyml [package].cyrius`)
 
-Two toolchain quirks at 6.4.83, worked around rather than fixed here:
+Two toolchain quirks (first hit at 6.4.83, still present at 6.4.86), worked
+around rather than fixed here:
 
 - `cyrius fmt -w <file>` does **not** write. Capture `cyrius fmt <file>` on stdout
   instead. Flag order also differs per tool: `cyrius fmt <file> --check`, but
@@ -627,7 +164,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (706 assertions, 38 groups)
+  cyrius-yeomans-descent.tcyr   unit suite (706 assertions, 44 groups)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -844,62 +381,35 @@ _None yet._
 
 ## In flight
 
-**No active cycle.** The tree builds, `cyrius audit` exits 0, and **706
-assertions + 5 benches** pass.
+**No active cycle.** Status, the open gate and the parked upstream item are in
+[Version](#version) above — not repeated here, because they were, and the two
+copies had already drifted apart.
 
-**The 1.x line is NOT closed.** M10–M13, the 1.6.0 hardening sweep, and sweep
-batches A–E plus two tails (1.6.6–1.6.12) are all shipped, and every one of the original 44
-verified findings is closed and re-verified as still closed. But batch D's last
-item was to **re-run the sweep**, and it found a remotely-triggerable crash the
-first pass had missed (`examine` on a zone-less server) plus a regression 1.6.8
-had introduced. Both were fixed in 1.6.9, and batch E (1.6.10) closed the critical plus every
-high. What remains is the low/nit tail and, decisively, **a re-run that comes
-back clean** — which has not happened yet.
+**Next: another re-run sweep**, then 2.0.0 starting with **M14 — ADR 0008 + save
+schema v2**. Before touching M14, read the critical path in
+[`roadmap.md`](roadmap.md#critical-path): records are signed with a key
+re-derived from the player's passphrase, which the server never holds, so **there
+is no offline migration and there cannot be one** — every 2.0 field must be
+additive, defaulted, and migrated lazily at login. M11 already repaired the gate
+that makes the bump safe.
 
-The exit criterion: **a re-run sweep producing no critical or high findings.**
-Batch E is landed and the audit is green; the re-run is 1.6.11's job. **2.0 /
-M14 does not start before that.**
+**Carried, none blocking:**
 
-**One item is parked for upstream:** ~1632 bytes of bump arena per save (and
-~3.9 kB per login), inside libro's `chain_append` / `filestore_append` —
-`filestore_append` rebuilds a `str_builder` from scratch on every append, and
-`hasher_new` / `sha256_init` never `fl_free`. `alloc()` has no free, so it is
-permanent. Needs a **libro 2.8.5**, the same shape as the 1.6.1 fix. Descent's
-own share went to zero in 1.6.8 and `bench_persist` now gates it, so a
-reintroduced descent-side allocation trips the audit gate rather than a soak.
-(The *previous* parked item — the unbounded in-memory audit chain — was closed
-upstream in libro 2.8.4 and consumed in 1.6.1.)
-
-Next is the **re-run sweep** — the last gate — then **2.0.0** starting with
-**M14 — ADR 0008 + save schema v2**. Everything
-else in the 2.0 line routes through it. Before touching it, read the critical
-path in [`roadmap.md`](roadmap.md#critical-path); the binding constraint is that
-records are signed with a key re-derived from the player's passphrase, which the
-server never holds, so **there is no offline migration and there cannot be one** —
-every 2.0 field must be additive, defaulted, and migrated lazily at login.
-M11 already repaired the gate that makes the bump safe.
-
-**M8 (Joshua) moved to the backlog**: it was blocked on an upstream Cyrius port,
-and specced against a management CLI that turned out to be an AI-NPC simulation
-runtime. The operator work worth doing — real operator auth replacing the
-`YD_ADMIN` gate — is M18 and does not depend on it.
-
-The full 2.0 line (M10–M23, with M14+M15+M16 as the minimum credible 2.0) is in
-[`roadmap.md`](roadmap.md#milestones--the-20-line). Pick up per the boot guide below.
-
-Carried forward from 1.2.0 (none block a release):
-
-- **sakshi shadow warning** — sigil 3.12.1 pins sakshi 2.4.3 while the 6.4.83
-  toolchain bundles 2.4.6. Fix is a sigil-side bump; nothing to do here. This is
-  the only warning `cyrius build` still emits.
+- **sakshi shadow warning** — sigil 3.12.1 pins sakshi 2.4.3 while the toolchain
+  bundles 2.4.6. A sigil-side bump; nothing to do here.
+- **Toolchain drift** — `cyrius.cyml` pins `6.4.86`; the installed `cycc` is now
+  **6.5.0**, so `cyrius audit` emits a drift warning. Not a failure and nothing is
+  broken, but the next toolchain bump is a release of its own (1.2.0 is the
+  precedent: an upgrade repaired a `main` and a bench that had both silently
+  stopped compiling), so it should not be folded into a feature change.
 - **aarch64 epoll layout** — `src/server.cyr` hardcodes the x86 *packed*
-  `epoll_event` (`EPOLL_EVENT_SIZE = 12`, data at +4). aarch64 Linux uses the
-  unpacked 16-byte layout with data at +8. Not hit today (descent is built and run
-  x86_64/agnos), but it will corrupt the session pointer the first time someone
-  builds `--aarch64` and runs it. Worth an `#ifdef` before any ARM target lands.
-- **`cyrius audit` is now a CI step.** If it starts failing on a style gate rather
-  than a real defect, fix the code — don't drop the step; it is the only thing
-  gating fmt / lint / docs.
+  `epoll_event` (`EPOLL_EVENT_SIZE = 12`, data at +4); aarch64 Linux uses the
+  unpacked 16-byte layout with data at +8. Not hit today (x86_64 / agnos only),
+  but it corrupts the session pointer the first time someone builds `--aarch64`.
+  Tracked as roadmap **B4**.
+- **`cyrius audit` is a CI step.** If it fails on a style gate rather than a real
+  defect, fix the code — do not drop the step. It is the only thing gating
+  fmt / lint / docs.
 
 ---
 
