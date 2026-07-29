@@ -23,14 +23,15 @@ ownership and fix size.
 |---|---|---|---|---|
 | ~~1~~ | [~~**1.6.13**~~](#1613--shipped--2026-07-29) | ~~3~~ | ✅ **shipped** — carry cap, pre-auth timeout, config whitespace | — |
 | ~~2~~ | [~~**1.6.14**~~](#1614--shipped--2026-07-29) | ~~5~~ | ✅ **shipped** — epoll layout, class-ID terminator, stat clamps, dead symbols | — |
-| 3 | [**1.6.15**](#1615--documentation-truth-pass) | 1 | README says v1.2.0; architecture doc describes combat we never built | no |
+| ~~3~~ | [~~**1.6.15**~~](#1615--shipped--2026-07-29) | ~~1~~ | ✅ **shipped** — README + architecture doc reconciled with the code | — |
 | 4 | [**re-run sweep**](#the-gate--what-closes-the-1x-line) | — | **The gate.** Closes the 1.x line if it returns no critical or high findings | **yes** |
 | 5 | **2.0.0** | 3 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death | — |
 | 6 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
-**One item of open work remains before the gate:** the documentation truth pass
-(1.6.15). Nothing open affects a running server, and nothing open is dormant
-code — it is all docs.
+**Every open issue from the 1.6.0 sweep is now closed.** The only thing left
+before 2.0 is the gate itself: a re-run sweep that comes back with no critical or
+high findings. One item remains blocked upstream (libro 2.8.5) and is not
+schedulable here.
 
 **Blocked, not schedulable here:** one issue is upstream in libro and needs a
 **2.8.5** release. Descent's own share of it is already zero.
@@ -41,7 +42,7 @@ the release.
 
 ---
 
-## Open issues — the work in 1.6.15
+## Open issues — all closed
 
 **Reconciled against the original 1.6.0 sweep output on 2026-07-29.** All 56 raw
 / 44 verified findings from that sweep have been matched against the current
@@ -98,25 +99,11 @@ authored zone-format fields frozen by ADR 0007 §5 with named future consumers
 
 ---
 
-### 1.6.15 — documentation truth pass
+### 1.6.15 — shipped ✅ 2026-07-29
 
-#### The README and the architecture doc describe a different game
-
-
-
-**What breaks.** `README.md` still says **v1.2.0** and "298 assertions" (actual:
-1.6.12, 706). `docs/architecture/overview.md` documents a combat model the code
-does not implement — DEX-modified hit rolls, STR/TEC damage scaling, carrying
-capacity — and mentions rest/sleep verbs that do not exist.
-
-**Can it happen today?** Not a runtime bug. It is the first thing a new
-contributor reads, and it is wrong.
-
-**Whose.** Ours.
-
-**Fix size.** Small, and mechanical.
-
----
+The README was five releases stale and the architecture overview documented a
+combat model, two attributes and two verbs that were never built. Every claim
+checked against source; detail in the 1.6.15 CHANGELOG entry.
 
 ---
 

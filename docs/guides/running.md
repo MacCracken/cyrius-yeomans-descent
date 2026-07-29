@@ -57,7 +57,7 @@ hardware needed), use the container harness in the **agnosticos** repo at
 | Env var | Default | Effect |
 |---|---|---|
 | `YD_TICK_MS` | `2500` | Combat-tick interval in ms. Set low (e.g. `200`) for fast testing. |
-| `YD_IDLE_MS` | `300000` | Idle-disconnect threshold in ms (slowloris reaping). |
+| `YD_IDLE_MS` | `300000` | Idle-disconnect threshold in ms, for **logged-in** players. A connection that has not authenticated is dropped after 30 s regardless of this (1.6.13) — that is the slowloris reap, and it is not tunable. |
 | `YD_RESET_SECS` | per-zone `reset_secs` | Override the zone-reset interval in seconds. |
 | `YD_ADMIN` | unset → off | `YD_ADMIN=1` enables the `@`-admin verbs (`@stats` / `@who` / `@reset`). |
 

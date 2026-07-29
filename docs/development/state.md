@@ -3,7 +3,7 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.6.14 — only a docs pass left before the gate)
+> **Last refresh**: 2026-07-29 (v1.6.15 — all sweep issues closed; only the gate remains)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
@@ -11,26 +11,24 @@
 
 ## Version
 
-**1.6.14** — 2026-07-29. **751 assertions**; `cyrius audit` exits 0; 5/5 benches.
+**1.6.15** — 2026-07-29. **751 assertions**; `cyrius audit` exits 0; 5/5 benches.
 
-Closed the dormant tail: the **epoll_event layout** is now per-architecture on
-both the read and write paths (an ARM build would have read session pointers
-from the wrong bytes — the stdlib had this right and descent hardcoded the x86
-offset for reads only), which also removed a **16-byte allocation per accepted
-connection**; the **class-id terminator**; and the **rest of the 1.6.7 sign
-sweep** — `str`/`dex`/`con`/`tec` and the damage dice were clamped on the load
-path and unclamped on the creation path.
+A documentation truth pass, no code changes. The README was five releases stale
+and `docs/architecture/overview.md` documented a combat model that was never
+built — a `1d20 + DEX` hit roll (DEX is not involved), STR/TEC damage scaling
+(neither touches the auto-attack), `rest`/`sleep` verbs and safe-room recovery
+(neither exists), and a sample transcript with `[Tick N]` prefixes and per-limb
+hit locations. **STR does nothing at all today** — stored, displayed, read by no
+game rule. Every claim was checked against source; what is still aspirational now
+says so and names the milestone.
 
-Two flagged "dead symbols" were kept rather than deleted: `mt_level` and
-`g_zone_name` are authored zone-format fields frozen by ADR 0007 §5, with named
-consumers at M16 and M18. Their comments claimed uses that did not exist; that
-was the defect.
+Both docs also picked up the two user-visible changes of the whole 1.6.x line,
+neither of which had reached them: the **100-item carry cap** and the **30 s
+pre-auth disconnect**.
 
-**All that remains before the gate is a documentation pass** (1.6.15): the
-README says v1.2.0 and the architecture doc describes a combat model that was
-never built.
-
-**The 1.x line still needs a clean re-run sweep to close.**
+**Every open issue from the 1.6.0 sweep is now closed.** What remains before 2.0
+is the gate: a re-run sweep with no critical or high findings. One item is
+blocked upstream (libro 2.8.5) and is not schedulable here.
 
 ---
 

@@ -22,6 +22,11 @@ inventory and the current room. Matching is by keyword prefix (`get rat` finds
 | `examine <thing>` | | Inspect a mob, object, or yourself (`examine me` shows your character sheet). |
 | `exits` | | List the room's exits. |
 | `inventory` | `i` | List what you're carrying. |
+
+**You can carry 100 items.** Past that, `get` and `give` refuse and say so. The
+limit exists because a save record is a fixed-size buffer: before 1.6.13 a
+hoarding character silently stopped being saved at all, with no message and no
+way to tell.
 | `who` | | List who else is in the world. |
 
 ## Items

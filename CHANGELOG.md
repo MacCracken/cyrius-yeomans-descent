@@ -4,6 +4,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.15] — 2026-07-29
+
+**The documentation truth pass.** No code changes. The 1.6.0 sweep found the
+README and the architecture overview describing a *different game* — and unlike
+a stale version number, that is the first thing a new contributor reads and
+believes.
+
+### Changed
+
+- **`docs/architecture/overview.md` documented a combat model that was never
+  built.** Every claim in §2–§4 was checked against the source, and most of them
+  were wrong:
+  - **Hit roll** was documented as `1d20 + DEX modifier + weapon accuracy`. DEX
+    is not involved at all — it is `1d20 + the class's authored hit bonus +
+    the defender's AC`, with `+2` while `stim` is up. A natural 1 always misses
+    whatever the bonus, which was undocumented and is exactly the detail that
+    made a test flaky in 1.6.12.
+  - **Damage** was documented as `weapon dice + STR or TEC modifier`. Neither
+    STR nor TEC touches the auto-attack.
+  - **The attribute table** described four stats by intent. In fact **STR does
+    nothing at all** today — it is stored, shown by `examine me`, and read by no
+    game rule. DEX rides `backstab` only, CON drives out-of-combat regen (not
+    maximum HP), and TEC rides four Splicer/Chaplain abilities. The table now
+    says what each one does, and points at **M16** for the rest.
+  - **`rest` and `sleep` verbs, and safe-room recovery** — described in §4.3 and
+    never implemented. HP regenerates automatically anywhere, out of combat.
+  - **Guild territory** — described as high-level play; it is M22 and unbuilt.
+  - **The sample combat transcript** showed a `[Tick N]` prefix and per-limb hit
+    locations, neither of which exists. Replaced with output captured from a
+    running server.
+- **`README.md` was five releases stale** — "v1.2.0", "298 assertions" — and its
+  three headline parser examples were unverified. Two of the three I could not
+  make resolve against a live server, so they were replaced with commands I did
+  watch work end to end rather than swapping one unchecked claim for another.
+- **Both now document what 1.6.13 changed for players**: the 100-item carry cap
+  (and *why* it exists), and that an unauthenticated connection is dropped after
+  30 s regardless of `YD_IDLE_MS`. Those are the two user-visible changes of the
+  whole 1.6.x line and neither had reached the docs.
+- `docs/guides/running.md` and `docs/guides/commands.md` picked up the same two
+  facts.
+
+### Verified, not assumed
+
+Every remaining factual claim in the README was checked against the tree rather
+than left alone: 21 Hub rooms ✓, 4 classes ✓, 12 abilities ✓, ADRs 0001–0007 ✓,
+all four referenced guides exist ✓.
+
 ## [1.6.14] — 2026-07-29
 
 **The dormant tail.** Five items that could not fire in the shipped

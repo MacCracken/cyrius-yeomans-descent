@@ -7,7 +7,7 @@ Written in [Cyrius](https://github.com/MacCracken/cyrius). Part of [AGNOS](https
 ## Why
 
 - **Cyrius-native TCP server** — no external runtime, no glibc dependency
-- **Verb-noun parser** — `give monoblade to kiran`, `put all.rations in backpack`, `kill 2.drone`
+- **Verb-noun parser** — `give notice to kiran`, `get all from corpse`, `kill 2.scavver`
 - **2.5-second combat tick** — hidden 1d20 + modifiers vs. AC, classic THAC0 math
 - **Four playable classes** — Pikeman (tank), Splicer (caster/hacker), Courier (rogue), Chaplain (healer), each with three abilities
 - **Zone resets** — on a per-zone timer (the Hub: 15 min), but only when no players are present
@@ -17,20 +17,26 @@ Full design: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
 ## Status
 
-**v1.2.0 — feature-complete, maintained.** The full game loop is implemented and playable:
-the Telnet wire (RFC 854 / 1143), the verb-noun parser, a hand-authored 21-room
-Hub zone, the 2.5 s combat tick with THAC0 hit/damage math, four playable
+**v1.6.15 — feature-complete, maintained.** The full game loop is implemented and
+playable: the Telnet wire (RFC 854 / 1143), the verb-noun parser, a hand-authored
+21-room Hub zone, the 2.5 s combat tick with THAC0 hit/damage math, four playable
 classes with abilities, crash-safe player persistence (reconnect restores your
 attrs / room / inventory; survives a `kill -9`), and presence-gated zone resets.
-0.9.0 was a security sweep; 0.9.1 froze the public surface ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)).
-See the [roadmap](docs/development/roadmap.md) and [current state](docs/development/state.md).
+
+0.9.0 was a security sweep and 0.9.1 froze the public surface
+([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)). The **1.6.x line is an audit
+sweep** — 1.6.0 audited the tree and the fixes ran through 1.6.15, with two
+re-run sweeps along the way. The line closes once a re-run comes back with no
+critical or high findings; see the
+[roadmap](docs/development/roadmap.md#what-is-left) for what is left and
+[current state](docs/development/state.md) for the live snapshot.
 
 ## Quick Start
 
 ```sh
 cyrius deps                                               # resolve deps into lib/
 cyrius build src/main.cyr build/cyrius-yeomans-descent    # compile
-cyrius test                                               # 298 unit + integration assertions
+cyrius test                                               # 751 unit + integration assertions
 ./build/cyrius-yeomans-descent serve 4000                 # start the server on port 4000
 ```
 
@@ -85,7 +91,9 @@ cd ../agnosticos/docker/descent-sweep && ./run.sh serve   # then: telnet 127.0.0
    `kill <mob>`, your class abilities (`bash`, `hack`, `backstab`, `patch`, …).
 4. **Persist.** `save` writes your record; `quit` saves and disconnects; a
    reconnect restores you where you left off, with a "last seen" greeting. State
-   also autosaves on a debounced timer, so a `kill -9` loses nothing committed.
+   also autosaves about every five minutes per character, so a `kill -9` loses
+   nothing committed. You can carry 100 items — past that the server says so
+   rather than silently failing to save you (1.6.13).
 5. **Re-key** with `passwd` to change your passphrase.
 
 Type `help` in-world for the full command list. The complete reference lives in
@@ -97,9 +105,9 @@ is in [`docs/guides/playing.md`](docs/guides/playing.md).
 | Env var | Default | Effect |
 |---|---|---|
 | `YD_TICK_MS` | `2500` | Combat-tick interval (ms). Lower it for fast testing. |
-| `YD_IDLE_MS` | `300000` | Idle-disconnect threshold (ms). |
+| `YD_IDLE_MS` | `300000` | Idle-disconnect threshold (ms) for **logged-in** players. A connection that has not authenticated is dropped after 30 s regardless (1.6.13). |
 | `YD_RESET_SECS` | (zone's `reset_secs`) | Override the zone-reset interval (s). |
-| `YD_ADMIN` | unset (off) | Set to `1` to enable the `@stats` / `@who` / `@reset` admin verbs. Off by default ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)); operator authentication is a post-1.0 item. |
+| `YD_ADMIN` | unset (off) | Set to `1` to enable the `@stats` / `@who` / `@reset` admin verbs. Off by default ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)); real operator authentication is **M18**. |
 
 See [`docs/guides/running.md`](docs/guides/running.md) for the operator guide.
 
