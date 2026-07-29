@@ -144,8 +144,14 @@ enum SessConst {
 # Has this session saved too recently for another `save` verb to do real work?
 # Split out from cmd_dispatch so the rule is testable without standing up a full
 # session + parser + world (H6, 1.6.3). A zero SS_LAST_SAVE_MS — a session that
-# has never saved — is never rate-limited: clock_now_ms() is large, so the
-# difference exceeds any interval.
+# has never saved — is never rate-limited, which the `last == 0` line below
+# states outright.
+#
+# Corrected in 1.6.8: this comment used to justify that line by claiming
+# clock_now_ms() is large enough that the subtraction covers it. It is not —
+# clock_now_ms() is CLOCK_MONOTONIC, milliseconds since boot — so the guard is
+# load-bearing rather than belt-and-braces. The code was always right; the
+# reasoning was not, and save_sweep_due was written from the wrong version.
 fn save_rate_limited(s): i64 {
     var last = load64(s + SS_LAST_SAVE_MS);
     if (last == 0) { return 0; }
@@ -157,14 +163,25 @@ fn save_rate_limited(s): i64 {
 #
 # Split out for the same reason save_rate_limited was: it makes the rule
 # testable without a server, and the rule is the entire safety argument for
-# metering the sweep. A session that has never saved has SS_LAST_SAVE_MS == 0
-# (session_new memsets, and player_auth_load clears SS_SAVE_DIRTY without
-# stamping a time), and `now - 0` is enormous because clock_now_ms() is a wall
-# clock — so it is eligible the moment it dirties, exactly as before. That is
-# correct, not an oversight, and it is why there is no special case here.
+# metering the sweep.
+#
+# SS_LAST_SAVE_MS == 0 means "never saved" — session_new memsets, and
+# player_auth_load clears SS_SAVE_DIRTY without stamping a time — and it is
+# tested EXPLICITLY, exactly as save_rate_limited above tests it.
+#
+# It has to be. `clock_now_ms()` is CLOCK_MONOTONIC: milliseconds since BOOT,
+# not since the epoch. Leaning on `now - 0` being larger than the interval is
+# leaning on the machine having been up for five minutes, which is false on a
+# freshly-booted host — and a freshly-booted host running a freshly-started
+# server is not a corner case, it is a reboot. Without this line, every
+# character created in the first five minutes of uptime silently skips the
+# autosave. (CI caught this; the comment that used to be here asserted the
+# opposite, and was wrong.)
 fn save_sweep_due(s, now): i64 {
     if (load64(s + SS_SAVE_DIRTY) == 0) { return 0; }
-    if (now - load64(s + SS_LAST_SAVE_MS) < SAVE_SWEEP_MIN_MS) { return 0; }
+    var last = load64(s + SS_LAST_SAVE_MS);
+    if (last == 0) { return 1; }
+    if (now - last < SAVE_SWEEP_MIN_MS) { return 0; }
     return 1;
 }
 

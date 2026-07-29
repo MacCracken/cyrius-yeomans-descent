@@ -12,7 +12,7 @@
 
 ## Version
 
-**1.6.8** — sweep batch C, resource + timing hygiene, 2026-07-28. **570
+**1.6.8** — sweep batch C, resource + timing hygiene, 2026-07-28. **573
 assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
 
 - **Room broadcasts were quadratic in `write(2)`** — 2E² − E per tick for E
@@ -41,6 +41,15 @@ still wraps silently (folded into M14-D), and **~1632 B/save of bump arena is
 inside libro** — `filestore_append` rebuilds a `str_builder` per append — which
 needs an upstream 2.8.5, the same shape as the 1.6.1 chain fix. The per-save
 growth is reduced, not stopped.
+
+**A second testing note, from CI.** `save_sweep_due` shipped relying on `now - 0`
+being bigger than five minutes for a never-saved session. `clock_now_ms()` is
+**`CLOCK_MONOTONIC` — ms since boot**, so that is a claim about the host's
+uptime, and it is false on a fresh one: every character created in the first
+five minutes of uptime would have skipped the autosave. Only CI has an uptime
+that short, which is exactly why it caught it. Timing tests here now use
+synthetic clock values; a test that reads the real clock is measuring the
+machine, not the code.
 
 **Testing note worth carrying:** the mutation that makes the new hex encoder emit
 uppercase — which would make every save record on disk fail its own signature —
@@ -484,7 +493,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **570** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **573** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,

@@ -1580,7 +1580,11 @@ fn test_accept_limits(): i64 {
     # that needs a full session + parser + world and segfaults on a bare test
     # session, which proves nothing about the rule.
     assert_eq(save_rate_limited(s), 1, "a save moments after the last is rate-limited");
-    store64(s + SS_LAST_SAVE_MS, clock_now_ms() - SAVE_MIN_INTERVAL_MS - 1);
+    # 1 rather than clock_now_ms() - interval - 1: clock_now_ms() is monotonic
+    # (ms since boot), so on a host up for under a second that arithmetic goes
+    # NEGATIVE and this stops testing what it says it tests. 1 is a valid,
+    # long-past timestamp on every host and is not the never-saved sentinel.
+    store64(s + SS_LAST_SAVE_MS, 1);
     assert_eq(save_rate_limited(s), 0, "once the window passes it is allowed again");
     # A session that has never saved must never be blocked.
     var fresh = _mk_sess("Fresh", 5);
@@ -2288,17 +2292,23 @@ fn test_tick_schedule(): i64 {
     # process, without needing a genuinely slow tick to manufacture it. The old
     # code rescheduled off `now` and would answer one bare interval (2500);
     # rescheduling off a fresh sample must land past the real clock.
+    #
+    # A 1 ms cadence, deliberately, not the real 2500: with a 2500 ms interval
+    # this only discriminates once the HOST has been up 2.5 s, which is the same
+    # uptime assumption that made save-meter pass here and fail on CI. At 1 ms
+    # the boundary is crossed on any machine that has been running at all.
     obs_init();                        # the drift ring; only cmd_serve calls this
     var saved_tick = g_tick_count;
     var saved_head = g_session_head;
     g_session_head = 0;                # sweep_idle / advance_tick walk this
     var before = clock_now_ms();
-    var nt = tick_step(0, 0, 0, 2500);
+    var nt = tick_step(0, 0, 0, 1);
     assert(nt > before, "the new deadline is in the future, not one interval past a stale sample");
-    assert(nt > 2500, "specifically: not the 2500 the pre-work sample would have produced");
+    assert_eq(tick_reschedule(0, 0, 1), 1, "the stale-sample answer would have been 1 ms");
+    assert(nt > 1, "and the real one is not that");
     # It is the FIRST such boundary, not an arbitrary jump — the snap must not
     # overshoot either, or the cadence stretches.
-    assert(nt - clock_now_ms() <= 2500, "and it is the first boundary past it, not a skipped-ahead one");
+    assert(nt - clock_now_ms() <= 1, "and it is the first boundary past it, not a skipped-ahead one");
     g_session_head = saved_head;
     assert_eq(g_tick_count, saved_tick + 1, "tick_step fired exactly one tick");
 
@@ -2528,35 +2538,47 @@ fn test_tx_compaction(): i64 {
 fn test_save_meter(): i64 {
     test_group("save-meter");
 
-    var now = clock_now_ms();
+    # Every clock value here is SYNTHETIC. The first version of this group used
+    # clock_now_ms() as `now`, which passed on a long-running desktop and failed
+    # on CI — because clock_now_ms() is CLOCK_MONOTONIC, milliseconds since
+    # BOOT, and a fresh runner has been up for less than the five-minute
+    # interval. The test was measuring the host's uptime. Synthetic values pin
+    # the rule instead, and they cover the small-uptime case on purpose.
+    var uptime = 1000;                 # a host that booted one second ago
+    var settled = 4000000;             # and one that has been up for over an hour
 
-    # --- The eligibility rule. Two gates, and they are different gates from the
-    # `save` VERB's rate limit — collapsing the two would turn a five-minute
-    # autosave into a per-second storm.
     var s = _mk_sess("Meter", 5);
     store64(s + SS_SAVE_DIRTY, 0);
     store64(s + SS_LAST_SAVE_MS, 0);
-    assert_eq(save_sweep_due(s, now), 0, "a clean session is never due");
+    assert_eq(save_sweep_due(s, settled), 0, "a clean session is never due");
+    assert_eq(save_sweep_due(s, uptime), 0, "not even on a freshly-booted host");
 
     store64(s + SS_SAVE_DIRTY, 1);
-    assert_eq(save_sweep_due(s, now), 1,
+    assert_eq(save_sweep_due(s, settled), 1,
               "a dirty session that has never saved is due immediately");
+    # THE regression. SS_LAST_SAVE_MS == 0 is a sentinel, not a timestamp to do
+    # arithmetic on: `now - 0 >= SAVE_SWEEP_MIN_MS` is a statement about how long
+    # the MACHINE has been up. Relying on it meant every character created in the
+    # first five minutes of uptime silently skipped the autosave.
+    assert_eq(save_sweep_due(s, uptime), 1,
+              "and still due when the host booted a second ago");
+    assert_eq(save_sweep_due(s, 0), 1, "the never-saved sentinel does not depend on the clock at all");
 
-    store64(s + SS_LAST_SAVE_MS, now);
-    assert_eq(save_sweep_due(s, now), 0, "one that just saved is not due again");
-    assert_eq(save_sweep_due(s, now + SAVE_SWEEP_MIN_MS - 1), 0, "nor one millisecond early");
-    assert_eq(save_sweep_due(s, now + SAVE_SWEEP_MIN_MS), 1, "and it is due on the interval");
+    store64(s + SS_LAST_SAVE_MS, settled);
+    assert_eq(save_sweep_due(s, settled), 0, "one that just saved is not due again");
+    assert_eq(save_sweep_due(s, settled + SAVE_SWEEP_MIN_MS - 1), 0, "nor one millisecond early");
+    assert_eq(save_sweep_due(s, settled + SAVE_SWEEP_MIN_MS), 1, "and it is due on the interval");
 
     # The two intervals must stay distinct: SAVE_MIN_INTERVAL_MS is the anti-burst
     # gate on the `save` verb, SAVE_SWEEP_MIN_MS is the autosave cadence.
     assert(SAVE_SWEEP_MIN_MS > SAVE_MIN_INTERVAL_MS,
            "the sweep cadence is not the verb's rate limit");
-    store64(s + SS_LAST_SAVE_MS, now - SAVE_MIN_INTERVAL_MS - 1);
-    assert_eq(save_rate_limited(s), 0, "the verb would allow a save here");
-    assert_eq(save_sweep_due(s, now), 0, "but the sweep still will not");
+    store64(s + SS_LAST_SAVE_MS, settled);
+    assert_eq(save_sweep_due(s, settled + SAVE_MIN_INTERVAL_MS + 1), 0,
+              "the verb's interval is far too short to make the sweep fire");
 
     # --- The batch cap. This is the whole point: an unmetered sweep signed every
-    # dirty session in one tick — measured at 340.9 ms with 256 of them, 682% of
+    # dirty session in one tick — measured at 332 ms with 256 of them, 664% of
     # the ADR 0001 budget, in a single tick that @stats reported as 0 ms drift.
     #
     # Stand up more eligible sessions than the cap and count how many the sweep
@@ -2569,7 +2591,7 @@ fn test_save_meter(): i64 {
     while (i < n) {
         var t2 = _mk_sess("Batch", 5);
         store64(t2 + SS_SAVE_DIRTY, 1);
-        store64(t2 + SS_LAST_SAVE_MS, 0);   # long overdue
+        store64(t2 + SS_LAST_SAVE_MS, 0);   # never saved → eligible on any host
         store64(t2 + SS_AUTHED, 1);
         store64(t2 + SS_NEXT, g_session_head);
         g_session_head = t2;
@@ -2583,7 +2605,7 @@ fn test_save_meter(): i64 {
     var still_due = 0;
     var w = g_session_head;
     while (w != 0) {
-        if (save_sweep_due(w, clock_now_ms()) == 1) { still_due = still_due + 1; }
+        if (save_sweep_due(w, settled) == 1) { still_due = still_due + 1; }
         w = load64(w + SS_NEXT);
     }
     assert_eq(still_due, n - SAVE_BATCH_MAX, "the sessions it skipped are still due next tick");

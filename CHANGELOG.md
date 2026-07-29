@@ -134,6 +134,19 @@ had a fix that would have been worse than the bug — those are called out below
   as the 1.6.1 chain fix. Measured before and after: `_build_record` 248 → **0**
   B/call, whole `player_save` 1880 → **1632** B/call. The growth is reduced, not
   stopped, and should not be described as stopped.
+- **The never-saved sentinel is tested explicitly, not inferred from the clock.**
+  `save_sweep_due` first shipped relying on `now - 0` exceeding the five-minute
+  interval for a session that had never saved. That is a statement about how
+  long the *machine* has been up: `clock_now_ms()` is `CLOCK_MONOTONIC`,
+  milliseconds since **boot**, not since the epoch. On a freshly-booted host —
+  a reboot, or a CI runner — every character created in the first five minutes
+  of uptime would silently skip the autosave. `SS_LAST_SAVE_MS == 0` is now
+  tested outright, exactly as `save_rate_limited` directly above it always has.
+
+  Caught by CI, which is the only machine here with an uptime under five
+  minutes. The comment that had been written into the source asserted the
+  opposite and was simply wrong; `save_rate_limited`'s comment carried the same
+  bad reasoning (its *code* was right) and has been corrected too.
 - **Autosave gap under full occupancy.** The metered sweep drains 4 sessions per
   tick against an arrival rate of at most 2.13, so the backlog is stable and a
   session that loses a batch is strictly more overdue next tick — no starvation.
@@ -166,9 +179,15 @@ had a fix that would have been worse than the bug — those are called out below
 
 ### Testing
 
-- 500 → **570 assertions**; new groups `reset-bounds`, `tick-schedule`,
+- 500 → **573 assertions**; new groups `reset-bounds`, `tick-schedule`,
   `tick-coalescing`, `tx-compaction`, `save-meter`, `hex-identity`.
-- 24 mutations across the five fixes, each reverting one guard.
+- 25 mutations across the five fixes, each reverting one guard.
+- **The timing groups use synthetic clock values, not `clock_now_ms()`.** The
+  first version of `save-meter` read the real clock and was therefore measuring
+  the host's uptime — it passed on a long-running desktop and failed on CI. Two
+  further assertions carried the same assumption (a 2500 ms cadence needs 2.5 s
+  of uptime to discriminate; `clock_now_ms() - interval - 1` goes negative on a
+  fresh host) and were rewritten the same way.
 - `benches/bench_combat.bcyr` gains a 256-player co-located broadcast scenario —
   it measures 28.3 ms with the fix and **fails the budget at 81.4 ms without
   it**, so it is a real guard and not just a number. This also closes the "no
