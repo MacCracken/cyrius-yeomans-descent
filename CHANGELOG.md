@@ -4,6 +4,189 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.8] — 2026-07-28
+
+**Sweep batch C — resource & timing hygiene.** Five findings about what the
+server *costs* rather than what it gets wrong. Nothing here is reachable as an
+attack; all of it is waste, drift, or an unbounded appetite. Two of the five
+turned out to be materially different from how the sweep filed them, and one
+had a fix that would have been worse than the bug — those are called out below.
+
+### Fixed
+
+- **Room broadcasts cost O(engaged × room population) `write(2)` calls.**
+  `room_combat_line`, `room_broadcast` and `room_say_broadcast` each walked the
+  session list and flushed every recipient *inside* the loop, so a tick with E
+  engaged players co-located in one room issued 2E² − E writes. Measured on the
+  bench at **81.4 ms p99 for 256 players — 163% of the entire ADR 0001 50 ms
+  drift budget in a single tick**, flushing to `/dev/null`, the cheapest sink
+  there is.
+
+  The write is now deferred: broadcasts mark `SS_TX_DIRTY` and
+  `flush_dirty_sessions` writes each session once, as the last statement of
+  `advance_tick`. That takes the tick from 2E² − E writes to E.
+
+  | co-located players | before | after |
+  |---|---|---|
+  | 32  | 1.31 ms | 0.53 ms |
+  | 128 | 20.1 ms | 7.0 ms |
+  | 256 | 81.4 ms (**over budget**) | 28.3 ms |
+
+  Only the *write* moved — never the append. That distinction is what makes this
+  legal on a frozen wire surface: per-client byte order is decided entirely by
+  append order and a stream socket has no segment semantics, so deferring the
+  syscall cannot reorder anything. Deferring the *append* would have been a real
+  bug: `mob_died` broadcasts and then frees the instance into a freelist class
+  the next spawn re-issues, so a queue holding `mi_name_ptr(m)` would resolve to
+  a live, different mob.
+- **…and the obvious version of that fix silently truncates output.** Worth
+  stating on its own, because the sweep's suggested remedy — "append during the
+  tick, flush each dirty session once at the end" — does exactly this. `TX_CAP`
+  is 4096, `session_appendtx` truncates at it, and it reports the short write
+  only through a return value that none of its ~200 callers read. A whole tick's
+  coalesced prose overflows that cap at **36** co-located combatants; at 128,
+  every session pins at `TX_CAP` and most lose their own damage line, condition
+  line and prompt. The player hurt worst is the one last in the walk, because it
+  accumulates everybody else's third-person lines before its own prose is
+  appended.
+
+  So coalescing ships with a capacity valve. `session_tx_reserve` writes out
+  what is queued when the next append would come near the cap: in the ordinary
+  case — a handful of players in a room — it never fires, and in the
+  pathological case the session degrades to roughly the old per-line flushing
+  instead of dropping bytes on the floor. That is what makes the fix safe at any
+  population rather than at the one that happened to get measured.
+- **A partial drain left dead space at the front of the tx buffer.**
+  `session_drain` stored the offset and returned, so bytes already written to
+  the socket went on occupying the buffer until a *complete* drain reset it —
+  and `session_appendtx` measures its room as `TX_CAP - SS_TX_LEN`, with no idea
+  the front is dead. A backpressured client therefore hit the cap early and lost
+  prose silently. Pre-existing, but coalescing would have turned it from rare
+  into routine. The remainder is now compacted to offset 0.
+- **The autosave sweep saved every dirty session in one tick.** `save_sweep` ran
+  every 300 s and signed the lot inline: measured **41 ms at 32 dirty sessions
+  and 332 ms at `MAX_SESSIONS`=256** — 664% of the drift budget, and 13% of the
+  entire 2.5 s tick interval, gone in one pass.
+
+  It went unnoticed for a reason worth writing down: the tick schedule is
+  absolute, so a sub-interval overrun is absorbed by the next `epoll_wait`
+  timeout and `@stats` reports **0 ms drift straight through it**. The tick was
+  not late. It was simply gone for a third of a second, and nothing in the
+  server could see that.
+
+  The cost is 89% `ed25519_sign` (1.30 ms per save, measured) and only ~5% file
+  I/O, so batching writes is not the lever — doing fewer *signs* per tick is.
+  `save_sweep` now runs every tick and saves at most `SAVE_BATCH_MAX` = 4
+  sessions (5.2 ms worst case), with the 5-minute cadence moved from the sweep
+  to the session via `save_sweep_due`. Per-session behaviour is unchanged; the
+  burst is gone.
+- **`reset_secs` had no floor and an unchecked `× 1000`.** Authored in the zone
+  *file*, not just the `YD_RESET_SECS` operator knob. An authored `0`, a
+  negative, or a value large enough to wrap `parse_uint` (which accumulates
+  `v * 10 + d` with no overflow check) all drove `interval_ms` to zero or
+  negative, making the elapsed-window test false forever — a reset attempt on
+  every tick. `clamp_reset_secs` now bounds it at both sources and at the point
+  of use.
+
+  Note the interaction: **1.6.7 opened one of those doors.** Teaching `toml_int`
+  to read a sign made an authored `reset_secs = -1` reach the interval, where
+  before it fell back to the default. This clamp is the other half of that
+  change.
+
+### Changed
+
+- **The tick reschedules off a clock sampled *after* the tick, not before.** The
+  snap-forward exists for exactly one situation — the tick body ran long, we
+  blew past a boundary, and we must not then fire a burst of catch-up ticks —
+  and it read a pre-work sample, so in the one case it was written for it
+  under-snapped by one interval and fired the doubled tick it exists to prevent.
+  Self-limiting (the next pass recovers), so one extra tick per overrun, not a
+  pile-up. Split into `tick_step` / `tick_reschedule` so both event loops share
+  one implementation instead of drifting apart, and so the arithmetic is
+  reachable from a test at all.
+
+  **The drift metric is deliberately unchanged, and that matters.** The sweep
+  filed this as "a long tick mis-measures its own drift", which invites moving
+  the single sample after the work. That would be actively harmful:
+  `record_tick_drift(now - next_tick)` on a *pre*-work sample is scheduling
+  lateness, which is what the ADR 0001 budget is about and what `@stats` prints
+  (a frozen field, ADR 0007 §41). It would also double-count, since an
+  overrunning tick already surfaces as the next tick's lateness. There is a test
+  asserting the metric does *not* absorb tick duration, specifically to fail
+  anyone who "fixes" it that way.
+- **`_build_record` allocates nothing.** It called `hex_encode` three times —
+  salt, pubkey, signature — and that function allocates its output from the bump
+  allocator, which has no `free` at all. Measured at **248 bytes per save,
+  permanently, on a five-minute cadence**. `_hex_at` now writes hex straight
+  into the record.
+
+  Byte-identity was the whole risk here: these bytes sit inside the signed
+  prefix, so a single character of divergence would make every record already on
+  disk fail its own Ed25519 check at the owner's next login — they would be told
+  the record was tampered with, and the character would be gone. `_hex_at` is a
+  separate function precisely so a test can assert it agrees with
+  `lib/sigil_hex.cyr` byte-for-byte rather than relying on anyone rereading the
+  constants.
+
+  **Scope honesty: this is 248 of 1880 bytes per save (13%).** The remaining
+  1632 B/save is inside libro's `chain_append` / `filestore_append`, which
+  `CLAUDE.md` forbids modifying — that needs an upstream release, the same shape
+  as the 1.6.1 chain fix. Measured before and after: `_build_record` 248 → **0**
+  B/call, whole `player_save` 1880 → **1632** B/call. The growth is reduced, not
+  stopped, and should not be described as stopped.
+- **Autosave gap under full occupancy.** The metered sweep drains 4 sessions per
+  tick against an arrival rate of at most 2.13, so the backlog is stable and a
+  session that loses a batch is strictly more overdue next tick — no starvation.
+  The one slow case is a synchronised cohort: all 256 becoming eligible on the
+  same tick puts the last one 64 ticks (160 s) late, so the worst-case
+  per-session gap widens from 300 s to ~460 s. This costs nothing on a clean
+  disconnect (`drop_session` saves unconditionally) and only shows up on a hard
+  crash, but it is a real cadence change rather than a pure optimisation.
+- **Packetization, not byte order.** A client that used to receive its prompt in
+  its own `write(2)` now receives it batched with the rest of the tick. Byte
+  order is identical and every broadcast line still opens with `\r\n`, so a line
+  landing after a prompt still starts on a fresh row. No conformant Telnet
+  client cares, but it is the one observable difference and it belongs here
+  rather than being discovered later.
+
+### Not done, deliberately
+
+- **No cross-tick save cursor.** The sweep proposed one. A full 256-session scan
+  running the complete predicate measures 950 ns — 1/1400th of a single save —
+  so a cursor optimises something already free, and buys a session pointer held
+  across ticks in exchange. `SS_SIZE` lands in a freelist class that `fl_free`
+  does not zero and the next `accept` re-issues, which is the exact shape of
+  use-after-free that H1 and M12-C already exist to prevent. Metering the saves
+  gets the same result with no pointer.
+- **`parse_uint` still wraps silently.** It has no overflow check, so an absurd
+  authored literal still lands on an arbitrary in-range value. The `reset_secs`
+  clamp makes that value *harmless*, not *correct*. Fixing it properly affects
+  every `toml_int` caller — class stats, save fields, zone fields — which is a
+  wider change than a patch release should carry. Recorded as a follow-up.
+
+### Testing
+
+- 500 → **570 assertions**; new groups `reset-bounds`, `tick-schedule`,
+  `tick-coalescing`, `tx-compaction`, `save-meter`, `hex-identity`.
+- 24 mutations across the five fixes, each reverting one guard.
+- `benches/bench_combat.bcyr` gains a 256-player co-located broadcast scenario —
+  it measures 28.3 ms with the fix and **fails the budget at 81.4 ms without
+  it**, so it is a real guard and not just a number. This also closes the "no
+  bench touches room broadcasts" gap the roadmap had filed under 1.6.9.
+
+**Two testing notes worth carrying.** First, three of the coalescing mutations
+initially failed to fail, and all three were test gaps rather than dead guards —
+the sharpest being that `combat_flush`'s dirty mark is invisible at 64 players,
+because every session is already marked by *somebody else's* broadcast. Only a
+**solo** combatant can see it, which is also the most common case in an actual
+MUD. Second, and worse: the mutation that makes `_hex_at` emit uppercase — the
+one that would destroy every save on disk — **passed a test whose comment
+claimed it covered "every byte value"**. It built a 256-byte probe and then only
+ever encoded the first 64 bytes, so the high nibble never reached 10 and the
+`a`-`f` branch was never executed. A test that claims coverage it does not have
+is worse than no test, and the only thing that surfaced it was mutating the
+constant and watching nothing happen.
+
 ## [1.6.7] — 2026-07-28
 
 **Sweep batch B — content + parser correctness.** Four findings where the game

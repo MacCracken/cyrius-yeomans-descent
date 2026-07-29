@@ -76,10 +76,14 @@ fn combat_try_hit(atk_hit, def_ac): i64 {
     return 0;
 }
 
-# Flush a session's combat prose without dropping it on error (the tick
-# never frees sessions — see file header).
+# Queue a session's combat prose for the end-of-tick write (H15, 1.6.8).
+#
+# This used to be a write(2) per combatant per round. It is now a flag: the
+# session is written once by flush_dirty_sessions at the end of advance_tick.
+# Still non-dropping — the tick never frees sessions (see the file header) —
+# because nothing here touches the socket at all any more.
 fn combat_flush(s): i64 {
-    flush_session(g_epfd, s);
+    session_mark_dirty(s);   # forward ref → server.cyr
     return 0;
 }
 

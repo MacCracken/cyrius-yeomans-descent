@@ -133,12 +133,54 @@ var g_save_interval_ticks = 0;
 # Persist every authed session that has changed since its last save. Walks
 # the active list defensively (player_save never unlinks, but mirror the
 # idle-sweep pattern). Queued by the tick — never inline in a command path.
+# === H16 (1.6.8) — meter the autosave, don't fire it all at once. ===
+#
+# This used to run once every 300 s and save EVERY dirty session in one pass,
+# inline in the tick. Measured: 42.4 ms at 32 dirty sessions (85% of the ADR
+# 0001 50 ms budget) and 340.9 ms at MAX_SESSIONS=256 — 682% of budget, and 13.6%
+# of the whole 2.5 s interval, in a single tick.
+#
+# It ran unnoticed because the schedule is absolute: a sub-interval overrun is
+# absorbed by the next epoll_wait timeout and `@stats` reports 0 ms drift
+# straight through it. The tick was not late; it was simply gone for a third of
+# a second, and nothing in the server could see that.
+#
+# The cost is 89% ed25519_sign (1.178 ms of 1.322 ms per save) and only ~5% file
+# I/O, so batching writes is not the lever — doing fewer SIGNS per tick is the
+# only lever. Hence: run every tick, save at most SAVE_BATCH_MAX sessions, and
+# move the cadence from the sweep to the session (save_sweep_due). Per-session
+# behaviour is unchanged at 5 minutes; the burst is gone.
+#
+# Deliberately NOT a cross-tick cursor, which is what the finding proposed. The
+# full 256-session scan with the complete predicate measures 950 ns — 1/1400th
+# of one save — so a cursor optimises something already free, and buys a
+# session pointer held across ticks in exchange. SS_SIZE lands in a freelist
+# class that fl_free does not zero and the next accept re-issues, so a cursor
+# would be the exact shape of use-after-free that H1 and M12-C already exist to
+# prevent. Not worth it for 950 ns.
+#
+# Throughput check, because "a cap" is only safe if the queue drains: sessions
+# become eligible at most MAX_SESSIONS per SAVE_SWEEP_MIN_MS = 2.13 per tick
+# against a drain rate of 4, so ~53% utilisation and the backlog is stable. Head
+# bias cannot starve the tail either — a session that loses a batch is strictly
+# more overdue on the next tick. The only slow case is a synchronised cohort:
+# all 256 eligible on one tick puts the last one 64 ticks (160 s) late.
+enum SaveSweepConst {
+    SAVE_BATCH_MAX = 4;   # 4 x 1.32 ms = 5.3 ms worst case, 10.6% of the budget
+}
+# Autosave whichever sessions are due, up to SAVE_BATCH_MAX of them. Returns how
+# many were written. Called every tick; the cadence lives on the session, in
+# save_sweep_due. See the block above for the throughput argument.
 fn save_sweep(): i64 {
+    var now = clock_now_ms();
+    var budget = SAVE_BATCH_MAX;
+    var saved = 0;
     var s = g_session_head;
     while (s != 0) {
+        if (budget == 0) { return saved; }
         var nxt = load64(s + SS_NEXT);
         if (load64(s + SS_AUTHED) == 1) {
-            if (load64(s + SS_SAVE_DIRTY) == 1) {
+            if (save_sweep_due(s, now) == 1) {
                 # H10 (1.6.5) — a discarded failure here is silent data loss on
                 # a five-minute cadence. The player is still connected and has no
                 # idea; the audit chain is the only durable record.
@@ -146,11 +188,13 @@ fn save_sweep(): i64 {
                     audit_event(SEV_WARNING, "save.fail.sweep",
                     load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
                 }
+                budget = budget - 1;
+                saved = saved + 1;
             }
         }
         s = nxt;
     }
-    return 0;
+    return saved;
 }
 
 # === M7 — zone resets ====================================================
@@ -347,8 +391,15 @@ fn zone_reset_log(mobs, objs): i64 {
 # the reset fires on the first empty tick after the window passes.
 fn maybe_zone_reset(): i64 {
     if (world_room_count() == 0) { return 0; }
-    var interval_ms = g_zone_reset_secs * 1000;
-    if (g_reset_secs_override > 0) { interval_ms = g_reset_secs_override * 1000; }
+    # H13 — both operands are clamped at their source (clamp_reset_secs), so the
+    # * 1000 cannot overflow and the interval cannot be <= 0. Re-clamped here
+    # rather than trusted: this is the only line where the multiply happens, and
+    # a future third writer of either global would otherwise reintroduce it
+    # silently.
+    var interval_ms = clamp_reset_secs(g_zone_reset_secs) * 1000;
+    if (g_reset_secs_override > 0) {
+        interval_ms = clamp_reset_secs(g_reset_secs_override) * 1000;
+    }
     var now = clock_now_ms();
     if (now - g_zone_last_reset_ms < interval_ms) { return 0; }   # window not elapsed
     if (zone_has_player() == 1) { return 0; }                     # M7-B defer
@@ -366,9 +417,10 @@ fn maybe_zone_reset(): i64 {
 fn advance_tick(): i64 {
     g_tick_count = g_tick_count + 1;
     combat_tick_all();   # resolve a combat round for every engaged session
-    if (g_save_interval_ticks > 0) {
-        if (g_tick_count % g_save_interval_ticks == 0) { save_sweep(); }
-    }
+    # H16 — every tick now; save_sweep meters itself and save_sweep_due carries
+    # the 5-minute per-session cadence. The enable flag stays exactly as it was,
+    # so "0 disables it" (no zone loaded, tests) is unchanged.
+    if (g_save_interval_ticks > 0) { save_sweep(); }
     # H6 — put the listener back once the backoff window has passed. If the fd
     # pressure has not eased, the next real error simply disarms it again; the
     # cost is one wasted accept per window instead of a pinned core.
@@ -377,7 +429,55 @@ fn advance_tick(): i64 {
     mob_tick_all(g_tick_count);   # M13 — every living mob takes a turn
     corpse_decay_sweep();   # M12-A — age out corpses and reclaim them
     maybe_zone_reset();  # M7 — respawn mobs/loot when the zone empties out
+    flush_dirty_sessions();   # H15 — one write per session, not one per line
     return 0;
+}
+
+# === H15 (1.6.8) — coalesce the tick's writes. ===
+#
+# Every room broadcast used to walk the session list and issue a write(2) per
+# recipient per LINE. For E engaged players co-located in one room that is
+# 2E^2 - E writes in a single tick — measured at 20.1 ms for E=128 and 78.2 ms
+# for E=256, the latter being 156% of the whole ADR 0001 50 ms drift budget,
+# flushing to /dev/null (the cheapest sink there is) and not even counting
+# mob_tick_all, drain_pending_rx or save_sweep.
+#
+# The append is untouched; only the WRITE moves. That distinction is the reason
+# this is legal on a frozen wire surface: per-client byte order is decided
+# entirely by append order, and a stream socket has no segment semantics, so
+# deferring the syscall cannot reorder anything. What does change is
+# packetization — a client that used to receive its prompt in its own write now
+# receives it batched with the rest of the tick. No conformant Telnet client
+# cares, but it is the one observable difference.
+#
+# Deferring the APPEND would be a different and much worse idea: mob_died
+# broadcasts and then frees the instance into a freelist class the next spawn
+# re-issues, so anything holding mi_name_ptr(m) past the call (a pointer queue,
+# an iovec list) would resolve to a live *different* mob. session_appendtx
+# memcpy's the bytes, which is what makes deferring the write safe.
+fn session_mark_dirty(s): i64 {
+    store64(s + SS_TX_DIRTY, 1);
+    return 0;
+}
+
+# Write out every session the tick touched, once each. Called as the LAST
+# statement of advance_tick — deliberately inside it rather than after it in
+# tick_step, because sweep_idle runs next and drop_session frees the tx buffer
+# without draining: an idle-reaped session would otherwise lose a whole tick of
+# prose rather than at most a line.
+fn flush_dirty_sessions(): i64 {
+    var s = g_session_head;
+    var flushed = 0;
+    while (s != 0) {
+        var nxt = load64(s + SS_NEXT);   # flush_session is non-dropping, but keep the walk uniform
+        if (load64(s + SS_TX_DIRTY) == 1) {
+            store64(s + SS_TX_DIRTY, 0);
+            flush_session(g_epfd, s);
+            flushed = flushed + 1;
+        }
+        s = nxt;
+    }
+    return flushed;
 }
 
 # Sessions-currently-connected counter (M1-H observability hook).
@@ -496,6 +596,52 @@ fn sweep_idle(epfd, now_ms): i64 {
     return 0;
 }
 
+# === H14 (1.6.8) — the tick schedule reads a clock from before the tick. ===
+#
+# The snap-forward exists for exactly one situation: the tick body ran long, we
+# blew past a boundary, and we must NOT then fire a burst of catch-up ticks. It
+# read a clock sampled *before* the tick body — so in the one case it was written
+# for, it under-snaps by one interval and fires the doubled tick it exists to
+# prevent. Self-limiting (the next pass samples correctly and recovers), so it is
+# one extra tick per overrun, not a pile-up.
+#
+# Note carefully what is NOT wrong here. The drift metric is correct as written:
+# `record_tick_drift(now - next_tick)` on a PRE-work sample is scheduling
+# lateness, which is what the ADR 0001 budget is about and what `@stats` prints.
+# Folding the tick's own execution time into it would make the metric worse and
+# change a frozen `@stats` field (ADR 0007 §41) — and it would double-count,
+# because a tick that overruns already surfaces as the *next* tick's lateness.
+# So: a second sample, used only for the reschedule. The first one stays.
+#
+# Split out of the loops rather than patched in place because the loop body sits
+# behind a socket and a signalfd and is unreachable from any test harness — and
+# because there are TWO loops (epoll and the agnos poll loop), which is how they
+# would drift apart. One implementation, both callers.
+
+# Advance `next_tick` by whole intervals until it is strictly after `now_after`.
+# Pure, and total: a deadline that has NOT passed is returned unchanged, so the
+# caller cannot skip a beat by asking twice. (An unconditional +1 interval before
+# the loop would do exactly that, and is redundant besides — the loop alone
+# already lands on the first future boundary in every case a caller can reach.)
+fn tick_reschedule(next_tick, now_after, tick_ms): i64 {
+    if (tick_ms <= 0) { return next_tick; }   # no cadence to advance
+    while (next_tick <= now_after) { next_tick = next_tick + tick_ms; }
+    return next_tick;
+}
+
+# Fire one tick and return the next deadline. `now` is the pre-work sample the
+# caller already took to decide the deadline had passed; the post-work sample is
+# taken HERE, which is the whole point — a caller cannot pass a stale one.
+fn tick_step(epfd, next_tick, now, tick_ms): i64 {
+    record_tick_drift(now - next_tick);   # lateness, measured before the work
+    advance_tick();
+    # Deliberately still the pre-work sample: shifting the idle-reap boundary by
+    # the tick's duration would reap a marginal session a pass early, and the
+    # timeout is five minutes. Gratuitous churn in a patch release.
+    sweep_idle(epfd, now);
+    return tick_reschedule(next_tick, clock_now_ms(), tick_ms);
+}
+
 # === Observability (M1-H). =================================================
 #
 # A small set of counters the `@stats` admin verb surfaces (and that
@@ -519,6 +665,11 @@ fn obs_init(): i64 {
 # Record one tick's scheduling drift (how late the tick fired vs its
 # absolute deadline). Negative is clamped to 0 (early is never late).
 fn record_tick_drift(drift_ms): i64 {
+    # H14 (1.6.8) — the ring is allocated by obs_init, which only cmd_serve
+    # calls. Anything else that drives a tick (a bench, a test) reached a null
+    # store here and faulted. One comparison per tick buys the whole tick path a
+    # harness; it is not reachable in the server, where obs_init runs at boot.
+    if (g_tick_drift_ring == 0) { return 0; }
     if (drift_ms < 0) { drift_ms = 0; }
     store64(g_tick_drift_ring + g_tick_drift_idx * 8, drift_ms);
     g_tick_drift_idx = (g_tick_drift_idx + 1) % DRIFT_RING_CAP;
@@ -692,12 +843,13 @@ fn room_combat_line(room_idx, except_s, subj_p, subj_l, mid, obj_p, obj_l, tail)
         if (t != except_s) {
             if (load64(t + SS_PHASE) == PHASE_CMD) {
                 if (load64(t + SS_ROOM) == room_idx) {
+                    session_tx_reserve(t, subj_l + obj_l + 256);   # H15 valve
                     session_appendtx_cstr(t, "\r\n");
                     session_appendtx(t, subj_p, subj_l);
                     session_appendtx_cstr(t, mid);
                     if (obj_l > 0) { session_appendtx(t, obj_p, obj_l); }
                     session_appendtx_cstr(t, tail);
-                    flush_session(g_epfd, t);
+                    session_mark_dirty(t);   # H15 — written once, at end of tick
                 }
             }
         }
@@ -740,12 +892,13 @@ fn room_broadcast(room_idx, except_s, mover_s, a, b, c): i64 {
         if (t != except_s) {
             if (load64(t + SS_PHASE) == PHASE_CMD) {
                 if (load64(t + SS_ROOM) == room_idx) {
+                    session_tx_reserve(t, name_len + 256);   # H15 valve
                     session_appendtx_cstr(t, "\r\n");
                     session_appendtx_prose(t, name_buf, name_len);   # M10-C name
                     session_appendtx_cstr(t, a);
                     session_appendtx_cstr(t, b);
                     session_appendtx_cstr(t, c);
-                    flush_session(g_epfd, t);   # non-dropping (see deliver_to)
+                    session_mark_dirty(t);   # H15 — written once, at end of tick
                 }
             }
         }
@@ -792,12 +945,14 @@ fn room_say_broadcast(room_idx, except_s, speaker_s, lead, body, body_len, tail)
         if (t != except_s) {
             if (load64(t + SS_PHASE) == PHASE_CMD) {
                 if (load64(t + SS_ROOM) == room_idx) {
+                    # M10-B/C escape to at most 4 bytes per input byte.
+                    session_tx_reserve(t, name_len * 4 + body_len * 4 + 256);   # H15 valve
                     session_appendtx_cstr(t, "\r\n");
                     session_appendtx_prose(t, name_buf, name_len);   # M10-C name
                     session_appendtx_cstr(t, lead);
                     session_appendtx_prose(t, body, body_len);   # M10-B
                     session_appendtx_cstr(t, tail);
-                    flush_session(g_epfd, t);   # non-dropping (see deliver_to)
+                    session_mark_dirty(t);   # H15 — written once, at end of tick
                 }
             }
         }
@@ -941,8 +1096,10 @@ fn apply_idle_env(): i64 {
     }
     var rv = getenv("YD_RESET_SECS");   # M7 — fast zone resets for testing
     if (rv != 0) {
+        # H13 (1.6.8) — the `rs > 0` test already stopped 0 and negatives, but
+        # nothing bounded the top end, and this value is multiplied by 1000 too.
         var rs = atoi(rv);
-        if (rs > 0) { g_reset_secs_override = rs; }
+        if (rs > 0) { g_reset_secs_override = clamp_reset_secs(rs); }
     }
     var ad = getenv("YD_ADMIN");        # 0.9.1 — enable the @-admin namespace
     if (ad != 0) {
@@ -1090,11 +1247,7 @@ fn cmd_serve(port): i64 {
         # boundary so we don't fire a burst of catch-up ticks.
         now = clock_now_ms();
         if (now >= next_tick) {
-            record_tick_drift(now - next_tick);
-            advance_tick();
-            sweep_idle(epfd, now);
-            next_tick = next_tick + g_tick_ms;
-            while (next_tick <= now) { next_tick = next_tick + g_tick_ms; }
+            next_tick = tick_step(epfd, next_tick, now, g_tick_ms);   # H14
         }
     }
     sys_close(epfd);
@@ -1124,11 +1277,7 @@ fn cmd_serve(port): i64 {
         }
         var now = clock_now_ms();
         if (now >= next_tick) {
-            record_tick_drift(now - next_tick);
-            advance_tick();
-            sweep_idle(0, now);
-            next_tick = next_tick + g_tick_ms;
-            while (next_tick <= now) { next_tick = next_tick + g_tick_ms; }
+            next_tick = tick_step(0, next_tick, now, g_tick_ms);   # H14
         }
         sys_sleep_ms(20);
     }

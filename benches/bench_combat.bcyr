@@ -38,6 +38,94 @@ enum LoadConst {
     NMOBS    = 64;
     NTICKS   = 120;     # 5 min / 2.5 s
     BUDGET_NS = 50000000;   # 50 ms p99 drift budget
+    # H15 (1.6.8) — the co-located broadcast scenario.
+    #
+    # Room broadcasts are quadratic in room population: every engaged player's
+    # prose is written to every other player in the room, and until 1.6.8 each
+    # of those lines was its own write(2). The 32-player case above never showed
+    # it — 1.3 ms, comfortably inside budget — because the quadratic term only
+    # dominates further out. At 128 it was 20.1 ms and at MAX_SESSIONS it was
+    # 78.2 ms, i.e. 156% of the entire drift budget in a single tick, and no
+    # bench in the tree measured it.
+    #
+    # MAX_SESSIONS is the honest ceiling to bench at: it is the population the
+    # server will actually accept.
+    BIGPLAYERS = 256;
+    BIGTICKS   = 30;
+}
+
+# One load scenario: `np` players and `np` mobs co-located in room 0, ticked
+# `nticks` times. Returns p99 tick cost in ns.
+#
+# The timed region is combat_tick_all PLUS flush_dirty_sessions, which is what
+# advance_tick actually does since H15 — timing only combat_tick_all would move
+# the writes outside the measurement and report a win that is not real.
+fn run_load(tpl, devnull, np, nticks, samples): i64 {
+    var mobs = alloc(np * 8);
+    var i = 0;
+    while (i < np) { store64(mobs + i * 8, mob_spawn(tpl, 0)); i = i + 1; }
+
+    var sess = alloc(np * 8);
+    i = 0;
+    while (i < np) {
+        var s = session_new(devnull, 0);
+        store64(s + SS_PHASE, PHASE_CMD);
+        store64(s + SS_ROOM, 0);
+        store64(s + SS_NAME_LEN, 7);
+        memcpy(load64(s + SS_NAME_BUF), "loadbot", 7);
+        var m = load64(mobs + i * 8);
+        store64(s + SS_TARGET, m);
+        mi_set_target(m, s);
+        session_list_push(s);
+        store64(sess + i * 8, s);
+        i = i + 1;
+    }
+
+    var t = 0;
+    while (t < nticks) {
+        var t0 = clock_now_ns();
+        combat_tick_all();
+        flush_dirty_sessions();
+        var t1 = clock_now_ns();
+        store64(samples + t * 8, t1 - t0);
+        var j = 0;
+        while (j < np) {
+            var s2 = load64(sess + j * 8);
+            store64(s2 + SS_HP, load64(s2 + SS_MAXHP));
+            store64(s2 + SS_TX_LEN, 0);
+            store64(s2 + SS_TX_OFF, 0);
+            mi_set_hp(load64(mobs + j * 8), mt_hp(tpl));
+            j = j + 1;
+        }
+        t = t + 1;
+    }
+
+    # Insertion-sort for the p99.
+    var a = 1;
+    while (a < nticks) {
+        var key = load64(samples + a * 8);
+        var b = a - 1;
+        while (b >= 0) {
+            if (load64(samples + b * 8) <= key) { break; }
+            store64(samples + (b + 1) * 8, load64(samples + b * 8));
+            b = b - 1;
+        }
+        store64(samples + (b + 1) * 8, key);
+        a = a + 1;
+    }
+    var idx = (nticks * 99) / 100;
+    if (idx >= nticks) { idx = nticks - 1; }
+
+    # Tear the scenario down so the next one starts from an empty world.
+    i = 0;
+    while (i < np) {
+        var s3 = load64(sess + i * 8);
+        store64(s3 + SS_TARGET, 0);
+        session_list_remove(s3);
+        mob_remove(load64(mobs + i * 8));
+        i = i + 1;
+    }
+    return load64(samples + idx * 8);
 }
 
 fn main(): i64 {
@@ -136,6 +224,26 @@ fn main(): i64 {
     print("  budget:   ", 12); print_num(BUDGET_NS / 1000000); print(" ms p99", 7); println("");
 
     if (p99 >= BUDGET_NS) { println("  RESULT: FAIL (p99 over budget)"); return 1; }
+    println("  RESULT: PASS");
+
+    # --- H15: the same room at MAX_SESSIONS, where the quadratic term bites.
+    var j = 0;
+    while (j < NPLAYERS) {
+        var s4 = load64(sess + j * 8);
+        store64(s4 + SS_TARGET, 0);
+        session_list_remove(s4);
+        j = j + 1;
+    }
+    j = 0;
+    while (j < NMOBS) { mob_remove(load64(mobs + j * 8)); j = j + 1; }
+
+    var big = alloc(BIGTICKS * 8);
+    var bp99 = run_load(tpl, devnull, BIGPLAYERS, BIGTICKS, big);
+    print("broadcast load: ", 16); print_num(BIGPLAYERS);
+    println(" players co-located in one room");
+    print("  p99 tick: ", 12); print_num(bp99 / 1000); print(" us", 3); println("");
+    print("  budget:   ", 12); print_num(BUDGET_NS / 1000000); print(" ms p99", 7); println("");
+    if (bp99 >= BUDGET_NS) { println("  RESULT: FAIL (p99 over budget)"); return 1; }
     println("  RESULT: PASS");
     return 0;
 }

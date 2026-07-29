@@ -52,7 +52,7 @@ MUD rather than a well-built room-crawler.
 | **1.6.5** | Loaders publish only on success · `player_save` failures no longer silent | ✅ 2026-07-28 |
 | **1.6.6** | Sweep batch A — state integrity | ✅ 2026-07-28 |
 | **1.6.7** | Sweep batch B — content + parser correctness | ✅ 2026-07-28 |
-| **1.6.8** | Sweep batch C — resource & timing hygiene | planned |
+| **1.6.8** | Sweep batch C — resource & timing hygiene | ✅ 2026-07-28 |
 | **1.6.9** | Sweep batch D — coverage + docs, then close the sweep | planned |
 | **2.0.0** | M14 — ADR 0008 + save schema v2 · M15 — zone registry + entry cap · M16 — XP, levels, death cost | planned |
 | **2.1.0** | M17 — equipment slots + item modifiers · M18 — operator identity + control channel | planned |
@@ -91,8 +91,8 @@ embarrassing the release.
 ## Sweep backlog — the remaining 1.6.x batches
 
 The 1.6.0 audit produced 56 findings; 44 survived adversarial verification.
-Twenty-two are closed across 1.6.0–1.6.5, and batches A and B close nine more.
-**Nine remain**, grouped below into
+Twenty-two are closed across 1.6.0–1.6.5, and batches A, B and C close fourteen
+more. **Four remain** — all of them batch D — grouped below into
 four batches by the kind of work rather than by severity, so each release has one
 coherent theme and one coherent test story.
 
@@ -137,32 +137,57 @@ load today, and the zone-file format is frozen by ADR 0007 §5 for all of 1.x �
 strictness needs a format version to hang off. **Folded into M14 / ADR 0008**
 below, not into a later 1.6.x batch.
 
-### 1.6.8 — Batch C: resource & timing hygiene
+### 1.6.8 — Batch C: resource & timing hygiene ✅ shipped
 
-Measured costs and clock handling. Nothing here is reachable as an attack; all of
-it is waste or drift.
+All five landed; see the 1.6.8 CHANGELOG entry for the measured numbers. Two of
+the five were materially different from how they were filed, and one had a
+proposed fix that would have been worse than the bug — recorded here because the
+same mistakes are available to anyone reading the original wording.
 
-- **Room broadcasts are O(engaged × room population) in `write(2)` syscalls** —
-  `room_combat_line` walks the session list per line and flushes each recipient
-  immediately. Coalesce: append during the tick, flush each dirty session once at
-  the end. Measured at 18.8 ms for 128 co-located players.
-- **`save_sweep` runs inline in the tick** and measured 50.5 ms with 32 dirty
-  sessions — 101% of the entire ADR 0001 drift budget in one tick. Smear it with
-  a cursor, a few sessions per tick.
-- **Every `player_save` leaks ~1.9 kB of bump arena** (hex encodes and `Str`
-  headers that `alloc` never reclaims). Same allocator-level root cause recorded
-  in libro 2.8.4.
-- **Tick snap-forward compares against a pre-`advance_tick` clock sample**, so a
-  long tick mis-measures its own drift.
-- **`reset_secs` has no floor and an unchecked `× 1000`**, so a small or hostile
-  authored value can overflow or reset continuously.
+- **Room broadcasts were quadratic in `write(2)`** — 81.4 ms p99 at 256
+  co-located players, 163% of the ADR 0001 budget in one tick. Coalesced to one
+  write per session per tick: 28.3 ms. **But** the fix as originally worded
+  ("flush each dirty session once at the end") silently truncates output at 36
+  co-located players, because `TX_CAP` is 4096 and `session_appendtx` drops the
+  overflow without telling anyone. Shipped with a capacity valve, plus a
+  compaction fix for partial drains.
+- **`save_sweep` saved every dirty session in one tick** — 332 ms at
+  `MAX_SESSIONS`. Metered to 4 saves/tick with the cadence moved onto the
+  session. **No cursor**: the full scan costs 950 ns, so a cursor optimises
+  nothing and buys a cross-tick session pointer into non-zeroed freelist memory.
+- **The per-save bump leak** is 248 B of descent's own and 1632 B of libro's.
+  Descent's share is now zero. **The rest needs a libro release** — see below.
+- **The tick snap-forward read a stale clock.** Fixed. **It is a SCHEDULE bug,
+  not a measurement bug** — the drift metric was already correct, and the
+  "obvious" fix of moving the clock sample after the tick would corrupt a frozen
+  `@stats` field. There is now a test that fails anyone who tries it.
+- **`reset_secs` had no floor and an unchecked `× 1000`.** Clamped. 1.6.7's
+  signed-`toml_int` change had opened a new path into it.
+
+**Carried forward:**
+
+- **`parse_uint` wraps silently** (no overflow check on `v * 10 + d`). The
+  `reset_secs` clamp makes a wrapped value harmless but not correct, and a
+  proper fix touches every `toml_int` caller — class stats, save fields, zone
+  fields. Too wide for a patch; folded into **M14-D** alongside the strict-field
+  work already carried there from batch B.
+- **~1632 B of bump arena per save, upstream in libro.** `filestore_append`
+  rebuilds a `str_builder` from scratch on every append (~1.35 kB of it), and
+  `hasher_new` / `sha256_init` never `fl_free`. Needs a libro 2.8.5, the same
+  shape as the 1.6.1 `chain_new_streaming` fix. Not a 1.6.9 blocker — it is
+  bounded growth in an append-only audit path, not a correctness bug — but it
+  should be filed upstream before the sweep is declared closed.
 
 ### 1.6.9 — Batch D: coverage, then close the sweep
 
 - **Close the benchmark and soak blind spots this sweep exposed** — the existing
-  benches cover the combat tick and the telnet parser and nothing else. No bench
-  touches the login path, the save path, room broadcasts or the loaders, which is
-  why items in Batch C went unmeasured for so long.
+  benches cover the combat tick and the telnet parser and nothing else, which is
+  why items in Batch C went unmeasured for so long. **Room broadcasts are now
+  covered** — 1.6.8 added a 256-player co-located scenario to
+  `bench_combat.bcyr`, verified to fail the budget without the fix. Still
+  uncovered: the **login path**, the **save path** (a `bench_save` reporting
+  bytes/save via `alloc_used()` alongside ns/op would make the libro-side leak
+  visible at the audit gate instead of in a soak) and the **loaders**.
 - **Documentation sweep** (CLAUDE.md Process step 6 requires it anyway): reconcile
   `state.md`'s source-layout section, the stale M4 bench figure, and the comments
   this sweep found contradicting their code.
@@ -613,7 +638,7 @@ which the server never has, so **migration is lazy-at-login and additive only.**
 - **M14-A — ADR 0008.** Supersede 0007. Enumerate the new frozen-for-2.x surface: verb table, `@`-namespace, schema 2 field set, wire behaviour, zone format (with its own `format` stamp), env knobs. Record the no-offline-migration constraint as the reason schema 2 is designed to be the last bump of the line.
 - **M14-B — Schema 2.** Bump `SCHEMA_VERSION`; `v >= 2` reads the v2 path, else v1. Every v2 field is read-with-default so a v1 record upgrades silently on the next successful login. Unknown keys are ignored, never fatal.
 - **M14-C — Signed-integer support.** ✅ **Pulled forward into 1.6.7** (batch B). `toml_int` accepts a leading `-`; the writer already emitted one. Additive and behaviour-preserving for every value that parsed before, so it did not need to wait for the contract change. M16/M17 can assume signed fields read back.
-- **M14-D — Zone format stamp, and strict field parsing.** A `format` key in the zone header plus a `WL_ERR_FORMAT`, so zone authors get a real error instead of a misparse when the format moves again. **This is also where `toml_int` gets to be strict** — carried forward from 1.6.7 batch B, which fixed the signed gap but deliberately left the lenient fallback in place: a typo'd field still reads as "absent" and silently takes the default. Rejecting it would reject zone files that load today, and ADR 0007 §5 freezes the zone format for all of 1.x, so strictness has nothing to hang off until the format carries a version. Once it does: an unparseable value under `format >= 2` is a load error, and under an absent/`1` stamp it keeps the 1.x fallback.
+- **M14-D — Zone format stamp, strict field parsing, and integer-overflow rejection.** A `format` key in the zone header plus a `WL_ERR_FORMAT`, so zone authors get a real error instead of a misparse when the format moves again. **This is also where `toml_int` gets to be strict** — carried forward from 1.6.7 batch B, which fixed the signed gap but deliberately left the lenient fallback in place: a typo'd field still reads as "absent" and silently takes the default. Rejecting it would reject zone files that load today, and ADR 0007 §5 freezes the zone format for all of 1.x, so strictness has nothing to hang off until the format carries a version. Once it does: an unparseable value under `format >= 2` is a load error, and under an absent/`1` stamp it keeps the 1.x fallback. **Also carried here from 1.6.8 batch C:** `parse_uint` accumulates `v * 10 + d` with no overflow check, so an absurd authored literal wraps to an arbitrary value rather than being rejected. Every `toml_int` caller is affected — class stats, save fields, zone fields — which is why it did not land in a patch release.
 - **M14-E — `validate` argv verb.** Offline zone/save validation, outside the command surface. Also the natural home for an authored-prose 0xFF check (M10's gate covers player bytes, not authored files).
 
 **Gate:** a 1.2.0 save loads, upgrades to schema 2 on login, and round-trips; a schema-3 record is refused with the "newer server" message; ADR 0008 is Accepted and 0007 marked Superseded.

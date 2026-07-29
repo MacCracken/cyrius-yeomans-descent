@@ -1,0 +1,13 @@
+zone = "rfix"
+name = "H13 fixture — degenerate reset cadence"
+start = "rfix.start"
+reset_secs = -1
+[[entries]]
+kind = "room"
+id = "rfix.start"
+title = "Reset Probe"
+---
+A room whose zone header authors reset_secs = -1. Before 1.6.8 that produced a
+negative interval, which made the elapsed-window test false forever and fired a
+zone reset on every tick. Reachable from 1.6.7 onward, when toml_int learned to
+read a sign; an authored 0 reached the same place all the way back at M7-A.

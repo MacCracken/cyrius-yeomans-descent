@@ -413,6 +413,63 @@ fn _fint(off, key, n): i64 {
     return off;
 }
 
+# === H17 (1.6.8) — hex straight into the record, allocating nothing. ===
+#
+# `hex_encode` (lib/sigil_hex.cyr) allocates its output with `alloc()`, the bump
+# allocator that has no free at all. _build_record called it three times — salt,
+# pubkey, signature — so every single save handed out 248 bytes that could never
+# come back, on a five-minute autosave cadence, forever. Not the whole of the
+# ~2.2 kB/save leak (most of it is inside libro's filestore_append and needs an
+# upstream release, exactly like the 1.6.1 chain fix), but it is descent's share
+# of it, and it goes to zero rather than getting smaller.
+#
+# Options (a) "pass an fl_alloc'd buffer" and (b) "pass a static buffer" both
+# fail on the same fact: hex_encode allocates INTERNALLY and there is no
+# `hex_encode_into` to thread a destination through. lib/ must not be modified.
+# Since a local hex loop has to be written either way, write it straight into
+# the record and skip the intermediate buffer entirely.
+#
+# BYTE-IDENTITY IS THE WHOLE GAME. These bytes are inside the signed prefix. If
+# this encoder disagrees with lib/sigil_hex.cyr by one character — uppercase, a
+# different pad, a changed separator — every existing save record fails Ed25519
+# verification on its owner's next login, the player is told their record was
+# tampered with, and a false SEV_SECURITY entry is written. Silent, total,
+# irreversible character loss across the whole playerbase. So `_hex_at` is a
+# separate function specifically so a test can assert it agrees with hex_encode
+# byte-for-byte over a range of inputs, rather than relying on anyone rereading
+# the constants: see the `hex-identity` group.
+#
+# Nothing encoded here is secret — the salt is stored in cleartext, the pubkey
+# is public by definition, and the signature is public — so no wipe is needed.
+# The secret key at blk + IDENT_SK is never an argument to this.
+
+# Write `n` bytes as lowercase hex into g_persist_save at `off`. Returns the new
+# offset, or SAVE_ERR if it would not fit. Same 48/87 constants as sigil_hex.
+fn _hex_at(off, ptr, n): i64 {
+    if (_sv_bad(off) == 1) { return off; }
+    if (off + n * 2 > SAVE_CAP) { return SAVE_ERR; }
+    var i = 0;
+    while (i < n) {
+        var b = load8(ptr + i) & 0xFF;
+        var hi = (b >> 4) & 0xF;
+        var lo = b & 0xF;
+        if (hi < 10) { store8(g_persist_save + off, 48 + hi); }
+        else         { store8(g_persist_save + off, 87 + hi); }
+        if (lo < 10) { store8(g_persist_save + off + 1, 48 + lo); }
+        else         { store8(g_persist_save + off + 1, 87 + lo); }
+        off = off + 2;
+        i = i + 1;
+    }
+    return off;
+}
+# `key = "<hex>"` — the same framing _fstr emits, so the record is unchanged.
+fn _fhex(off, key, ptr, n): i64 {
+    off = _ac(off, key);
+    off = _ac(off, " = \"");
+    off = _hex_at(off, ptr, n);
+    return _ac(off, "\"\n");
+}
+
 # Serialize the session into g_persist_save and append the Ed25519 record
 # signature (signed over the prefix). Returns total length, or -1 on overflow.
 fn _build_record(s): i64 {
@@ -421,8 +478,8 @@ fn _build_record(s): i64 {
     off = _ac(off, "[player]\n");
     off = _fint(off, "schema", SCHEMA_VERSION);   # 0.9.1 migration hook
     off = _fstr(off, "name", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
-    off = _fstr(off, "salt",   hex_encode(blk, SALT_LEN), SALT_LEN * 2);
-    off = _fstr(off, "pubkey", hex_encode(blk + IDENT_PK, PK_LEN), PK_LEN * 2);
+    off = _fhex(off, "salt",   blk, SALT_LEN);                    # H17 — no alloc
+    off = _fhex(off, "pubkey", blk + IDENT_PK, PK_LEN);           # H17 — no alloc
     off = _fint(off, "class", load64(s + SS_CLASS));
     var room = load64(s + SS_ROOM);
     if (room >= 0) {
@@ -472,7 +529,7 @@ fn _build_record(s): i64 {
     # sign the prefix [0, off) with the session's (re-derived) secret key
     var sig = g_persist_dec;
     ed25519_sign(blk + IDENT_SK, g_persist_save, off, sig);
-    off = _fstr(off, "sig", hex_encode(sig, SIG_LEN), SIG_LEN * 2);
+    off = _fhex(off, "sig", sig, SIG_LEN);                        # H17 — no alloc
     if (_sv_bad(off) == 1) { return 0 - 1; }
     return off;
 }

@@ -77,6 +77,53 @@ var g_zone_id    = 0;   # str: machine zone id (space-free, for log tokens)
 var g_zone_reset_secs   = 900;
 var g_zone_last_reset_ms = 0;
 
+# H13 (1.6.8) — bound the authored cadence.
+#
+# `reset_secs` is read from the ZONE FILE, not just the YD_RESET_SECS operator
+# knob, so it is authored data and gets treated as such. It fed an unchecked
+# `secs * 1000` and three separate values drove the interval negative or zero,
+# each of which makes `now - g_zone_last_reset_ms < interval_ms` false forever —
+# a reset attempt on EVERY tick:
+#
+#   - `reset_secs = 0`. Reachable since M7-A; 0 is not "disabled", it is "always".
+#   - `reset_secs = -1`. Newly reachable in 1.6.7, which taught `toml_int` to
+#     read a sign. Before that a negative fell back to the default, so the sign
+#     fix opened this door and this clamp is the other half of it.
+#   - A value large enough to wrap. `parse_uint` accumulates `v * 10 + d` with no
+#     overflow check, so ~20 digits lands anywhere, including negative — and even
+#     a surviving huge positive overflows the `* 1000`.
+#
+# `maybe_zone_reset` defers while any player is in the zone, so the damage is
+# confined to an EMPTY server: a `zone_reset_log` line every tick, forever,
+# which is unbounded stdout and log growth on an idle box. Not an attack — the
+# zone file is operator-authored — but it is a typo away and silent.
+#
+# Clamping rather than rejecting is deliberate: ADR 0007 §5 freezes the zone
+# format for 1.x, and refusing to load a zone that loads today is exactly the
+# compatibility break that section exists to prevent. The clamp is also what
+# makes `* 1000` provably safe — RESET_SECS_MAX * 1000 is 86.4 million, nowhere
+# near an i64.
+# The bounds are deliberately as WIDE as they can be while still being safe.
+# The point is to reject degenerate and wrapped values, not to impose a house
+# style on cadence: a weekly (604800) or monthly reset is a perfectly ordinary
+# thing to author, and a clamp that quietly rewrote one would be the very
+# compatibility break ADR 0007 §5 exists to prevent. So the floor is the
+# smallest value that is unambiguously a cadence rather than a typo, and the
+# ceiling is a year — five orders of magnitude below where `* 1000` could
+# overflow, and past anything a human writes on purpose.
+enum ResetBounds {
+    RESET_SECS_MIN = 1;
+    RESET_SECS_MAX = 31536000;    # one year; * 1000 = 3.15e13, nowhere near i64
+}
+# The authored reset cadence, bounded into a range where `* 1000` is safe and
+# the elapsed-window test cannot be degenerate. See the block above for why the
+# bounds are this wide.
+fn clamp_reset_secs(v): i64 {
+    if (v < RESET_SECS_MIN) { return RESET_SECS_MIN; }
+    if (v > RESET_SECS_MAX) { return RESET_SECS_MAX; }
+    return v;
+}
+
 # Room at index i (no bounds check — callers hold valid indices).
 fn room_at(i): i64 { return g_rooms + i * RM_SIZE; }
 # Rooms loaded; 0 until world_load_rooms succeeds — look / move / fight all
@@ -254,7 +301,9 @@ fn world_load_rooms(path): i64 {
         g_zone_name = toml_get(fpairs, "name");
         g_zone_id   = toml_get(fpairs, "zone");
         start_id = toml_get(fpairs, "start");
-        g_zone_reset_secs = toml_int(fpairs, "reset_secs", 900);   # M7-A
+        # H13 — clamped; an authored 0 / negative / wrapped value would
+        # otherwise reset the zone on every tick. See clamp_reset_secs.
+        g_zone_reset_secs = clamp_reset_secs(toml_int(fpairs, "reset_secs", 900));   # M7-A
     }
 
     # H9 (1.6.5) — build into the global, but publish the COUNT only on the

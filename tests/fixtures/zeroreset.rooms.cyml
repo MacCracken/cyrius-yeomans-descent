@@ -1,0 +1,12 @@
+zone = "zfix"
+name = "H13 fixture — zero reset cadence"
+start = "zfix.start"
+reset_secs = 0
+[[entries]]
+kind = "room"
+id = "zfix.start"
+title = "Zero Probe"
+---
+A room whose zone header authors reset_secs = 0. Zero is not "disabled" — it made
+the elapsed-window test false forever, exactly like a negative. This path has been
+reachable since M7-A.

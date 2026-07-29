@@ -3,14 +3,52 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-28 (v1.6.7 — sweep batches A–B shipped; C–D remain)
+> **Last refresh**: 2026-07-28 (v1.6.8 — sweep batches A–C shipped; D remains)
 >
 > Note: this file was not refreshed across the 1.1.x line (1.1.0 – 1.1.5). Those
 > releases are recorded in [`CHANGELOG.md`](../../CHANGELOG.md) only; the entries
 > below jump 1.0.1 → 1.2.0. Everything outside the Version log (toolchain, deps,
-> tests, boot guide) describes the **current** 1.6.7 tree.
+> tests, boot guide) describes the **current** 1.6.8 tree.
 
 ## Version
+
+**1.6.8** — sweep batch C, resource + timing hygiene, 2026-07-28. **570
+assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
+
+- **Room broadcasts were quadratic in `write(2)`** — 2E² − E per tick for E
+  co-located engaged players, measured at **81.4 ms p99 at 256 players, 163% of
+  the ADR 0001 budget in a single tick**. Now one write per session per tick:
+  **28.3 ms**. 128 players went 20.1 → 7.0 ms, 32 went 1.31 → 0.53 ms.
+- **The obvious version of that fix silently truncates.** `TX_CAP` is 4096 and
+  `session_appendtx` drops the overflow through a return value nobody reads, so
+  a whole tick's coalesced prose overflows at **36** co-located players. Shipped
+  with a capacity valve plus a partial-drain compaction; only the *write* was
+  ever deferred, never the append.
+- **`save_sweep` signed every dirty session in one tick** — 41 ms at 32, **332 ms
+  at 256**. Invisible to `@stats`, because the schedule is absolute and a
+  sub-interval overrun is absorbed by the next `epoll_wait` timeout: the tick was
+  not late, it was gone for a third of a second. Metered to 4 saves/tick.
+- **The tick snap-forward read a pre-tick clock** — a schedule bug, not the
+  measurement bug it was filed as. The drift metric was already right, and
+  "fixing" it the filed way would corrupt a frozen `@stats` field; there is a
+  test that fails anyone who tries.
+- **`_build_record` leaked 248 B of bump arena per save.** Now zero.
+- **`reset_secs` had no floor and an unchecked `× 1000`** — clamped. 1.6.7's
+  signed-`toml_int` change had opened a fresh path into it.
+
+**Two residuals, both recorded on the roadmap rather than closed:** `parse_uint`
+still wraps silently (folded into M14-D), and **~1632 B/save of bump arena is
+inside libro** — `filestore_append` rebuilds a `str_builder` per append — which
+needs an upstream 2.8.5, the same shape as the 1.6.1 chain fix. The per-save
+growth is reduced, not stopped.
+
+**Testing note worth carrying:** the mutation that makes the new hex encoder emit
+uppercase — which would make every save record on disk fail its own signature —
+**passed a test whose comment claimed it covered "every byte value"**. The probe
+held all 256 values but only ever encoded the first 64, so the high nibble never
+reached 10 and the `a`-`f` branch never ran. A test that claims coverage it does
+not have is worse than no test; only mutating the constant and watching nothing
+happen surfaced it.
 
 **1.6.7** — sweep batch B, content + parser correctness, 2026-07-28. **500
 assertions**; `cyrius audit` exits 0; `--agnos` warning-free.
@@ -74,8 +112,8 @@ mutation that fails to fail is a signal about the test, not the code.
   kept the old pubkey. Now checked, with a rollback of the live ident block, and
   the rest audit their failures.
 
-**Next: the sweep is not finished.** Nine findings remain, batched into
-**1.6.8–1.6.9** (resource & timing → coverage + docs). See [`roadmap.md`](roadmap.md#sweep-backlog--the-remaining-16x-batches).
+**Next: the sweep is not finished.** Four findings remain, all in **1.6.9**
+(bench/soak coverage, a docs sweep, and re-running the sweep itself). See [`roadmap.md`](roadmap.md#sweep-backlog--the-remaining-16x-batches).
 **2.0 / M14 does not start until 1.6.9 lands** and a re-run sweep produces no
 critical or high findings.
 
@@ -446,7 +484,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **500** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **570** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,

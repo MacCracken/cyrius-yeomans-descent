@@ -2193,6 +2193,533 @@ fn test_item_verbs(): i64 {
     return 0;
 }
 
+# === H13 (1.6.8) — the zone reset cadence is bounded. ===
+fn test_reset_bounds(): i64 {
+    test_group("reset-bounds");
+
+    # The clamp itself. RESET_SECS_MIN exists because a reset cannot usefully be
+    # cheaper than the tick it rides on; RESET_SECS_MAX exists so the * 1000 in
+    # maybe_zone_reset provably cannot overflow.
+    assert_eq(clamp_reset_secs(900), 900, "an ordinary cadence passes through");
+    assert_eq(clamp_reset_secs(RESET_SECS_MIN), RESET_SECS_MIN, "the floor itself passes");
+    assert_eq(clamp_reset_secs(RESET_SECS_MAX), RESET_SECS_MAX, "the ceiling itself passes");
+    assert_eq(clamp_reset_secs(0), RESET_SECS_MIN, "zero is not 'disabled' — it is clamped");
+    assert_eq(clamp_reset_secs(0 - 1), RESET_SECS_MIN, "a negative is clamped");
+    assert_eq(clamp_reset_secs(RESET_SECS_MAX + 1), RESET_SECS_MAX, "past the ceiling is clamped");
+    # The bounds must not touch a cadence anyone would actually author. A clamp
+    # that rewrote a weekly reset would be exactly the ADR 0007 §5 break the
+    # clamp is trying to avoid causing.
+    assert_eq(clamp_reset_secs(600), 600, "a ten-minute cadence is untouched");
+    assert_eq(clamp_reset_secs(604800), 604800, "and so is a weekly one");
+
+    # The point of the ceiling: the interval multiply stays positive. An
+    # unclamped wrapped value went NEGATIVE here, and a negative interval makes
+    # `now - last < interval` false forever — a reset on every tick.
+    assert(clamp_reset_secs(RESET_SECS_MAX) * 1000 > 0, "the ms conversion cannot overflow");
+    assert(clamp_reset_secs(0 - 999999999999) * 1000 > 0, "nor can a wrapped negative");
+
+    # End to end through the real loader: an authored -1 must not reach the
+    # interval. Drive the actual zone parser, not a hand-built value — the whole
+    # bug was that the loader published what the file said.
+    var saved_secs = g_zone_reset_secs;
+    var saved_rooms = g_room_count;
+
+    assert_eq(world_load_rooms("tests/fixtures/badreset.rooms.cyml"), WL_OK,
+              "the negative-cadence fixture still loads (ADR 0007 §5 — no new rejections)");
+    assert_eq(g_zone_reset_secs, RESET_SECS_MIN,
+              "an authored reset_secs = -1 is clamped to the floor");
+
+    assert_eq(world_load_rooms("tests/fixtures/zeroreset.rooms.cyml"), WL_OK,
+              "the zero-cadence fixture still loads");
+    assert_eq(g_zone_reset_secs, RESET_SECS_MIN,
+              "an authored reset_secs = 0 is clamped to the floor");
+
+    # And an ordinary zone is untouched — the clamp must be invisible to every
+    # file that was already correct.
+    assert_eq(world_load_rooms(DP_ROOMS), WL_OK, "the real zone reloads");
+    assert_eq(g_zone_reset_secs, 900, "and its authored 900 survives unchanged");
+
+    # The second clamp site: maybe_zone_reset re-clamps rather than trusting the
+    # globals, because that is the only line where the multiply happens. Drive it
+    # with a poisoned global that bypasses the loader entirely — which is exactly
+    # what a future third writer of g_zone_reset_secs would do by accident.
+    var saved_head = g_session_head;
+    g_session_head = 0;                       # zone_has_player must not defer for us
+    var saved_last = g_zone_last_reset_ms;
+    g_zone_reset_secs = 0 - 1;                # the poisoned value
+    g_zone_last_reset_ms = clock_now_ms();
+    assert_eq(maybe_zone_reset(), 0,
+              "a negative cadence does not fire a reset on the very next tick");
+    g_zone_reset_secs = 0;
+    g_zone_last_reset_ms = clock_now_ms();
+    assert_eq(maybe_zone_reset(), 0, "and neither does a zero cadence");
+    g_zone_last_reset_ms = saved_last;
+    g_session_head = saved_head;
+
+    g_zone_reset_secs = saved_secs;
+    assert(g_room_count > 0, "the world is left loaded for the groups that follow");
+    return 0;
+}
+
+# === H14 (1.6.8) — the tick schedule advances off a POST-work clock. ===
+fn test_tick_schedule(): i64 {
+    test_group("tick-schedule");
+
+    # --- The arithmetic. tick_reschedule returns the first boundary strictly
+    # after now_after — "strictly" matters: an exactly-hit boundary is a deadline
+    # that has already arrived, not one to wait for.
+    assert_eq(tick_reschedule(2500, 2501, 2500), 5000, "an on-time tick advances one interval");
+    assert_eq(tick_reschedule(2500, 5000, 2500), 7500, "an exactly-hit boundary is not a future deadline");
+    assert_eq(tick_reschedule(2500, 5200, 2500), 7500, "a one-interval overrun skips the missed boundary");
+    assert_eq(tick_reschedule(0, 7500, 2500), 10000, "three missed boundaries collapse to one deadline");
+    assert_eq(tick_reschedule(50, 173, 50), 200, "and it holds in a fast-tick regime");
+    # Total, not just correct-on-the-happy-path: a deadline that has not passed is
+    # left alone. An unconditional +1 interval before the loop would skip a beat.
+    assert_eq(tick_reschedule(2500, 2400, 2500), 2500, "a deadline still in the future is untouched");
+    assert_eq(tick_reschedule(2500, 0, 2500), 2500, "and asking twice does not advance it");
+    # A zero or negative cadence would loop forever; there is no boundary to find.
+    assert_eq(tick_reschedule(2500, 9999, 0), 2500, "a zero cadence cannot advance");
+
+    # --- The call site. This is the assertion the bug actually fails.
+    #
+    # tick_step takes its POST-work sample itself, so no caller can hand it a
+    # stale one. Drive it with a pre-work `now` of 0 while the real clock is at
+    # its true value: that is a tick which "took" the entire uptime of the
+    # process, without needing a genuinely slow tick to manufacture it. The old
+    # code rescheduled off `now` and would answer one bare interval (2500);
+    # rescheduling off a fresh sample must land past the real clock.
+    obs_init();                        # the drift ring; only cmd_serve calls this
+    var saved_tick = g_tick_count;
+    var saved_head = g_session_head;
+    g_session_head = 0;                # sweep_idle / advance_tick walk this
+    var before = clock_now_ms();
+    var nt = tick_step(0, 0, 0, 2500);
+    assert(nt > before, "the new deadline is in the future, not one interval past a stale sample");
+    assert(nt > 2500, "specifically: not the 2500 the pre-work sample would have produced");
+    # It is the FIRST such boundary, not an arbitrary jump — the snap must not
+    # overshoot either, or the cadence stretches.
+    assert(nt - clock_now_ms() <= 2500, "and it is the first boundary past it, not a skipped-ahead one");
+    g_session_head = saved_head;
+    assert_eq(g_tick_count, saved_tick + 1, "tick_step fired exactly one tick");
+
+    # --- The metric must NOT absorb the tick's execution cost. This is the guard
+    # against the plausible-but-wrong fix: moving the single sample to after the
+    # work would turn `drift p99ms` in @stats from scheduling lateness into
+    # lateness-plus-tick-cost, changing a frozen field (ADR 0007 §41) and
+    # double-counting, since an overrun already shows up as the next tick's
+    # lateness. tick_step recorded `now - next_tick` = 0 - 0 = 0 above.
+    assert_eq(load64(g_tick_drift_ring + ((g_tick_drift_idx + DRIFT_RING_CAP - 1) % DRIFT_RING_CAP) * 8), 0,
+              "drift is the pre-work lateness (0 here), not the tick's duration");
+
+    return 0;
+}
+
+# Count non-overlapping occurrences of a cstr needle in buf[0..n).
+fn _count_occurrences(buf, n, needle): i64 {
+    var nl = strlen(needle);
+    if (nl <= 0) { return 0; }
+    var hits = 0;
+    var i = 0;
+    while (i + nl <= n) {
+        var k = 0;
+        var same = 1;
+        while (k < nl) {
+            if ((load8(buf + i + k) & 0xFF) != (load8(needle + k) & 0xFF)) { same = 0; k = nl; }
+            else { k = k + 1; }
+        }
+        if (same == 1) { hits = hits + 1; i = i + nl; }
+        else { i = i + 1; }
+    }
+    return hits;
+}
+
+# === H15 (1.6.8) — the tick's writes are coalesced, and nothing is lost. ===
+fn test_tick_coalescing(): i64 {
+    test_group("tick-coalescing");
+    if (g_room_count == 0)      { assert(0, "coalescing: needs a loaded world"); return 0; }
+    if (g_mob_tpl_count == 0)   { assert(0, "coalescing: needs a mob template"); return 0; }
+
+    # A real file as the sink, so the test can read back exactly what reached the
+    # socket. /dev/null would prove the writes happened but not what was in them,
+    # and the whole hazard here is bytes going missing.
+    var path = "/tmp/yd-coalesce-probe.txt";
+    var fd = syscall(2, path, 577, 420);   # open(O_WRONLY|O_CREAT|O_TRUNC, 0644)
+    assert(fd >= 0, "the probe sink opens");
+
+    var E = 64;                 # well past the 36-player overflow onset
+    var tpl = mt_at(0);
+    var saved_head = g_session_head;
+    var saved_epfd = g_epfd;
+    g_session_head = 0;
+    g_epfd = 0;
+
+    var sess = alloc(E * 8);
+    var mobs = alloc(E * 8);
+    var i = 0;
+    while (i < E) {
+        var m = mob_spawn(tpl, 0);
+        store64(mobs + i * 8, m);
+        var s = session_new(fd, 0);
+        store64(s + SS_PHASE, PHASE_CMD);
+        store64(s + SS_ROOM, 0);
+        store64(s + SS_NAME_LEN, 7);
+        memcpy(load64(s + SS_NAME_BUF), "loadbot", 7);
+        store64(s + SS_TARGET, m);
+        mi_set_target(m, s);
+        session_list_push(s);
+        store64(sess + i * 8, s);
+        i = i + 1;
+    }
+
+    # One tick, then the single end-of-tick write pass.
+    combat_tick_all();
+
+    # Before the flush: every session must still be UNDER the cap. This is the
+    # assertion the naive "just defer the flush" fix fails — at 64 co-located
+    # combatants each session accumulates ~2*(E-1) third-person lines, roughly
+    # 9 kB against a 4096-byte TX_CAP, and session_appendtx truncates silently
+    # (it reports the short write only through a return value nobody reads).
+    var pinned = 0;
+    i = 0;
+    while (i < E) {
+        if (load64(load64(sess + i * 8) + SS_TX_LEN) >= TX_CAP) { pinned = pinned + 1; }
+        i = i + 1;
+    }
+    assert_eq(pinned, 0, "no session is pinned at TX_CAP — the valve drained them in time");
+
+    var flushed = flush_dirty_sessions();
+    assert_eq(flushed, E, "every engaged session was written exactly once");
+    assert_eq(flush_dirty_sessions(), 0, "and the dirty flags are cleared, so a second pass is free");
+
+    # Now read back what actually reached the sink. Each engaged session emits
+    # exactly one condition line per round; if any were truncated away, the count
+    # comes up short. This is the user-visible property, asserted end to end.
+    i = 0;
+    while (i < E) {
+        var s = load64(sess + i * 8);
+        store64(s + SS_TARGET, 0);
+        mob_remove(load64(mobs + i * 8));
+        i = i + 1;
+    }
+    g_session_head = saved_head;
+    g_epfd = saved_epfd;
+    sys_close(fd);
+
+    var cap = 1048576;
+    var buf = alloc(cap);
+    var n = file_read_all(path, buf, cap);
+    assert(n > 0, "the sink captured the tick's output");
+    assert_eq(_count_occurrences(buf, n, "[ hp "), E,
+              "every session's own condition line survived the tick");
+
+    # --- The SOLO combatant, driven through the real advance_tick.
+    #
+    # Two things only this case can catch. First, a lone player in a room gets
+    # no broadcasts — nobody else is there to mark them dirty — so combat_flush's
+    # own mark is the only thing that ever writes their round out. With 64
+    # players every session is marked by somebody else's broadcast and the bug
+    # hides completely. Second, this drives advance_tick rather than calling
+    # combat_tick_all and the flush pass by hand, so it is the only assertion
+    # that proves the flush is actually WIRED INTO the tick.
+    var solo_path = "/tmp/yd-coalesce-solo.txt";
+    var sfd = syscall(2, solo_path, 577, 420);
+    assert(sfd >= 0, "the solo sink opens");
+    saved_head = g_session_head;
+    saved_epfd = g_epfd;
+    g_session_head = 0;
+    g_epfd = 0;
+
+    var lone_m = mob_spawn(tpl, 0);
+    var lone = session_new(sfd, 0);
+    store64(lone + SS_PHASE, PHASE_CMD);
+    store64(lone + SS_ROOM, 0);
+    store64(lone + SS_NAME_LEN, 4);
+    memcpy(load64(lone + SS_NAME_BUF), "Solo", 4);
+    store64(lone + SS_TARGET, lone_m);
+    mi_set_target(lone_m, lone);
+    session_list_push(lone);
+
+    advance_tick();
+
+    store64(lone + SS_TARGET, 0);
+    g_session_head = saved_head;
+    g_epfd = saved_epfd;
+    sys_close(sfd);
+
+    var sn = file_read_all(solo_path, buf, cap);
+    assert(sn > 0, "a solo combatant's round reaches the socket inside advance_tick");
+    assert_eq(_count_occurrences(buf, sn, "[ hp "), 1,
+              "with nobody else in the room to mark them dirty");
+    return 0;
+}
+
+# === H15 — a partial drain compacts, so the buffer does not silently shrink. ===
+fn test_tx_compaction(): i64 {
+    test_group("tx-compaction");
+
+    # Note on the setup: this constructs the post-partial-write state directly
+    # rather than provoking one, because on this box it CANNOT be provoked. A
+    # write of <= PIPE_BUF (4096) is atomic on both pipes and unix stream
+    # sockets, and TX_CAP is exactly 4096 — so session_drain's single write
+    # either completes or returns EAGAIN, and tx_off is never strictly between
+    # 0 and tx_len. Only a real TCP socket does short writes at this size, which
+    # is exactly what a slow player's client is. So: set the offset a TCP
+    # partial write would have left, then drive the real session_drain into
+    # EAGAIN against a full pipe and check what it does with that offset.
+    var fds[16];
+    if (syscall(293, &fds, 2048) != 0) { assert(0, "pipe2 for the backpressure probe"); return 0; }
+    var rfd = load32(&fds);
+    var wfd = load32(&fds + 4);
+
+    var junk = alloc(4096);
+    memset(junk, 65, 4096);
+    var filled = 0;
+    var guard = 0;
+    while (filled == 0) {
+        if (sys_write(wfd, junk, 4096) < 0) { filled = 1; }
+        guard = guard + 1;
+        if (guard > 4096) { filled = 1; }
+    }
+    assert(sys_write(wfd, junk, 16) < 0, "the pipe is full — every further write is EAGAIN");
+
+    var s = _mk_sess("Backpressure", 12);
+    store64(s + SS_FD, wfd);
+    var want = 2000;
+    var sent = 800;                # what a TCP short write would already have taken
+    var pat = alloc(want);
+    var i = 0;
+    while (i < want) { store8(pat + i, 97 + (i % 26)); i = i + 1; }
+    session_appendtx(s, pat, want);
+    assert_eq(load64(s + SS_TX_LEN), want, "the queue starts full");
+    store64(s + SS_TX_OFF, sent);
+
+    assert_eq(session_drain(s), 1, "the drain comes back short (EAGAIN), not complete");
+
+    var left = want - sent;
+    assert_eq(load64(s + SS_TX_LEN), left, "the queue is now just the unsent remainder");
+    assert_eq(load64(s + SS_TX_OFF), 0,
+              "a partial drain compacts to offset 0 instead of parking dead space at the front");
+    # Content, not just offsets: memcpy in the wrong direction would leave these
+    # lengths looking right and the bytes garbled.
+    var buf = load64(s + SS_TX_BUF);
+    assert_eq(load8(buf) & 0xFF, 97 + (sent % 26), "the remainder starts exactly where the write stopped");
+    assert_eq(load8(buf + left - 1) & 0xFF, 97 + ((want - 1) % 26), "and ends at the end of the queue");
+    var j = 0;
+    var intact = 1;
+    while (j < left) {
+        if ((load8(buf + j) & 0xFF) != (load8(pat + sent + j) & 0xFF)) { intact = 0; j = left; }
+        else { j = j + 1; }
+    }
+    assert_eq(intact, 1, "and every byte between is the tail of the original queue, in order");
+
+    # This is what the compaction buys. Without it the usable capacity is
+    # TX_CAP minus the dead prefix, and it shrinks monotonically while a slow
+    # client stays behind — which is precisely when the server is producing the
+    # most prose.
+    assert_eq(TX_CAP - load64(s + SS_TX_LEN), TX_CAP - left, "the full remaining capacity is usable again");
+    assert_eq(session_appendtx(s, "tail", 4), 4, "and there is room to append after it");
+
+    sys_close(wfd);
+    sys_close(rfd);
+    return 0;
+}
+
+# === H16 (1.6.8) — the autosave is metered, not fired all at once. ===
+fn test_save_meter(): i64 {
+    test_group("save-meter");
+
+    var now = clock_now_ms();
+
+    # --- The eligibility rule. Two gates, and they are different gates from the
+    # `save` VERB's rate limit — collapsing the two would turn a five-minute
+    # autosave into a per-second storm.
+    var s = _mk_sess("Meter", 5);
+    store64(s + SS_SAVE_DIRTY, 0);
+    store64(s + SS_LAST_SAVE_MS, 0);
+    assert_eq(save_sweep_due(s, now), 0, "a clean session is never due");
+
+    store64(s + SS_SAVE_DIRTY, 1);
+    assert_eq(save_sweep_due(s, now), 1,
+              "a dirty session that has never saved is due immediately");
+
+    store64(s + SS_LAST_SAVE_MS, now);
+    assert_eq(save_sweep_due(s, now), 0, "one that just saved is not due again");
+    assert_eq(save_sweep_due(s, now + SAVE_SWEEP_MIN_MS - 1), 0, "nor one millisecond early");
+    assert_eq(save_sweep_due(s, now + SAVE_SWEEP_MIN_MS), 1, "and it is due on the interval");
+
+    # The two intervals must stay distinct: SAVE_MIN_INTERVAL_MS is the anti-burst
+    # gate on the `save` verb, SAVE_SWEEP_MIN_MS is the autosave cadence.
+    assert(SAVE_SWEEP_MIN_MS > SAVE_MIN_INTERVAL_MS,
+           "the sweep cadence is not the verb's rate limit");
+    store64(s + SS_LAST_SAVE_MS, now - SAVE_MIN_INTERVAL_MS - 1);
+    assert_eq(save_rate_limited(s), 0, "the verb would allow a save here");
+    assert_eq(save_sweep_due(s, now), 0, "but the sweep still will not");
+
+    # --- The batch cap. This is the whole point: an unmetered sweep signed every
+    # dirty session in one tick — measured at 340.9 ms with 256 of them, 682% of
+    # the ADR 0001 budget, in a single tick that @stats reported as 0 ms drift.
+    #
+    # Stand up more eligible sessions than the cap and count how many the sweep
+    # actually takes. SS_AUTHED is left 0 so player_save returns without touching
+    # the filesystem — the cap is what is under test, not the writer.
+    var saved_head = g_session_head;
+    g_session_head = 0;
+    var n = SAVE_BATCH_MAX + 3;
+    var i = 0;
+    while (i < n) {
+        var t2 = _mk_sess("Batch", 5);
+        store64(t2 + SS_SAVE_DIRTY, 1);
+        store64(t2 + SS_LAST_SAVE_MS, 0);   # long overdue
+        store64(t2 + SS_AUTHED, 1);
+        store64(t2 + SS_NEXT, g_session_head);
+        g_session_head = t2;
+        i = i + 1;
+    }
+    assert_eq(save_sweep(), SAVE_BATCH_MAX,
+              "the sweep stops at the batch cap even with more sessions due");
+
+    # And it is a cap per tick, not a cap forever — the sessions it skipped are
+    # still due, so the backlog drains on following ticks rather than starving.
+    var still_due = 0;
+    var w = g_session_head;
+    while (w != 0) {
+        if (save_sweep_due(w, clock_now_ms()) == 1) { still_due = still_due + 1; }
+        w = load64(w + SS_NEXT);
+    }
+    assert_eq(still_due, n - SAVE_BATCH_MAX, "the sessions it skipped are still due next tick");
+
+    # --- The budget counts SAVES, not sessions VISITED. Walking past an
+    # ineligible session costs nothing (the whole 256-session scan measures
+    # 950 ns), so a session that is not due must not consume a slot — otherwise
+    # a handful of idle players at the head of the list would throttle the
+    # autosave for everyone behind them, which is precisely the starvation the
+    # cap is supposed to avoid.
+    g_session_head = 0;
+    i = 0;
+    while (i < SAVE_BATCH_MAX) {              # pushed first → these end up at the TAIL
+        var d = _mk_sess("Due", 3);
+        store64(d + SS_SAVE_DIRTY, 1);
+        store64(d + SS_LAST_SAVE_MS, 0);
+        store64(d + SS_AUTHED, 1);
+        store64(d + SS_NEXT, g_session_head);
+        g_session_head = d;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 3) {                            # pushed last → these sit at the HEAD
+        var c = _mk_sess("Idle", 4);
+        store64(c + SS_SAVE_DIRTY, 0);         # not due: nothing to write
+        store64(c + SS_AUTHED, 1);
+        store64(c + SS_NEXT, g_session_head);
+        g_session_head = c;
+        i = i + 1;
+    }
+    assert_eq(save_sweep(), SAVE_BATCH_MAX,
+              "sessions that are not due are walked past without spending budget");
+
+    g_session_head = saved_head;
+    return 0;
+}
+
+# === H17 (1.6.8) — the record encoder allocates nothing, and encodes the ===
+# === same bytes lib/sigil_hex.cyr does.                                  ===
+fn test_hex_identity(): i64 {
+    test_group("hex-identity");
+    persist_init();
+
+    # BYTE-IDENTITY FIRST. _hex_at writes into the SIGNED PREFIX of every save
+    # record. A single character of divergence from hex_encode — uppercase, a
+    # different digit base, an off-by-one — makes every record already on disk
+    # fail its own Ed25519 check at the owner's next login: they are told the
+    # record was tampered with, a false SEV_SECURITY entry is written, and the
+    # character is gone. So this is asserted directly against the library
+    # encoder rather than by rereading the constants.
+    var probe = alloc(256);
+    var i = 0;
+    while (i < 256) { store8(probe + i, i); i = i + 1; }     # every byte value
+
+    var lens = alloc(6 * 8);
+    store64(lens + 0,  1); store64(lens + 8,  2);  store64(lens + 16, 15);
+    store64(lens + 24, SALT_LEN); store64(lens + 32, PK_LEN); store64(lens + 40, SIG_LEN);
+    # Every length is encoded from SEVERAL start offsets. This is not padding:
+    # the real save lengths are all <= 64, so slicing only from offset 0 encodes
+    # bytes 0x00-0x3F and never produces a HIGH nibble >= 10 — the `a`-`f`
+    # branch for the high nibble is then never executed, and an encoder that
+    # emitted uppercase there would pass a test that claims to cover "every byte
+    # value". (It did. That is why these offsets are here.)
+    var offs = alloc(4 * 8);
+    store64(offs + 0, 0); store64(offs + 8, 100); store64(offs + 16, 160); store64(offs + 24, 192);
+    var li = 0;
+    var mismatches = 0;
+    var saw_high_nibble = 0;
+    while (li < 6) {
+        var n = load64(lens + li * 8);
+        var oi = 0;
+        while (oi < 4) {
+            var base = load64(offs + oi * 8);
+            if (base + n > 256) { base = 256 - n; }
+            var src = probe + base;
+            var j = 0;
+            while (j < n) {
+                if (((load8(src + j) & 0xFF) >> 4) >= 10) { saw_high_nibble = 1; }
+                j = j + 1;
+            }
+            var want = hex_encode(src, n);            # the library encoder
+            var end = _hex_at(0, src, n);             # ours, into g_persist_save
+            if (end != n * 2) { mismatches = mismatches + 1; }
+            var k = 0;
+            while (k < n * 2) {
+                if ((load8(g_persist_save + k) & 0xFF) != (load8(want + k) & 0xFF)) {
+                    mismatches = mismatches + 1;
+                    k = n * 2;
+                } else { k = k + 1; }
+            }
+            oi = oi + 1;
+        }
+        li = li + 1;
+    }
+    assert_eq(saw_high_nibble, 1, "the probe actually reaches bytes with a high nibble >= 10");
+    assert_eq(mismatches, 0, "_hex_at agrees with hex_encode byte-for-byte, over every byte value");
+
+    # Offset-preserving: it must return exactly where it stopped writing, or the
+    # signed prefix length is wrong even when the bytes are right.
+    assert_eq(_hex_at(7, probe, 4), 7 + 8, "it advances the offset by two per byte");
+    # And it inherits the M11-D overflow discipline rather than writing past the cap.
+    assert_eq(_sv_bad(_hex_at(SAVE_CAP - 3, probe, 32)), 1, "an overflowing encode poisons the offset");
+    assert_eq(_sv_bad(_hex_at(SAVE_ERR, probe, 4)), 1, "and an already-poisoned offset stays poisoned");
+
+    # THE LEAK ITSELF. _build_record used to hand out 248 bytes of bump arena
+    # per call — alloc() has no free, so that is permanent. A hard zero is the
+    # right assertion here: it is immune to libro or str.cyr drifting by a few
+    # bytes, which a "under N bytes" ceiling would not be.
+    var s = _mk_sess("HexHero", 7);
+    var hsalt = alloc(SALT_LEN);
+    var q = 0;
+    while (q < SALT_LEN) { store8(hsalt + q, 200 + q); q = q + 1; }
+    var hblk = sess_ident(s);
+    memcpy(hblk, hsalt, SALT_LEN);
+    ident_derive(hsalt, "hexpassphrase", 13, hblk + IDENT_SK, hblk + IDENT_PK);
+    store64(hblk + IDENT_CREATED, 999);
+    store64(s + SS_ROOM, 0 - 1);
+    store64(s + SS_HP, 20); store64(s + SS_MAXHP, 20);
+    store64(s + SS_AUTHED, 1);
+
+    var before = alloc_used();
+    var r = 0;
+    while (r < 20) { _build_record(s); r = r + 1; }
+    assert_eq(alloc_used() - before, 0, "_build_record allocates nothing at all");
+
+    # And the record it builds still verifies under its own signature — the
+    # assertion that says out loud that the bytes did not move. A wrong hex case
+    # passes the leak check above and fails this one; that is the point of
+    # having both.
+    assert_eq(player_save(s), 1, "the character saves");
+    var s2 = _mk_sess("HexHero", 7);
+    assert_eq(player_auth_load(s2, "hexpassphrase", 13), 1,
+              "and the record still verifies under its own signature");
+    return 0;
+}
+
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -2410,6 +2937,12 @@ fn main() {
     test_load_and_save_failure();
     test_state_integrity();
     test_item_verbs();
+    test_reset_bounds();
+    test_tick_schedule();
+    test_tick_coalescing();
+    test_tx_compaction();
+    test_save_meter();
+    test_hex_identity();
 
     return assert_summary();
 }
