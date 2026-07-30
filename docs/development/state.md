@@ -3,13 +3,43 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.7.6 — every tracked 1.6/1.7 item closed; the gate re-run decides whether the 1.x line closes)
+> **Last refresh**: 2026-07-29 (v1.7.6 + an uncommitted fix — the gate re-run returned **DO-NOT-CLOSE**; see roadmap items R-V)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+## Gate re-run — DO-NOT-CLOSE (2026-07-29)
+
+**The 1.x line does not close.** Four high findings survived adversarial
+refutation and were reproduced by the sweep's judge on the shipped tree; a fifth
+was found alongside and is already fixed but uncommitted. All five are in
+[`roadmap.md`](roadmap.md) as items **R-V** with reproductions.
+
+In one line each: `get` of a container ignores its contents (**199 held against a
+cap of 100 from one command; 130 items silently destroyed at 721**); four listing
+verbs still truncate mid-line with no prompt; **AGNOS saves never publish at all**
+because `syscall(82)`/`(87)` are GPU calls there; every login against an existing
+name leaks 2,248 bytes pre-auth; and the account cap stopped enforcing after
+sharding.
+
+**Three of the four are the same defect the previous sixteen releases kept
+finding — a rule applied at some sites and not the others.** Two are fixes from
+1.7.3 and 1.7.6 that were never carried across; in one case the model code is 230
+lines away in the same file.
+
+**The lesson worth keeping:** the suite was green at 1048 assertions with all four
+present. *None of them had a test, so none of them could fail.* Sixteen releases
+of mutation-testing new guards did not create a habit of testing the guard's
+SIBLINGS — the sites the same rule should have reached.
+
+The sweep also did the discipline it was asked for: it **dropped a survivor it
+could not stand behind** (a room-header finding whose stated mechanism was wrong),
+and it recorded what was refuted — the audit-segment cold scan, the short-write
+publish in `player_save`, the `epoll_wait` EINTR path, the `_audit_tail_hash`
+short read — so none of it gets re-proposed.
 
 **1.7.6** — 2026-07-29. **1039 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build; suite green against an empty `data/players`.

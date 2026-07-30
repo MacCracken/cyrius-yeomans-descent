@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-29 (v1.7.6 — every tracked 1.6/1.7 item is closed; the gate re-run is next)
+> **Last Updated**: 2026-07-29 (v1.7.6 + an uncommitted account-count fix — the gate re-run returned DO-NOT-CLOSE with four high findings; 1.7.7 is next)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -28,7 +28,9 @@ ownership and fix size.
 | — | ~~1.7.4~~ | ~~1 of 3~~ | ✅ **Shipped.** Audit-log rotation (ADR 0009 mechanism), incl. the crash window, the prune attestation, and the clobber guard | — |
 | — | ~~1.7.5~~ | ~~1 of 2~~ | ✅ **Shipped.** Ground decay — player-dropped items expire after two zone-reset intervals (30 min). The last item of the 1.6/1.7 audit line | — |
 | — | ~~1.7.6~~ | ~~2~~ | ✅ **Shipped.** The room listing no longer breaks the wire (it ended mid-escape with no prompt at 86 floor objects) · 1.6.12's audit granularity restored | — |
-| 1 | [**gate re-run**](#the-gate--what-closes-the-1x-line) | — | **The 1.6/1.7 audit line is clear.** Closes the 1.x line if it returns no critical or high findings | **yes** |
+| 1 | [**1.7.7**](#177--carry-the-fixes-to-the-sites-they-were-never-applied-to) | 2 | **Carry two existing fixes to the sites they were never applied to** — `get` of a container (silent item loss) · four listing verbs that truncate mid-line | **yes** |
+| 2 | [**1.7.8**](#178--agnos-persistence-and-the-pre-auth-parse) | 2 | AGNOS saves never publish · every login against an existing name leaks 2.2 kB pre-auth | **yes** |
+| 3 | [**gate re-run #2**](#the-gate--what-closes-the-1x-line) | — | Re-run after 1.7.7/1.7.8. The first re-run returned **DO-NOT-CLOSE** | **yes** |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
@@ -51,11 +53,145 @@ the release.
 
 ---
 
-## Open issues — ALL CLOSED. 8 raised by the gate sweep plus 12 raised by 1.7.0–1.7.6's own investigations; every one is shipped. The gate re-run is what decides whether the 1.x line closes.
+## Open issues — 5 high, all raised by the gate re-run (2026-07-29)
+
+**The gate re-run returned DO-NOT-CLOSE.** Every earlier item is shipped; these
+are new. Four came from the sweep and were reproduced by its judge on the shipped
+tree; the fifth was found alongside it and is already fixed but uncommitted.
+
+**The lesson, stated once because it is the same lesson as the previous sixteen
+releases:** three of the four are *a rule applied at some sites and not the
+others.* Two of those are fixes from 1.7.3 and 1.7.6 that were never carried
+across — the model code sits in the same file, in one case 230 lines away. And the
+suite was green at 1048 assertions with all four present: **none of them had a
+test, so none of them could fail.**
 
 From the third (gate) sweep, 2026-07-29, run against 1.6.15. Worst first. Every
 item says what breaks, whether it can happen to a running server today, whose
 code it is, and how big the fix is — in that order, before any label.
+
+### 1.7.7 — carry the fixes to the sites they were never applied to
+
+**R. Picking up a container ignores what is inside it, and the next save destroys
+the overflow.** *(high)*
+
+- **What breaks.** `get` moves a container **and its contents**, but the cap check
+  asks only how much you are already holding. Hold 99, pick up a bag of 99, and
+  you hold 199 against a cap of 100 — from one ordinary command, with the server
+  saying only "You take a dented tankard." Push further and the record silently
+  stops recording the rest: **`player_save` returns SUCCESS and the items are gone
+  at next login.** Nothing is said to the player.
+- **Can it happen today? Yes** — any logged-in player, no admin, no malice beyond
+  hoarding.
+- **Whose code.** Ours, `src/item.cyr` end to end.
+- **Fix size.** Small, **and the correct version already exists 230 lines below**:
+  `cmd_give` computes `moving = 1 + contents` and tests
+  `inv_count(target) + moving > MAX_INV` ([`item.cyr:751`](../../src/item.cyr:751)).
+  Both `get_from` arms need the same question instead of the bare `inv_full(s)`.
+  The `inv_owns_slot` exemption stays.
+- **Sites.** [`item.cyr:520`](../../src/item.cyr:520) (single) and
+  [`:492`](../../src/item.cyr:492) (`get all`); the predicate is `inv_full` at
+  [`:447`](../../src/item.cyr:447).
+- **Measured**, every move typed through `cmd_on_line`: 99 held + one `get` → 199.
+  Scaled: 721 carried, `_build_record` 4048 B of SAVE_CAP 4096, `player_save`
+  returned 1, reload → 591. **130 items destroyed.**
+- **Why no test caught it.** `test_carry_cap` uses bare floor items;
+  `test_carry_cap_container` only takes items *out of* your own bag.
+
+**S. `inventory`, `who`, `drop all` and `get all` end mid-line with no prompt.**
+*(high)*
+
+- **What breaks.** The same defect 1.7.6 shipped a release to remove for `look`.
+  Each writes one coloured line per item into the 4 kB queue with no fit check, so
+  the reply is cut at whatever byte it runs out on: listing stops mid-name, the
+  colour is never closed, and the prompt never arrives — the session looks hung.
+  For two common items the cut lands on a bare ESC, so the terminal then eats the
+  start of whatever comes next.
+- **Can it happen today? Yes** — at the game's own 100-item carry cap, and for
+  `who` at about 90 players online.
+- **Whose code.** Ours.
+- **Fix size.** Small and mechanical. `room_line_fits`
+  ([`session.cyr:1149`](../../src/session.cyr:1149)) and `room_append_more`
+  ([`:1159`](../../src/session.cyr:1159)) already exist, are tested, and their
+  512-byte reserve already covers the prompt. **1.7.6 wired them into
+  `session_show_room`'s three sections and nowhere else.** Four loops adopt them.
+- **Sites.** `cmd_inventory` [`item.cyr:781`](../../src/item.cyr:781), `cmd_who`
+  [`server.cyr:1355`](../../src/server.cyr:1355), `cmd_drop`'s all-branch
+  [`item.cyr:596`](../../src/item.cyr:596), `get_from`'s `all` echo
+  [`item.cyr:481`](../../src/item.cyr:481). `render_who`
+  [`server.cyr:1064`](../../src/server.cyr:1064) is the same shape but behind
+  `YD_ADMIN` (default off) — dormant, fix it in the same pass.
+
+### 1.7.8 — AGNOS persistence and the pre-auth parse
+
+**T. On the AGNOS build, a player record is never published at all.** *(high)*
+
+- **What breaks.** `player_save` asks for `syscall(82)` to rename the temp file
+  into place and `syscall(87)` to unlink the old one. On AGNOS those numbers are
+  **GPU dispatch and blit**, not rename and unlink. The record directory is not
+  created either — the `sys_mkdir` calls pass a permission mode where AGNOS
+  expects a path length. Character creation warns it could not write, every
+  autosave and disconnect save fails the same way, and **every reconnect is
+  offered a brand-new character.**
+- **Can it happen today?** **Live on `--agnos`**, dormant on x86_64 (where 82/87
+  genuinely are rename/unlink — which is why the suite is green). README and
+  `docs/guides/running.md` have advertised AGNOS persistence as working
+  identically since 1.1.0. **CI never builds it.**
+- **Whose code.** Ours. `lib/io.cyr`'s `xunlink` (`:108`) and `file_rename`
+  (`:133`) both carry correct AGNOS branches — the stdlib is fine, `persist.cyr`
+  just does not call it. The *same binary* reaches syscalls 30/31 correctly from
+  the 1.7.4 rotation path.
+- **Fix size.** Small: three call sites plus a dead constant, using the `#ifdef`
+  shape `player_exists` already carries for `sys_stat`.
+- **Sites** (HEAD-relative): [`persist.cyr:1498`](../../src/persist.cyr:1498) and
+  [`:1508`](../../src/persist.cyr:1508), constant at
+  [`:66`](../../src/persist.cyr:66); mkdir at `:127`, `:128`, `:1151`.
+- **Verified in the emitted artefact**, not the source: with `CYRIUS_DCE=1` the
+  global reads 82 into `%rax` before a bare 2-arg `syscall`, and `mov $0x57,%eax`
+  survives DCE. `lib/syscalls_x86_64_agnos.cyr:96` defines `SYS_GPU_DISPATCH = 82`
+  annotated *"(RENAME on Linux)"* and `:101` `SYS_GPU_BLIT_SHM = 87` annotated
+  *"(UNLINK on Linux — DELETES A FILE)"*.
+- **The tree already knew.** The comment at
+  [`persist.cyr:1049`](../../src/persist.cyr:1049) says *"file_rename, not the raw
+  syscall above: that one predates io.cyr's wrapper and misses the agnos 4-arg
+  form"* — 1.7.4 fixed its own new code and did not go back six lines.
+- **Also fix the cause, not just the instance:** CI must build `--agnos` or this
+  rots again.
+
+**U. Every login attempt against an existing character permanently consumes
+2,248 bytes.** *(high)*
+
+- **What breaks.** The record is parsed into memory **before the passphrase is
+  checked**, and that memory can never be reused. Five guesses per connection
+  before the socket closes ≈ **11 kB gone forever per attacker connection**.
+- **Can it happen today? Yes**, from anyone who can open a socket. No account
+  needed to find a target — the login prompt itself answers whether a name exists
+  ("Passphrase:" vs "No record answers to that name").
+- **And the instrument stays quiet:** 1.7.1's rollup window correctly suppresses
+  the repeated audit entries, so a flood leaves one entry and a count.
+- **Whose code.** Ours. The bytes land inside `lib/bayan.cyr`'s `toml_parse`,
+  but **the call is ours and the whole fix is ours** — six of the seven
+  `toml_parse` callers are boot-time loaders;
+  [`persist.cyr:1592`](../../src/persist.cyr:1592) is the only per-request and
+  only pre-authentication one.
+- **Fix size.** Real but contained, ~30 lines in `src/persist.cyr`: the decision
+  needs only `salt` and `pubkey`, both fixed-form, so they can be extracted
+  without a full parse before the passphrase is checked.
+
+**V. The account cap silently stopped enforcing after sharding.** *(high — FIXED,
+uncommitted)*
+
+- **What breaks.** `accounts_count_disk` counted top-level directory entries —
+  right for the flat layout, wrong the moment 1.7.2 sharded records into
+  `data/players/<c>/` **in the same release**. Measured on the working tree: **26
+  counted against 40 real records**, converging on ~26 as records migrate. An
+  operator who set `max_accounts` had a cap that would never fire.
+- **Can it happen today?** Only for an operator who sets a cap — it is off by
+  default.
+- **Whose code.** Ours. **Fix size.** Contained.
+- **Status: fixed in the working tree** ([`persist.cyr`](../../src/persist.cyr),
+  `accounts_count_disk` + `_is_record_name`) with a regression test that fails
+  against the old implementation (27 vs 29). **Not yet committed.**
 
 ### ✅ 1.7.0 — the tick budget becomes a budget (SHIPPED)
 
