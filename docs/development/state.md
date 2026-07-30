@@ -3,13 +3,51 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.7.5 — ground decay shipped; one low item left, then the gate re-run)
+> **Last refresh**: 2026-07-29 (v1.7.6 — every tracked 1.6/1.7 item closed; the gate re-run decides whether the 1.x line closes)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.6** — 2026-07-29. **1039 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build; suite green against an empty `data/players`.
+
+**A room listing could break the terminal.** `session_show_room` wrote its
+sections as unchecked `session_appendtx` calls, and that primitive truncates at a
+BYTE boundary and returns a short count nobody reads. At 86 floor objects the
+stream ended `" here."` then a bare `ESC [` — an incomplete SGR, no CRLF, no
+colour reset, **no prompt** — and a conformant terminal then eats the opening
+characters of whatever arrives next. Threshold 71–87 by room; it never recovers,
+because a floor only grows.
+
+**Ground decay did not fix this**, which is worth remembering: 1.7.5 bounds a
+floor to 30 minutes of accumulation, and a busy town square passes 86 items well
+inside that. Two fixes for the same collection, addressing different failures —
+memory and wire-correctness — and neither substitutes for the other.
+
+All three sections (objects, mobs, present players) now stop at a whole item with
+a byte reserve held back, and report what they omitted. The player-list fit check
+runs BEFORE the separator, because writing `", "` and then finding the name does
+not fit leaves a dangling separator — a different malformed line.
+
+**Also: per-attempt creation auditing restored**, reversing G3 (1.6.12). G3 made
+it fire once at the cap because each entry cost 1944 unreclaimable bytes; 1.7.1's
+rollup window removed that constraint, so a flood is now visible from the FIRST
+attempt and the rollup's count is the true attempt total. A trade made under a
+constraint, taken back once the constraint was gone.
+
+**Lessons carried, added this release:**
+
+- *The wire is a correctness surface, not a rendering detail.* A truncating
+  appender whose short return nobody reads produced a malformed escape sequence
+  and a missing prompt — found by a probe that was looking for wasted CPU, not
+  for a bug.
+- *Ask what a background agent was actually asked.* The design fleet's most
+  valuable output was not the design it was commissioned for; the cost-curve agent
+  found this while measuring something else, and the two design agents it was
+  waiting on were superseded before they finished.
 
 **1.7.5** — 2026-07-29. **1024 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build.

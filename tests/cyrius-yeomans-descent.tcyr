@@ -3809,13 +3809,25 @@ fn test_passwd_meter(): i64 {
         k = k + 1;
     }
     var mid = g_audit_emitted;
-    assert_eq(mid - before, 0, "four failed creation attempts write NO durable audit entries");
+    # 1.7.6 — the contract CHANGED, deliberately, and for the better.
+    #
+    # G3 (1.6.12) made this fire once at the cap, because each entry cost 1944
+    # permanently-unreclaimable bytes and the attacker set the rate. The rollup
+    # window (1.7.1) removed that constraint, so 1.7.6 audits every attempt again:
+    # the FIRST occurrence opens the window and is written verbatim, and every
+    # later one is tallied at zero allocation. A flood is now visible from the
+    # first attempt instead of only from the fifth, and the rollup's count is the
+    # true attempt total rather than a count of sessions that reached the cap.
+    assert_eq(mid - before, 1,
+              "the FIRST failed creation attempt is durable — a flood is visible immediately");
     login_on_confirm(cs, "wrongphrase", 11);           # the fifth trips the cap
     assert_eq(load64(cs + SS_QUIT), 1, "the cap fired");
-    # EXACTLY one. The byte-delta form could only say "more than before", so a
-    # regression back to per-attempt auditing would have passed it five times over.
-    assert_eq(g_audit_emitted - mid, 1,
-              "and the capped-out session writes exactly ONE entry, so a flood is still visible");
+    assert_eq(g_audit_emitted - mid, 0,
+              "...and the attempts after it are TALLIED, not written — the arena cost is flat");
+    # The count is not lost: it is carried by the rollup, which is the whole point
+    # of taking G3's trade back.
+    assert(load64(_audit_slot(AK_CREATE_FAIL) + AKE_SUPP) > 0,
+           "the suppressed attempts are counted for the rollup to report");
 
     # The SAME assertion on the returning-player path. Covering one of two
     # symmetric paths is precisely the mistake this release exists to correct —
@@ -4141,6 +4153,93 @@ fn _audit_bytes_same_t(a, b, n): i64 {
         i = i + 1;
     }
     return 1;
+}
+
+# === 1.7.6 — a room listing never runs the tx buffer dry. ===
+#
+# MEASURED before the fix, driving the real `cmd_on_line(s, "look", 4)`: at 86
+# floor objects the stream ended `" here."` then a bare ESC '[' — an incomplete
+# SGR sequence, no CRLF, no colour reset, and NO PROMPT. A conformant terminal
+# then eats the opening characters of whatever arrives next, and it never recovers
+# because a floor only grows.
+#
+# This is a wire-CORRECTNESS bug of the same class as M10's sanitizer work, not a
+# performance one. 1.7.5's ground decay bounds a floor to 30 minutes of
+# accumulation and does not fix it: a busy town square passes 86 items well inside
+# 30 minutes.
+fn test_room_listing_bounds(): i64 {
+    test_group("room-listing");
+
+    if (g_obj_tpl_count == 0) { assert(0, "room-listing: needs object templates"); return 0; }
+    if (world_room_count() == 0) { assert(0, "room-listing: needs a zone"); return 0; }
+
+    # --- The predicate, over its domain. Pure, so the rule is enumerable without
+    # a socket or a stuffed room.
+    var s = _freeable_sess();
+    store64(s + SS_TX_LEN, 0);
+    assert_eq(room_line_fits(s, 10), 1, "a short line fits an empty buffer");
+    assert_eq(room_line_fits(s, TX_CAP - ROOM_TAIL_RESERVE), 1, "exactly up to the reserve fits");
+    assert_eq(room_line_fits(s, TX_CAP - ROOM_TAIL_RESERVE + 1), 0, "one byte past the reserve does not");
+    store64(s + SS_TX_LEN, TX_CAP - ROOM_TAIL_RESERVE);
+    assert_eq(room_line_fits(s, 1), 0, "a full-to-the-reserve buffer fits nothing more");
+    assert(ROOM_TAIL_RESERVE > 0, "the reserve is real");
+    store64(s + SS_TX_LEN, 0);
+
+    # --- THE BUG. Stuff a floor well past the old 86-object threshold and drive
+    # the REAL look through the parser, exactly as a player does.
+    var slot = room_at(0) + RM_OBJ_HEAD;
+    var pre = load64(slot);
+    store64(slot, 0);
+    var made = 0;
+    while (made < 400) { ilist_push(slot, item_new(ot_at(0))); made = made + 1; }
+
+    store64(s + SS_ROOM, 0);
+    store64(s + SS_PHASE, PHASE_CMD);
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_AUTHED, 1);
+    _tx_reset(s);
+    cmd_on_line(s, "look", 4);
+
+    var tx = load64(s + SS_TX_BUF);
+    var n = load64(s + SS_TX_LEN);
+    assert(n > 0, "look produced output");
+    assert(n <= TX_CAP, "...within the buffer");
+
+    # THE ASSERTION THIS GROUP EXISTS FOR. The old failure ended mid-escape with
+    # the prompt discarded; a player was left with colour bleeding and no prompt.
+    assert(_contains(tx, n, "> ") == 1,
+           "the PROMPT reaches the client — the failure this release fixes");
+
+    # And the stream does not end inside an escape sequence. ESC is 27; a
+    # well-formed tail cannot have one in the last two bytes with no terminator.
+    var tail1 = load8(tx + n - 1) & 0xFF;
+    var tail2 = load8(tx + n - 2) & 0xFF;
+    assert(tail1 != 27, "the stream does not end ON an ESC");
+    assert(tail2 != 27, "...nor one byte into an escape sequence");
+
+    # The listing is honest about what it left out, rather than silently showing
+    # fewer things than are present — that is how a player walks past what they
+    # came for.
+    assert_eq(_contains(tx, n, "more items lie here."), 1,
+              "...and it says how many items it did not list");
+
+    # --- With a small floor nothing is omitted and no summary appears.
+    _drain_ilist(slot);
+    store64(slot, 0);
+    made = 0;
+    while (made < 3) { ilist_push(slot, item_new(ot_at(0))); made = made + 1; }
+    _tx_reset(s);
+    cmd_on_line(s, "look", 4);
+    tx = load64(s + SS_TX_BUF); n = load64(s + SS_TX_LEN);
+    assert_eq(_contains(tx, n, "more items lie here."), 0,
+              "a normal room gets no truncation notice");
+    assert_eq(_contains(tx, n, "> "), 1, "...and still gets its prompt");
+    assert(n < TX_CAP, "...well inside the buffer");
+
+    _drain_ilist(slot);
+    store64(slot, pre);
+    session_free(s);
+    return 0;
 }
 
 # === 1.7.5 — ground decay for player-dropped items. ===
@@ -5980,6 +6079,7 @@ fn main() {
     test_save_backoff();
     test_audit_rotation();
     test_ground_decay();
+    test_room_listing_bounds();
 
     return assert_summary();
 }

@@ -4,6 +4,59 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.6] — 2026-07-29
+
+**A room listing could break the terminal.** 1039 assertions (was 1024).
+
+### Fixed
+
+- **`look` output ended mid-escape-sequence with no prompt.** `session_show_room`
+  wrote its sections as a run of unchecked `session_appendtx` calls, and that
+  primitive truncates at a **byte** boundary and returns a short count nobody
+  reads. Measured, by driving the real `cmd_on_line(s, "look", 4)`:
+
+  | floor | bytes queued | objects rendered | prompt reaches client |
+  |---|---|---|---|
+  | 85 | 4,094 | 85 | yes |
+  | **86** | **4,096 (= TX_CAP)** | 85 | **NO** |
+  | 2,000 | 4,096 | 85 | NO |
+
+  At 86 the 86th object's `ansi_item()` wrote 2 of its 5 bytes, leaving the stream
+  ending `" here."` then a bare `ESC [` — an incomplete SGR, no CRLF, no colour
+  reset, **no prompt**. A conformant terminal then eats the opening characters of
+  whatever arrives next. The threshold is **71–87** depending on room header size
+  and name lengths, and it never recovers, because a floor only grows.
+
+  This is a **wire-correctness** bug of the same class as M10's sanitizer work —
+  not a performance one — and **1.7.5's ground decay does not fix it**: a busy
+  town square passes 86 items well inside the 30-minute decay window.
+
+  All three listing sections — objects, mobs, present players — now stop at a
+  **whole item** with a byte reserve held back, and say how many they omitted
+  (`...and N more items lie here.`). Silently showing fewer things than are
+  present is how a player walks past what they came for.
+
+  The fit check in the player list runs **before** the separator, deliberately:
+  writing `", "` and then finding the name does not fit leaves a dangling
+  separator — a different malformed line than the one this release removes.
+
+  Chosen over `session_tx_reserve` (which flushes to make room) because that needs
+  a live socket and can still fall short if it does not drain; stopping at an item
+  boundary is deterministic and correct regardless of socket state.
+
+### Changed
+
+- **Per-attempt creation auditing is restored, reversing G3 (1.6.12).** G3 moved
+  `create.fail` to fire once at the cap because each entry cost 1,944
+  permanently-unreclaimable bytes and the attacker set the rate. 1.7.1's rollup
+  window removed that constraint — later occurrences tally at **zero allocation**
+  — so per-attempt now costs the same arena and reports a truer number. **A flood
+  is visible from the first attempt instead of the fifth**, and the rollup's count
+  is the real attempt total rather than a count of sessions that reached the cap.
+
+  A trade made under a constraint, taken back once the constraint was gone, rather
+  than left in place because the code looked deliberate.
+
 ## [1.7.5] — 2026-07-29
 
 **Ground decay — the last item of the 1.6/1.7 audit line.** 1024 assertions

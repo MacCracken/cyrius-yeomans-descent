@@ -1946,9 +1946,22 @@ fn _confirm_mismatch(s): i64 {
     # true and every further line dispatched to a condemned session audits again.
     # Harmless now that the window coalesces it; recorded so nobody re-derives it
     # as a fresh bug.
+    # 1.7.6 — audit EVERY attempt again, reversing G3 (1.6.12).
+    #
+    # G3 moved this to fire once at the cap because each entry cost 1944
+    # permanently-unreclaimable bytes and the attacker set the rate. The rollup
+    # window (1.7.1) removed that: the first occurrence of a key in a window is
+    # written and every later one increments an i64 and allocates NOTHING. So
+    # per-attempt granularity now costs the SAME arena as per-session and reports
+    # a truer number — the rollup's count is the real attempt total rather than a
+    # count of sessions that happened to hit the cap.
+    #
+    # This is the trade G3 made under duress being taken back once the constraint
+    # that forced it was gone, rather than left in place because the code looked
+    # deliberate.
+    audit_keyed(AK_CREATE_FAIL, SEV_WARNING, "create.fail",
+    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
     if (fails >= MAX_LOGIN_FAILS) {
-        audit_keyed(AK_CREATE_FAIL, SEV_WARNING, "create.fail",
-        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
         session_echo_on(s);
         session_appendtx_cstr(s, "\r\nToo many failed attempts. Closing.\r\n");
         store64(s + SS_QUIT, 1);

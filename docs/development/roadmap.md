@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-29 (v1.7.5 — ground decay shipped; the 1.6/1.7 audit line is clear bar one low item, then the gate re-run)
+> **Last Updated**: 2026-07-29 (v1.7.6 — every tracked 1.6/1.7 item is closed; the gate re-run is next)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -27,10 +27,10 @@ ownership and fix size.
 | — | ~~1.7.3~~ | ~~4 of 6~~ | ✅ **Shipped.** `cmd_give`'s overshoot · the per-tick save-failure retry · the two uncovered guards · the borrowed audit chain-link | — |
 | — | ~~1.7.4~~ | ~~1 of 3~~ | ✅ **Shipped.** Audit-log rotation (ADR 0009 mechanism), incl. the crash window, the prune attestation, and the clobber guard | — |
 | — | ~~1.7.5~~ | ~~1 of 2~~ | ✅ **Shipped.** Ground decay — player-dropped items expire after two zone-reset intervals (30 min). The last item of the 1.6/1.7 audit line | — |
-| 1 | [**1.7.6**](#173--cover-the-guards-that-predate-the-mutation-habit) | 1 | Restore 1.6.12's audit granularity, now affordable under the rollup window | no |
-| 3 | [**gate re-run**](#the-gate--what-closes-the-1x-line) | — | Closes the 1.x line if it returns no critical or high findings | **yes** |
-| 4 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
-| 5 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
+| — | ~~1.7.6~~ | ~~2~~ | ✅ **Shipped.** The room listing no longer breaks the wire (it ended mid-escape with no prompt at 86 floor objects) · 1.6.12's audit granularity restored | — |
+| 1 | [**gate re-run**](#the-gate--what-closes-the-1x-line) | — | **The 1.6/1.7 audit line is clear.** Closes the 1.x line if it returns no critical or high findings | **yes** |
+| 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
+| 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
 **Every issue the 1.6.0 sweep and its two re-runs produced is closed** — 1.6.0
 through 1.6.15. The **third (gate) sweep found 8 items, two of them high**;
@@ -51,7 +51,7 @@ the release.
 
 ---
 
-## Open issues — 8 raised by the gate sweep; 6 closed (1.7.0–1.7.2); 2 open, +10 raised by these three releases' own investigations
+## Open issues — ALL CLOSED. 8 raised by the gate sweep plus 12 raised by 1.7.0–1.7.6's own investigations; every one is shipped. The gate re-run is what decides whether the 1.x line closes.
 
 From the third (gate) sweep, 2026-07-29, run against 1.6.15. Worst first. Every
 item says what breaks, whether it can happen to a running server today, whose

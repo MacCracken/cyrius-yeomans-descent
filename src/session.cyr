@@ -1103,7 +1103,71 @@ fn cmd_help_text(s): i64 {
 # buffer. Keeping these here preserves the zero-external-deps stance and
 # the "Own the Stack" principle. `\x1b` is a one-byte ESC in Cyrius
 # strings, so the codes embed directly in cstr literals.
-fn ansi_reset(): i64 { return "\x1b[0m"; }      # clear all attributes
+# === 1.7.6 — a room listing must never run the tx buffer dry. ===
+#
+# THE BUG. `session_show_room` writes the title, prose, exits, objects, mobs and
+# present players as a run of unchecked `session_appendtx` calls, and that
+# primitive truncates at a BYTE boundary and returns a short count nobody reads.
+# So a room with enough objects does not merely list fewer of them — the stream
+# stops mid-escape-sequence.
+#
+# MEASURED, by driving the real `cmd_on_line(s, "look", 4)`:
+#
+#     floor   bytes queued        objects rendered   prompt reaches client
+#        85   4,094                     85           yes
+#        86   4,096 (= TX_CAP)          85           NO
+#      2000   4,096                     85           NO
+#
+# At 86 the 86th object's `ansi_item()` writes 2 of its 5 bytes and the tail is
+# `" here."` then a bare ESC '[' — an incomplete SGR, no CRLF, no colour reset,
+# and NO PROMPT. A conformant terminal then eats the opening characters of
+# whatever arrives next. The threshold is 71-87 depending on room header size and
+# name lengths, and it never recovers, because a floor only grows.
+#
+# This is a WIRE-CORRECTNESS bug, not a performance one — the same class as M10's
+# sanitizer work, which exists so player bytes cannot malform the stream. 1.7.5's
+# ground decay bounds a floor to 30 minutes of accumulation and does NOT fix this:
+# a busy town square passes 86 items well inside 30 minutes.
+#
+# THE FIX. Each listing section asks whether a whole line fits with the tail
+# reserve intact, and stops at an item boundary if not, emitting a count of what
+# it omitted. Deterministic, needs no socket (unlike session_tx_reserve, which
+# flushes and can still fall short if the socket does not drain), and it caps the
+# walk as a side effect.
+enum RoomList {
+    # Bytes held back from TX_CAP so the tail of a listing always fits: the
+    # "and N more" lines of the sections that follow, plus the prompt. Three
+    # sections at ~40 bytes of summary each, plus a 2-byte prompt, plus room for
+    # the longest single line any of them might still be mid-way through.
+    ROOM_TAIL_RESERVE = 512;
+}
+
+# Would `need` more bytes still leave the tail reserve intact?
+#
+# A pure predicate over the session's current fill, so the rule is testable
+# without a socket and without arranging a full room.
+fn room_line_fits(s, need): i64 {
+    if (load64(s + SS_TX_LEN) + need + ROOM_TAIL_RESERVE <= TX_CAP) { return 1; }
+    return 0;
+}
+
+# "...and N more <what> here." — the honest tail of a truncated section.
+#
+# Emitted UNCONDITIONALLY once a section stops: a listing that silently shows
+# fewer things than are present is how a player walks past the thing they came
+# for. The reserve exists so this always fits.
+fn room_append_more(s, n, what): i64 {
+    if (n <= 0) { return 0; }
+    session_appendtx_cstr(s, "...and ");
+    session_appendtx_num(s, n);
+    session_appendtx_cstr(s, " more ");
+    session_appendtx_cstr(s, what);
+    session_appendtx_cstr(s, " here.\r\n");
+    return 1;
+}
+
+# Clear all attributes — every coloured span in a room listing closes with this.
+fn ansi_reset(): i64 { return "\x1b[0m"; }
 # Room titles. Pair with ansi_reset() — a raw SGR run bleeds until cleared.
 fn ansi_title(): i64 { return "\x1b[1;33m"; }   # bold yellow — room title
 # The exits line; session_append_exits wraps label and dir words in one span.
@@ -1117,21 +1181,36 @@ fn ansi_mob(): i64   { return "\x1b[31m"; }     # red — hostiles
 # instance list hangs off the Room struct's RM_MOB_HEAD.
 fn session_append_mobs(s, room): i64 {
     var m = room_mob_head(room_at(room));
+    var more = 0;
     while (m != 0) {
-        session_appendtx_cstr(s, ansi_mob());
-        session_appendtx(s, mi_name_ptr(m), mi_name_len(m));
-        session_appendtx_cstr(s, " is here");
-        # Show wounds (a fresh, unhurt mob reads cleaner without the tag).
-        if (mi_hp(m) < mt_hp(mi_tpl(m))) {
-            session_appendtx_cstr(s, " (");
-            session_appendtx_cstr(s, mob_condition(m));
-            session_appendtx_cstr(s, ")");
+        if (more > 0) {
+            more = more + 1;
+        } else {
+            # 1.7.6 — whole lines only; see RoomList. Mobs run AFTER the object
+            # list, so a floor that nearly fills the buffer used to truncate this
+            # section mid-escape even when the mob count itself was tiny.
+            var need = strlen(ansi_mob()) + mi_name_len(m) + 8
+            + 24 + 1 + strlen(ansi_reset()) + 2;
+            if (room_line_fits(s, need) == 0) {
+                more = 1;
+            } else {
+                session_appendtx_cstr(s, ansi_mob());
+                session_appendtx(s, mi_name_ptr(m), mi_name_len(m));
+                session_appendtx_cstr(s, " is here");
+                # Show wounds (a fresh, unhurt mob reads cleaner without the tag).
+                if (mi_hp(m) < mt_hp(mi_tpl(m))) {
+                    session_appendtx_cstr(s, " (");
+                    session_appendtx_cstr(s, mob_condition(m));
+                    session_appendtx_cstr(s, ")");
+                }
+                session_appendtx_cstr(s, ".");
+                session_appendtx_cstr(s, ansi_reset());
+                session_appendtx_cstr(s, "\r\n");
+            }
         }
-        session_appendtx_cstr(s, ".");
-        session_appendtx_cstr(s, ansi_reset());
-        session_appendtx_cstr(s, "\r\n");
         m = mi_next(m);
     }
+    room_append_more(s, more, "creatures are");
     return 0;
 }
 

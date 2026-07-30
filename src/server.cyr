@@ -1134,26 +1134,46 @@ fn flush_session(epfd, s): i64 {
 # empty.
 fn room_append_present(viewer, room_idx): i64 {
     var first = 1;
+    var more = 0;
     var t = g_session_head;
     while (t != 0) {
         if (t != viewer) {
             if (load64(t + SS_PHASE) == PHASE_CMD) {
                 if (load64(t + SS_ROOM) == room_idx) {
-                    if (first == 1) {
-                        session_appendtx_cstr(viewer, "Also here: ");
-                        first = 0;
+                    # 1.7.6 — whole names only; see RoomList in session.cyr. This
+                    # section runs LAST, so it is the most likely to be cut, and
+                    # MAX_SESSIONS co-located players would overflow it on their
+                    # own even with an empty floor.
+                    #
+                    # The fit check comes BEFORE the separator, deliberately.
+                    # Writing ", " and then discovering the name does not fit
+                    # leaves a dangling separator with nothing after it — a
+                    # different malformed line than the one this release exists to
+                    # remove. The name is costed at 2x because session_appendtx_prose
+                    # IAC-doubles, so a name of 0xFF bytes emits twice its length.
+                    var need = strlen(ansi_actor()) + load64(t + SS_NAME_LEN) * 2
+                    + strlen(ansi_reset()) + 2;
+                    if (first == 1) { need = need + 11; }
+                    if (room_line_fits(viewer, need) == 0) {
+                        more = more + 1;
                     } else {
-                        session_appendtx_cstr(viewer, ", ");
+                        if (first == 1) {
+                            session_appendtx_cstr(viewer, "Also here: ");
+                            first = 0;
+                        } else {
+                            session_appendtx_cstr(viewer, ", ");
+                        }
+                        session_appendtx_cstr(viewer, ansi_actor());
+                        session_appendtx_prose(viewer, load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN));   # M10-C name
+                        session_appendtx_cstr(viewer, ansi_reset());
                     }
-                    session_appendtx_cstr(viewer, ansi_actor());
-                    session_appendtx_prose(viewer, load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN));   # M10-C name
-                    session_appendtx_cstr(viewer, ansi_reset());
                 }
             }
         }
         t = load64(t + SS_NEXT);
     }
     if (first == 0) { session_appendtx_cstr(viewer, "\r\n"); }
+    room_append_more(viewer, more, "people are");
     return 0;
 }
 

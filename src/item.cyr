@@ -356,14 +356,29 @@ fn ansi_item(): i64 { return "\x1b[33m"; }   # yellow — objects / corpses
 # session_show_room (forward ref from session.cyr).
 fn session_append_objs(s, room): i64 {
     var o = room_obj_head(room_at(room));
+    var more = 0;
     while (o != 0) {
-        session_appendtx_cstr(s, ansi_item());
-        session_appendtx(s, oi_name_ptr(o), oi_name_len(o));
-        session_appendtx_cstr(s, " lies here.");
-        session_appendtx_cstr(s, ansi_reset());
-        session_appendtx_cstr(s, "\r\n");
+        if (more > 0) {
+            more = more + 1;                 # past the cut: count, do not render
+        } else {
+            # 1.7.6 — stop at a WHOLE item, never mid-escape. See RoomList in
+            # session.cyr for the measured failure this prevents: at 86 objects
+            # the stream used to end inside an SGR sequence with no prompt.
+            var need = strlen(ansi_item()) + oi_name_len(o) + 11
+            + strlen(ansi_reset()) + 2;
+            if (room_line_fits(s, need) == 0) {
+                more = 1;
+            } else {
+                session_appendtx_cstr(s, ansi_item());
+                session_appendtx(s, oi_name_ptr(o), oi_name_len(o));
+                session_appendtx_cstr(s, " lies here.");
+                session_appendtx_cstr(s, ansi_reset());
+                session_appendtx_cstr(s, "\r\n");
+            }
+        }
         o = oi_next(o);
     }
+    room_append_more(s, more, "items lie");
     return 0;
 }
 
