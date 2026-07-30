@@ -96,6 +96,7 @@ var DP_DATADIR   = "/data";
 var DP_PLAYERS   = "/data/players";
 var DP_PLAYERS_S = "/data/players/";
 var DP_AUDIT     = "/data/audit.libro";
+var DP_CONFIG    = "/data/server.cyml";
 var DP_ROOMS     = "/data/zones/hub.rooms.cyml";
 var DP_OBJS      = "/data/zones/hub.objs.cyml";
 var DP_MOBS      = "/data/zones/hub.mobs.cyml";
@@ -105,6 +106,7 @@ var DP_DATADIR   = "data";
 var DP_PLAYERS   = "data/players";
 var DP_PLAYERS_S = "data/players/";
 var DP_AUDIT     = "data/audit.libro";
+var DP_CONFIG    = "data/server.cyml";
 var DP_ROOMS     = "data/zones/hub.rooms.cyml";
 var DP_OBJS      = "data/zones/hub.objs.cyml";
 var DP_MOBS      = "data/zones/hub.mobs.cyml";
@@ -139,6 +141,12 @@ fn persist_init(): i64 {
     g_audit_store = filestore_open(str_from(DP_AUDIT));
     _audit_resume_head();
     audit_coalesce_init();          # 1.7.1 — the rollup window's table
+    # 1.7.2 — operator config, then the env override, then one disk count.
+    # Order matters: the env must win over the file, and the count must happen
+    # after the players directory exists (sys_mkdir above).
+    config_load(DP_CONFIG);
+    config_apply_env();
+    g_account_count = accounts_count_disk();
     g_persist_ready = 1;
     audit_size_check();             # 1.7.1 / ADR 0009 — one boot-time size warning
     return 0;
@@ -322,7 +330,8 @@ enum AuditKeys {
     AK_SAVE_FAIL_DISC   = 13;
     AK_SAVE_FAIL_CREATE = 14;
     AK_AUDIT_SIZE       = 15;
-    AK_NKEYS            = 16;
+    AK_ACCOUNTS_FULL    = 16;
+    AK_NKEYS            = 17;
 }
 
 # One table entry. Byte offsets, matching the house SS_* / g_persist_* style.
@@ -348,9 +357,20 @@ enum AuditKeyEnt {
 enum AuditRollup {
     # (a) worst reporting latency for a suppressed occurrence: 60 s = 24 combat
     #     ticks, well inside operator reaction time.
-    # (b) clock-arm ceiling: AK_NKEYS(16) x (AUDIT_VERBATIM_MAX + 1 = 2) x
-    #     (3600/60 = 60) = 1920 entries/hour. A constant the code owns, with NO
-    #     rate term in it — that is the bound.
+    # (b) clock-arm ceiling: AK_NKEYS x (AUDIT_VERBATIM_MAX + 1) x (3600/60) =
+    #     17 x 2 x 60 = 2040 entries/hour from the CLOCK arm. That half carries no
+    #     rate term.
+    #
+    #     CORRECTED in 1.7.2. This used to claim the bound as a whole "carries NO
+    #     rate term in it", and that was wrong twice over: the count arm adds one
+    #     entry per AUDIT_SUPPRESS_MAX occurrences, which IS a rate term above the
+    #     crossover of 8192/60 = 136 ev/s; and 1.7.1's count arm re-stamped
+    #     AKE_WOPEN, which disabled the clock arm entirely under sustained load.
+    #     The re-stamp is gone. The true ceiling is
+    #         2040  +  (events/hour / 8192)
+    #     — measured 120 entries/hour up to 136 ev/s and 441 at 1000 ev/s, i.e.
+    #     734 KB/hour against the 667 MiB/hour this release began with. The bound
+    #     holds and is worth having; the DESCRIPTION was the defect.
     AUDIT_WINDOW_MS = 60000;
     # Occurrence 1 of a window is byte-identical to 1.7.0: same severity, same
     # action, same bare-name details, zero added latency. With six name slots the
@@ -538,7 +558,18 @@ fn audit_keyed(key, sev, action, who, wholen, now_ms): i64 {
     # every event and write verbatim every time — silently removing the bound
     # entirely, on the one target where you cannot watch it happen. Same bug class
     # as save_sweep_due's `last == 0` (1.6.8) and chpass_rate_limited's.
-    if (load64(sl + AKE_EMITTED) == 0) {
+    # AUDIT_VERBATIM_MAX is COMPARED here, not just documented. Until 1.7.2 this
+    # read `== 0` and the constant appeared in exactly two places, both of them
+    # prose — including the arithmetic above that multiplies by it. A constant
+    # that no code reads cannot be a term in a bound.
+    #
+    # HONEST NOTE ON COVERAGE: at the current value of 1 this is behaviourally
+    # identical to `== 0`, so no runtime test can distinguish them and the
+    # mutation back to `== 0` SURVIVES. That is a real limit, not an oversight —
+    # the change buys correctness if anyone ever retunes the constant, and it
+    # buys nothing observable today. Recorded rather than papered over with an
+    # assertion that would only appear to cover it.
+    if (load64(sl + AKE_EMITTED) < AUDIT_VERBATIM_MAX) {
         store64(sl + AKE_WOPEN, now_ms);
         store64(sl + AKE_SEV, sev);
         store64(sl + AKE_ACTION, action);
@@ -566,10 +597,23 @@ fn audit_keyed(key, sev, action, who, wholen, now_ms): i64 {
     # Count arm — the bound. Reads no clock, so it survives a dead one.
     if (load64(sl + AKE_SUPP) >= AUDIT_SUPPRESS_MAX) {
         _audit_rollup(key);
-        # Re-open immediately so the next occurrence is tallied rather than
-        # written verbatim: leaving EMITTED at 0 here would make a sustained flood
+        # Mark the window still open so the next occurrence is tallied rather than
+        # written verbatim — leaving EMITTED at 0 would make a sustained flood
         # alternate rollup/verbatim and double the entry count.
-        store64(sl + AKE_WOPEN, now_ms);
+        #
+        # 1.7.2 — AKE_WOPEN is deliberately NOT re-stamped here, and 1.7.1 did
+        # re-stamp it. That one line pushed the window's start forward on every
+        # count-arm fire, so above the crossover rate the 60 s clock arm never
+        # came due again and the freshness guarantee quietly disappeared:
+        # measured flat at 120 entries/hour up to 136 ev/s, then climbing to 441
+        # entries/hour at 1000 ev/s, against a comment asserting the ceiling
+        # "carries NO rate term in it".
+        #
+        # Worth naming for what it is: this release's sweep looked for "a
+        # per-item cap that is not a bound on the loop", found the SIXTH
+        # instance, and the sixth instance was inside 1.7.1's fix for the fifth.
+        # The counter reset that hid it here is the same shape as G2's
+        # SS_FAILS = 0, which is the reason 1.7.1 existed at all.
         store64(sl + AKE_EMITTED, 1);
     }
     return 0;
@@ -592,6 +636,95 @@ fn audit_flush_due(now_ms): i64 {
         k = k + 1;
     }
     return flushed;
+}
+
+# === Operator configuration (1.7.2). ===
+#
+# `data/server.cyml`, optional. Absent file, unreadable file, missing section or
+# missing key all mean "defaults" — a server with no config file behaves exactly
+# as 1.7.1 did, which is what makes this safe to add in a patch release.
+#
+# WHY A FILE RATHER THAN ONLY AN ENV KNOB. ADR 0007 §6 freezes the `YD_*` surface
+# and its Consequences block new knobs for the 1.x line. A config file is a
+# different surface, it uses the CYML parser this tree already has for zones and
+# classes, and — the part that matters over time — the NEXT operator setting costs
+# a key rather than another ADR amendment. `YD_MAX_ACCOUNTS` is honoured too and
+# WINS over the file, because that is the order container deployments expect; the
+# amendment recording both is in ADR 0007.
+#
+# Precedence, highest first:  YD_MAX_ACCOUNTS  >  data/server.cyml  >  built-in.
+var g_max_accounts = 0;        # 0 = UNLIMITED, and that is the default
+
+# Accounts currently on disk. Counted ONCE at boot and maintained in memory
+# thereafter.
+#
+# Deliberately not recounted per creation: `dir_list` (lib/fs.cyr) allocates a
+# 4096-byte scratch plus a vec plus a cloned Str per entry, all from the BUMP
+# arena, which has no free. Counting on every character creation would be a
+# permanent allocation per creation — precisely the defect class 1.7.1 spent a
+# release bounding. One listing at boot, an increment per creation.
+var g_account_count = 0;
+
+# Read the DOCUMENT PREAMBLE rather than an `[[entries]]` block. CYML files in
+# this tree are "preamble, then a list of entries with prose bodies" — the right
+# shape for zones and classes, which are lists of things. A config file is not a
+# list, so its settings are document-level keys and the file stays as small as it
+# looks in docs/guides/running.md:
+#
+#     game = "yeomans-descent"
+#     max_accounts = 2500
+#
+# No `[[entries]]`, no `---` body required.
+fn config_load(path): i64 {
+    var r = cyml_parse_file_r(path);
+    if (is_ok(r) == 0) { return 0; }            # no file → defaults
+    var doc = result_unwrap(r);
+    var hl = cyml_doc_header_len(doc);
+    if (hl <= 0) { return 0; }
+    var hs = str_new(cyml_doc_header(doc), hl);
+    var secs = toml_parse(hs);
+    if (vec_len(secs) == 0) { return 0; }
+    var pairs = toml_section_pairs(vec_get(secs, 0));
+    # Negative or non-integer reads as 0 = unlimited: an unparseable cap must
+    # never be MORE restrictive than the default, or a typo locks the operator
+    # out of their own server.
+    var m = toml_int(pairs, "max_accounts", 0);
+    if (m < 0) { m = 0; }
+    g_max_accounts = m;
+    return 1;
+}
+
+# YD_MAX_ACCOUNTS overrides the file. Same shape as apply_idle_env's knobs.
+fn config_apply_env(): i64 {
+    var v = getenv("YD_MAX_ACCOUNTS");
+    if (v == 0) { return 0; }
+    var m = atoi(v);
+    if (m < 0) { return 0; }
+    g_max_accounts = m;
+    return 1;
+}
+
+# Is the account cap reached? A pure predicate over its two inputs, so the rule is
+# testable without a filesystem — and `cap <= 0` means UNLIMITED, which is both the
+# default and the fail-open direction.
+fn accounts_full(count, cap): i64 {
+    if (cap <= 0)      { return 0; }
+    if (count >= cap)  { return 1; }
+    return 0;
+}
+
+# Count the records on disk. Called ONCE, from persist_init — see g_account_count
+# for why never again.
+#
+# Counts every entry in the players directory rather than filtering on `.cyml`:
+# nothing else writes there, and a filter that silently skipped an unexpected file
+# would UNDERCOUNT, which is the direction that breaks the cap. Overcounting a
+# stray file only makes the operator's limit slightly conservative.
+fn accounts_count_disk(): i64 {
+    var names = dir_list(str_from(DP_PLAYERS));
+    var n = vec_len(names);
+    if (n < 0) { return 0; }
+    return n;
 }
 
 # === Audit-log size (1.7.1) — the seam ADR 0009's rotation inherits. ===
@@ -928,6 +1061,7 @@ fn _build_record(s): i64 {
     off = _ac(off, "inv = \"");
     var it = load64(s + SS_INV);
     var first = 1;
+    var stop = 0;      # 1.7.2 — set by either walk when the byte budget is spent
     while (it != 0) {
         if (oi_tpl_id_len(it) > 0) {
             # G1 (1.6.13) — TRUNCATE the inventory here, do not poison the record.
@@ -975,14 +1109,41 @@ fn _build_record(s): i64 {
         var inner = oi_contents(it);
         while (inner != 0) {
             if (oi_tpl_id_len(inner) > 0) {
-                if (off > SAVE_CAP - SIG_TAIL) { off = SAVE_ERR; }
-                if (_sv_bad(off) == 1) { inner = 0; continue; }
+                # 1.7.2 — TRUNCATE HERE TOO. This loop used to set `off =
+                # SAVE_ERR`, which M11-D turns into "refuse the whole record" —
+                # ten lines below the comment above saying, in those words, to
+                # truncate and not poison the record.
+                #
+                # So G1's fix was real for the top-level walk and undone for the
+                # contents walk, and the 1.6.13 defect stayed fully reachable
+                # THROUGH A BAG: `inv_count` walks only the top-level SS_INV
+                # chain, `cmd_put` moves items into a carried container without
+                # counting them, and F11 flattens one level back into the same
+                # `inv` field. Probe-confirmed: 3 top-level items — far under
+                # MAX_INV — plus 200 in one bag refuses the record whole, and it
+                # keeps being refused until something is dropped, silently.
+                #
+                # An ordinary player with a sack does this. No malice required.
+                #
+                # `stop` rather than `it = 0` inside this loop: the outer body
+                # ends with `it = oi_next(it)`, so zeroing `it` here would
+                # dereference null on the way out.
+                if (off > SAVE_CAP - SIG_TAIL) {
+                    audit_keyed(AK_SAVE_INV_TRUNC, SEV_WARNING, "save.inv.truncated",
+                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN),
+                    clock_now_ms());
+                    stop = 1;
+                    inner = 0;
+                    continue;
+                }
+                if (_sv_bad(off) == 1) { stop = 1; inner = 0; continue; }
                 if (first == 0) { off = _ac(off, ","); }
                 off = _ap(off, oi_tpl_id_ptr(inner), oi_tpl_id_len(inner));
                 first = 0;
             }
             inner = oi_next(inner);
         }
+        if (stop == 1) { it = 0; continue; }
         it = oi_next(it);
     }
     off = _ac(off, "\"\n");
@@ -1513,6 +1674,31 @@ fn login_on_confirm(s, buf, len): i64 {
     if (player_exists(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN)) == 1) {
         return _create_taken(s);
     }
+    # 1.7.2 — the account cap, if the operator set one.
+    #
+    # OFF by default (`max_accounts = 0` means unlimited), because how many
+    # characters a world should hold is an operator's decision and not this
+    # server's. Set it in `data/server.cyml` or with `YD_MAX_ACCOUNTS`.
+    #
+    # Checked HERE, at the commit point, and not at the name prompt: this is the
+    # line after which a record exists, and it is the same place the duplicate and
+    # already-online checks sit for the same reason. Refusing earlier would tell a
+    # prospective player the world is full before they had even chosen a
+    # passphrase, and refusing later would leave a record behind.
+    #
+    # It is a bound on ACCOUNTS, not on attempts — an attacker who cannot create
+    # can still connect, so this does not replace the login and passwd rate limits.
+    # What it bounds is permanent disk: every account leaves a file forever.
+    if (accounts_full(g_account_count, g_max_accounts) == 1) {
+        session_echo_on(s);
+        session_appendtx_cstr(s, "\r\nThis world is not accepting new characters.");
+        session_appendtx_cstr(s, " Please contact the operator.\r\n");
+        store64(s + SS_QUIT, 1);
+        audit_keyed(AK_ACCOUNTS_FULL, SEV_WARNING, "accounts.full",
+        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+        return 0;
+    }
+    g_account_count = g_account_count + 1;
     store64(s + SS_FAILS, 0);   # sealed — the creation attempt count resets
     store64(blk + IDENT_CREATED, get_epoch_secs());
     store64(s + SS_AUTHED, 1);

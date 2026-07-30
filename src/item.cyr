@@ -391,10 +391,34 @@ fn append_item_name(s, o): i64 {
 enum InvCap { MAX_INV = 100; }
 
 # How many items this session is carrying.
+# 1.7.2 — count what is INSIDE a carried container as carried.
+#
+# This walked only the top-level SS_INV chain, which made MAX_INV bypassable by an
+# ordinary player with a sack: `cmd_put` moves an item into a container's
+# OI_CONTENTS with no count check, so the item leaves SS_INV and the count DROPS.
+# Fill your hands to 100, put 99 in a bag, and `get` 99 more — repeat without
+# bound. Nothing in the acquisition path could see it, because the collection it
+# was counting was not the collection the cap is about.
+#
+# It matters because `_build_record` FLATTENS one level back into the same `inv`
+# field (F11, 1.6.11), so the bytes a save must serialise are the TOTAL, not the
+# top level. The cap and the serialiser were counting two different things, and
+# the serialiser's byte budget is what actually breaks — that is the save-poison
+# this release also fixes as a net.
+#
+# One level, matching F11's flatten depth exactly, which is safe because `cmd_put`
+# caps nesting at depth 1 by refusing to put a non-empty container into anything.
+# Cost is O(total carried), called per acquisition, and bounded by MAX_INV itself
+# — a few thousand pointer hops at the cap.
 fn inv_count(s): i64 {
     var n = 0;
     var o = load64(s + SS_INV);
-    while (o != 0) { n = n + 1; o = oi_next(o); }
+    while (o != 0) {
+        n = n + 1;
+        var inner = oi_contents(o);
+        while (inner != 0) { n = n + 1; inner = oi_next(inner); }
+        o = oi_next(o);
+    }
     return n;
 }
 
@@ -404,6 +428,26 @@ fn inv_full(s): i64 {
     if (inv_count(s) < MAX_INV) { return 0; }
     session_appendtx_cstr(s, "Your hands and pockets are full.\r\n");
     return 1;
+}
+
+# Does `slot` already sit inside this session's possessions? (1.7.2.)
+#
+# Needed because counting a carried container's contents (the same release) made
+# the carry cap OVER-apply: moving an item from a bag you are holding into your
+# hands does not change how much you carry, but `inv_full` had started refusing it
+# at the cap — so a player at 100 could never retrieve their own belongings. The
+# cap belongs on ACQUISITION, and a move within your own possessions is not one.
+#
+# One level, matching inv_count and F11's flatten depth, which is exact because
+# cmd_put refuses to nest a non-empty container.
+fn inv_owns_slot(s, slot): i64 {
+    if (slot == s + SS_INV) { return 1; }
+    var o = load64(s + SS_INV);
+    while (o != 0) {
+        if (o + OI_CONTENTS == slot) { return 1; }
+        o = oi_next(o);
+    }
+    return 0;
 }
 
 # === get_from — move item(s) from `from_slot` to `to_slot`. ===
@@ -421,8 +465,12 @@ fn get_from(s, from_slot, to_slot, qall, np, nl, nth, where): i64 {
             if (nl > 0) { if (kw_matches(np, nl, oi_kw_ptr(o)) == 0) { take = 0; } }
             if (take == 1) {
                 # G1 — stop at the cap mid-sweep rather than silently overfilling.
+                # 1.7.2 — but only for a genuine ACQUISITION. Taking from a
+                # container you already carry leaves your total unchanged.
                 if (to_slot == s + SS_INV) {
-                    if (inv_full(s) == 1) { o = 0; continue; }
+                    if (inv_owns_slot(s, from_slot) == 0) {
+                        if (inv_full(s) == 1) { o = 0; continue; }
+                    }
                 }
                 ilist_remove(from_slot, o);
                 ilist_push(to_slot, o);
@@ -448,7 +496,9 @@ fn get_from(s, from_slot, to_slot, qall, np, nl, nth, where): i64 {
         return 0;
     }
     if (to_slot == s + SS_INV) {
-        if (inv_full(s) == 1) { return 0; }   # G1
+        if (inv_owns_slot(s, from_slot) == 0) {   # 1.7.2 — acquisition only
+            if (inv_full(s) == 1) { return 0; }   # G1
+        }
     }
     ilist_remove(from_slot, o);
     ilist_push(to_slot, o);

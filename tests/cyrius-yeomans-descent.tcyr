@@ -3988,6 +3988,285 @@ fn test_carry_cap(): i64 {
     return 0;
 }
 
+# Items hanging directly off SS_INV, ignoring container contents. Distinct from
+# inv_count (which counts the total) precisely so a test can tell a MOVE from a
+# refusal — both leave the total alone.
+fn _top_count(s): i64 {
+    var n = 0;
+    var o = load64(s + SS_INV);
+    while (o != 0) { n = n + 1; o = oi_next(o); }
+    return n;
+}
+
+# === 1.7.2 — operator config and the account cap. ===
+#
+# The cap is OFF by default and always will be: how many characters a world holds
+# is an operator's decision, not this server's. What 1.7.2 adds is a way to SET
+# one — `data/server.cyml`, overridden by YD_MAX_ACCOUNTS.
+#
+# `accounts_full` is a pure predicate over (count, cap) so the rule is enumerable
+# without a filesystem, which is the same seam save_sweep_due and
+# chpass_rate_limited use.
+fn test_account_cap(): i64 {
+    test_group("account-cap");
+
+    # --- UNLIMITED is the default, and 0 is what expresses it. This is the
+    # assertion that stops someone "tidying" the sentinel into a MAX_INT.
+    assert_eq(accounts_full(0, 0), 0, "a cap of 0 means unlimited");
+    assert_eq(accounts_full(999999, 0), 0, "...at any count whatsoever");
+    assert_eq(accounts_full(999999, 0 - 1), 0,
+              "a negative cap is unlimited too, not inverted into 'always full'");
+
+    # --- A real cap is a boundary, and the boundary is 'at or above'.
+    assert_eq(accounts_full(2499, 2500), 0, "one under the cap admits a new character");
+    assert_eq(accounts_full(2500, 2500), 1, "exactly at the cap refuses");
+    assert_eq(accounts_full(2501, 2500), 1, "over the cap refuses");
+    assert_eq(accounts_full(0, 1), 0, "a cap of 1 admits the first character");
+    assert_eq(accounts_full(1, 1), 1, "...and refuses the second");
+
+    # --- The config file. An absent file must leave the default alone, because
+    # every existing deployment has no such file and must behave as 1.7.1 did.
+    g_max_accounts = 0;
+    assert_eq(config_load("data/does-not-exist-server.cyml"), 0,
+              "an absent config file is not an error");
+    assert_eq(g_max_accounts, 0, "...and leaves the default untouched");
+
+    # A real file is read from the document PREAMBLE, so the operator's config is
+    # two lines rather than an [[entries]] block with a prose body.
+    assert_eq(config_load("tests/fixtures/server.cyml"), 1, "a config file parses");
+    assert_eq(g_max_accounts, 2500, "...and its max_accounts is applied");
+
+    # A malformed value must fail OPEN to unlimited, never to a smaller cap: a
+    # typo in a config file must not lock an operator out of their own world.
+    assert_eq(config_load("tests/fixtures/server-bad.cyml"), 1, "a malformed config still parses");
+    assert_eq(g_max_accounts, 0, "...and a bad max_accounts falls back to UNLIMITED, not to 0 slots");
+    assert_eq(accounts_full(999999, g_max_accounts), 0,
+              "so a typo cannot refuse every new character");
+
+    # A NEGATIVE value specifically. The first version of this group used a
+    # non-numeric value, which toml_int turns into the default before the clamp is
+    # ever reached — so the clamp survived mutation. A negative literal is the only
+    # input that exercises it.
+    assert_eq(config_load("tests/fixtures/server-neg.cyml"), 1, "a negative config parses");
+    assert_eq(g_max_accounts, 0, "a NEGATIVE max_accounts clamps to unlimited, not to 'always full'");
+
+    # --- THE ENFORCEMENT POINT. The predicate being right is not the same as it
+    # being consulted; nothing above drives creation, and the first version of this
+    # group let "the cap is never enforced" survive mutation because of it.
+    _path_for("Capped", 6, g_persist_path);
+    syscall(87, g_persist_path);            # unlink — the name must not exist
+    var cap_s = _mk_sess("Capped", 6);
+    store64(cap_s + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(cap_s + SS_FD, 0 - 1);
+    store64(cap_s + SS_PHASE, PHASE_CONFIRMPASS);
+    var cap_blk = sess_ident(cap_s);
+    var cap_salt = alloc(SALT_LEN);
+    var cz = 0;
+    while (cz < SALT_LEN) { store8(cap_salt + cz, 61 + cz); cz = cz + 1; }
+    memcpy(cap_blk, cap_salt, SALT_LEN);
+    ident_derive(cap_salt, "cappedphrase", 12, cap_blk + IDENT_SK, cap_blk + IDENT_PK);
+
+    var saved_max = g_max_accounts;
+    var saved_cnt = g_account_count;
+    g_max_accounts = 1;
+    g_account_count = 1;                    # already at the cap
+    login_on_confirm(cap_s, "cappedphrase", 12);
+    assert_eq(load64(cap_s + SS_QUIT), 1, "a correct confirm at the cap is REFUSED");
+    assert(load64(cap_s + SS_PHASE) != PHASE_CLASS,
+           "...and the session never reaches class selection");
+    assert_eq(g_account_count, 1, "...and no account was counted");
+    assert_eq(player_exists("Capped", 6), 0, "...and no record was written");
+
+    # And with room, the same session commits normally — otherwise this group
+    # would pass with creation broken outright.
+    var ok_s = _mk_sess("Capped", 6);
+    store64(ok_s + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(ok_s + SS_FD, 0 - 1);
+    store64(ok_s + SS_PHASE, PHASE_CONFIRMPASS);
+    var ok_blk = sess_ident(ok_s);
+    memcpy(ok_blk, cap_salt, SALT_LEN);
+    ident_derive(cap_salt, "cappedphrase", 12, ok_blk + IDENT_SK, ok_blk + IDENT_PK);
+    g_account_count = 0;                    # room for one
+    login_on_confirm(ok_s, "cappedphrase", 12);
+    assert_eq(load64(ok_s + SS_QUIT), 0, "under the cap, creation is not refused");
+    assert_eq(load64(ok_s + SS_PHASE), PHASE_CLASS, "...and it proceeds to class selection");
+    assert_eq(g_account_count, 1, "...and the account is counted");
+
+    g_max_accounts = saved_max;
+    g_account_count = saved_cnt;
+    _path_for("Capped", 6, g_persist_path);
+    syscall(87, g_persist_path);
+
+    g_max_accounts = 0;
+    return 0;
+}
+
+# === 1.7.2 — the carry cap is a bound, and a full bag never poisons a save. ===
+#
+# Two halves of one defect, and the second is the reason the first mattered.
+#
+# `inv_count` walked only the top-level SS_INV chain while `cmd_put` moved items
+# into a carried container without counting them — so an ordinary player could
+# fill their hands, put the lot in a sack, and acquire another full load, without
+# bound. Meanwhile `_build_record` FLATTENS one level back into the same `inv`
+# field, so the bytes a save must serialise are the TOTAL. The cap and the
+# serialiser were counting two different collections.
+#
+# And when the serialiser ran out of budget, its inner contents loop set SAVE_ERR
+# — which M11-D turns into "refuse the whole record" — ten lines below a comment
+# saying to truncate instead. So the 1.6.13 defect (a player silently stops
+# persisting, forever, until they drop something) was fully reachable through a
+# bag, by a player with no malice at all.
+fn test_carry_cap_container(): i64 {
+    test_group("carry-cap-container");
+
+    var s = _freeable_sess();
+    store64(s + SS_AUTHED, 1);
+    store64(s + SS_ROOM, 0 - 1);
+    store64(s + SS_INV, 0);
+
+    # --- inv_count sees what is in the bag.
+    assert_eq(inv_count(s), 0, "an empty session carries nothing");
+    if (g_obj_tpl_count == 0) { assert(0, "carry-cap-container: needs object templates"); return 0; }
+    var bag = item_new(ot_at(0));
+    assert(bag != 0, "an object instance is available to test with");
+    ilist_push(s + SS_INV, bag);
+    assert_eq(inv_count(s), 1, "the bag itself counts");
+
+    var k = 0;
+    while (k < 5) {
+        ilist_push(bag + OI_CONTENTS, item_new(ot_at(0)));
+        k = k + 1;
+    }
+    # THE ASSERTION. Before 1.7.2 this read 1: the five items were invisible to
+    # the cap because they had left SS_INV.
+    assert_eq(inv_count(s), 6,
+              "items inside a carried container COUNT — the bag is not a loophole");
+
+    # --- ...but the cap must not OVER-apply. Counting bag contents made
+    # `get <x> from <my own bag>` fail at the cap, because the total is unchanged
+    # by that move and `inv_full` refused it anyway — so a player at 100 could
+    # never retrieve their own belongings. A regression introduced by the line
+    # above, caught by the class sweep, and the reason the cap now asks whether
+    # the SOURCE is already yours.
+    assert_eq(inv_owns_slot(s, s + SS_INV), 1, "your own inventory slot is yours");
+    assert_eq(inv_owns_slot(s, bag + OI_CONTENTS), 1, "a bag you carry is yours");
+    var loose = item_new(ot_at(0));
+    assert_eq(inv_owns_slot(s, loose + OI_CONTENTS), 0,
+              "a container you are NOT carrying is not yours");
+    assert_eq(inv_owns_slot(s, 0), 0, "and a null slot is not yours");
+
+    # Drive the real verb at the cap: taking from a carried bag must succeed.
+    var atcap = _freeable_sess();
+    store64(atcap + SS_AUTHED, 1);
+    store64(atcap + SS_ROOM, 0 - 1);
+    store64(atcap + SS_INV, 0);
+    var cbag = item_new(ot_at(0));
+    ilist_push(atcap + SS_INV, cbag);
+    var ci2 = 0;
+    while (ci2 < MAX_INV + 10) {
+        ilist_push(cbag + OI_CONTENTS, item_new(ot_at(0)));
+        ci2 = ci2 + 1;
+    }
+    assert_eq(inv_full(atcap), 1, "this session really is over the cap");
+    # Count the TOP LEVEL, not the total. The total is unchanged whether the item
+    # moved or the move was refused, so asserting on it cannot tell success from
+    # failure — the first version of this assertion did exactly that and let the
+    # regression survive mutation.
+    var before_top = _top_count(atcap);
+    var before_all = inv_count(atcap);
+    get_from(atcap, cbag + OI_CONTENTS, atcap + SS_INV, 0,
+             oi_kw_ptr(load64(cbag + OI_CONTENTS)), 1, 1, "in your bag");
+    assert_eq(_top_count(atcap), before_top + 1,
+              "taking from your OWN bag at the cap REALLY MOVES the item into your hands");
+    assert_eq(inv_count(atcap), before_all,
+              "...and the total you carry is unchanged, which is why the cap must not apply");
+    _drain_ilist(atcap + SS_INV);
+    session_free(atcap);
+
+    # And the cap is therefore a real bound on what a save must serialise.
+    var full = _freeable_sess();
+    store64(full + SS_AUTHED, 1);
+    store64(full + SS_ROOM, 0 - 1);
+    store64(full + SS_INV, 0);
+    var fbag = item_new(ot_at(0));
+    ilist_push(full + SS_INV, fbag);
+    var j = 0;
+    while (j < MAX_INV + 20) {
+        ilist_push(fbag + OI_CONTENTS, item_new(ot_at(0)));
+        j = j + 1;
+    }
+    assert(inv_count(full) > MAX_INV, "the fixture really is over the cap");
+    assert_eq(inv_full(full), 1,
+              "a session whose bag is over the cap is FULL — acquisition is refused");
+    _drain_ilist(full + SS_INV);
+    session_free(full);
+
+    # --- THE DATA-LOSS HALF, and the one that matters most.
+    #
+    # A bag holding enough items to exhaust the record's byte budget must
+    # TRUNCATE the list, exactly as the top-level walk does — not poison the
+    # record. Poisoning means `_build_record` returns -1, M11-D refuses the whole
+    # record, and the player stops persisting entirely: not just the overflow
+    # items but their room, HP, class and every future change, silently, until
+    # they happen to drop something.
+    #
+    # This drives the real writer end to end, because the bug lives in the
+    # interaction between the outer and inner walks. An assertion on `inv_count`
+    # alone does NOT reach it — the first version of this group proved that by
+    # letting the poison mutation survive.
+    var poison = _mk_sess("Hoarder", 7);
+    var psalt = alloc(SALT_LEN);
+    var pq = 0;
+    while (pq < SALT_LEN) { store8(psalt + pq, 33 + pq); pq = pq + 1; }
+    var pblk = sess_ident(poison);
+    memcpy(pblk, psalt, SALT_LEN);
+    ident_derive(psalt, "hoarderpass", 11, pblk + IDENT_SK, pblk + IDENT_PK);
+    store64(pblk + IDENT_CREATED, 1000000);
+    store64(poison + SS_ROOM, 0 - 1);
+    store64(poison + SS_HP, 7); store64(poison + SS_MAXHP, 7);
+    store64(poison + SS_AUTHED, 1);
+    store64(poison + SS_INV, 0);
+
+    # Three loose items — comfortably under MAX_INV, which is the point: nothing
+    # on the acquisition path was ever going to notice this.
+    ilist_push(poison + SS_INV, item_new(ot_at(0)));
+    ilist_push(poison + SS_INV, item_new(ot_at(0)));
+    var sack = item_new(ot_at(0));
+    ilist_push(poison + SS_INV, sack);
+    var pi = 0;
+    while (pi < 900) {
+        ilist_push(sack + OI_CONTENTS, item_new(ot_at(0)));
+        pi = pi + 1;
+    }
+
+    var pa0 = g_audit_emitted;
+    audit_coalesce_reset();
+    assert(_build_record(poison) > 0,
+           "a record whose bag overflows the byte budget is BUILT, not refused");
+    assert_eq(player_save(poison), 1,
+              "...and it SAVES — the player keeps persisting, minus the overflow items");
+    assert(g_audit_emitted - pa0 > 0,
+           "and the truncation is audited, so an operator can see it happened");
+
+    # It is genuinely still loadable afterwards — a truncated record is only
+    # useful if it round-trips.
+    var back = _mk_sess("Hoarder", 7);
+    assert_eq(player_auth_load(back, "hoarderpass", 11), 1,
+              "the truncated record loads back cleanly");
+    assert_eq(load64(back + SS_HP), 7, "...with the non-inventory fields intact");
+    # NOT session_free'd: _mk_sess leaves SS_TS == 0 and session_free calls
+    # telnet_state_free unconditionally, which dereferences null. The suite's
+    # _freeable_sess exists for sessions that must be torn down; these are
+    # fixtures that simply go out of scope, as elsewhere in this file.
+    _drain_ilist(back + SS_INV);
+    _drain_ilist(poison + SS_INV);
+
+    _drain_ilist(s + SS_INV);
+    session_free(s);
+    return 0;
+}
+
 # === 1.7.1 — the audit rollup window. ===
 #
 # Every audit_event costs 1944 permanently-unreclaimable bytes (1640 bump, which
@@ -4137,6 +4416,40 @@ fn test_audit_coalesce(): i64 {
            "the count arm sits above the design flood's per-window count, so the clock arm governs there");
     assert(1 + 20 + AUDIT_NAMES_MAX * (1 + NAME_MAX) <= AUDIT_DET_CAP,
            "the worst-case rollup details fits the scratch buffer");
+
+    # --- 1.7.2: the count arm must NOT re-stamp the window.
+    #
+    # 1.7.1's count arm pushed AKE_WOPEN forward on every fire, so above the
+    # crossover rate the 60 s clock arm never came due again and freshness
+    # silently disappeared — while the comment beside it asserted the ceiling
+    # "carries NO rate term". This is the sixth instance of the defect class this
+    # project keeps hitting, and it was inside the fix for the fifth.
+    audit_coalesce_reset();
+    audit_keyed(AK_LOGIN_DUP, SEV_WARNING, "login.dup", nm, 7, 1000);   # opens at t=1000
+    var wslot = _audit_slot(AK_LOGIN_DUP);
+    assert_eq(load64(wslot + AKE_WOPEN), 1000, "the window records when it opened");
+    var w = 0;
+    while (w < AUDIT_SUPPRESS_MAX + 5) {
+        audit_keyed(AK_LOGIN_DUP, SEV_WARNING, "login.dup", nm, 7, 1001);
+        w = w + 1;
+    }
+    assert_eq(load64(wslot + AKE_WOPEN), 1000,
+              "the count arm does NOT move the window's start — the clock arm stays due");
+    # And it really does still fire on schedule afterwards.
+    var rr = g_audit_rollups;
+    assert_eq(audit_flush_due(1000 + AUDIT_WINDOW_MS), 1,
+              "...so an expired window is still flushed after a count-arm burst");
+    assert(g_audit_rollups > rr, "and that flush produced a rollup");
+
+    # AUDIT_VERBATIM_MAX is READ by the code, not merely documented. Until 1.7.2
+    # it appeared only in prose — including the arithmetic that multiplies by it.
+    assert_eq(AUDIT_VERBATIM_MAX, 1, "one verbatim entry opens a window");
+    audit_coalesce_reset();
+    var v0 = g_audit_emitted;
+    audit_keyed(AK_SAVE, SEV_INFO, "save", nm, 7, 2000);
+    audit_keyed(AK_SAVE, SEV_INFO, "save", nm, 7, 2001);
+    assert_eq(g_audit_emitted - v0, AUDIT_VERBATIM_MAX,
+              "exactly AUDIT_VERBATIM_MAX occurrences are written verbatim per window");
 
     # --- ADR 0009's size seam. A pure boundary predicate, so the threshold is
     # testable without an 8 MiB file — and 1.7.2's rotation trigger calls the SAME
@@ -4976,6 +5289,8 @@ fn main() {
     test_chpass_rate();
     test_audit_verifiable();
     test_audit_coalesce();
+    test_carry_cap_container();
+    test_account_cap();
 
     return assert_summary();
 }

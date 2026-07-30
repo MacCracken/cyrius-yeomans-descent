@@ -1,0 +1,3 @@
+game = "yeomans-descent"
+name = "Test Server Config"
+max_accounts = 2500
