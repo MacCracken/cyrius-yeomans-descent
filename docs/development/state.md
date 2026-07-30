@@ -11,7 +11,7 @@
 
 ## Version
 
-**1.7.2** — 2026-07-29. **938 assertions**; `cyrius audit` exits 0; 6/6 benches;
+**1.7.2** — 2026-07-29. **946 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build.
 
 **The carry cap becomes a bound, and the operator gets a say.** A carried
@@ -39,6 +39,14 @@ bag). Both caught by mutation testing, not by review.
 - *Assert the thing that distinguishes.* Two assertions this release could not tell
   success from failure: a total unchanged whether an item moved or the move was
   refused, and a config fixture whose value never reached the clamp under test.
+- *An unchecked write is a lie with a delay.* Sharding broke a forged-record test
+  on CI, which reported `-1 instead of -2` — "no record" rather than "tampered" —
+  because `file_write_all` into a not-yet-existent shard directory failed and
+  nobody looked at the return. The symptom pointed nowhere near the cause. Test
+  fixtures that write records now go through `_write_record_raw`, which creates the
+  directory and asserts the write. **Reproduce a CI failure by making the local
+  environment match** — `rm -rf data/players` reproduced it exactly, and is now
+  the check to run before claiming a persistence change is green.
 
 **1.7.1** — 2026-07-29. **873 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build (`x86_64` + `--agnos`).

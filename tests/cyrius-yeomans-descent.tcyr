@@ -775,7 +775,7 @@ fn test_persist(): i64 {
     _path_for("TestPlayer", 10, g_persist_path);
     var tn = file_read_all(g_persist_path, g_persist_slurp, SLURP_CAP - 1);
     store8(g_persist_slurp + 20, load8(g_persist_slurp + 20) ^ 0x01);
-    file_write_all(g_persist_path, g_persist_slurp, tn);
+    _write_record_raw("TestPlayer", 10, g_persist_slurp, tn);
     var s4 = fl_alloc(SS_SIZE); memset(s4, 0, SS_SIZE);
     var nmb4 = fl_alloc(NAME_CAP); store64(s4 + SS_NAME_BUF, nmb4);
     memcpy(nmb4, "TestPlayer", 10); store64(s4 + SS_NAME_LEN, 10);
@@ -966,8 +966,7 @@ fn test_security(): i64 {
     o = _str_into(fbuf, o, "\"\nsig = \"");
     k = 0; while (k < 128) { store8(fbuf + o, 48); o = o + 1; k = k + 1; }
     o = _str_into(fbuf, o, "\"\n");
-    _path_for("Forged", 6, g_persist_path);
-    file_write_all(g_persist_path, fbuf, o);
+    _write_record_raw("Forged", 6, fbuf, o);
     var s4 = _mk_sess("Forged", 6);
     # H5 (1.6.2) moved the passlen bounds ABOVE the record read, so this must use
     # an in-range passphrase to still reach the salt-length check — "x" (len 1)
@@ -3985,6 +3984,28 @@ fn test_carry_cap(): i64 {
     return 0;
 }
 
+# Write raw bytes as a player's record, creating the shard directory first, and
+# ASSERT the write landed.
+#
+# Both halves are load-bearing, and CI proved it. Since 1.7.2 `_path_for` returns
+# `data/players/<c>/<name>.cyml`, and on a FRESH checkout that directory does not
+# exist — so a bare `file_write_all` fails, the record never lands, and whatever
+# reads it back reports something unrelated. A forged-record test failed CI with
+# "got -1, expected -2" — "no record" rather than "tampered" — which points
+# nowhere near a missing directory.
+#
+# It passed locally for the worst possible reason: a stale pre-sharding flat file
+# was still on disk and the compatibility fallback found it. A test that depends
+# on leftover state is not a test, which is the same lesson the shard-mkdir
+# mutation taught one commit earlier.
+fn _write_record_raw(name, nl, buf, len): i64 {
+    _shard_mkdir(name, nl);
+    _path_for(name, nl, g_persist_path);
+    var w = file_write_all(g_persist_path, buf, len);
+    assert(w >= 0, "test fixture: the record file was actually written");
+    return w;
+}
+
 # Remove a player's record from BOTH layouts (1.7.2).
 #
 # Since 1.7.2 records are written to `data/players/<c>/<name>.cyml` and the flat
@@ -5065,7 +5086,7 @@ fn test_auth_order(): i64 {
     var hp_at = _find_cstr(g_persist_slurp, tn, "hp = 12");
     assert(hp_at >= 0, "the fixture record contains the hp field to corrupt");
     store8(g_persist_slurp + hp_at + 5, 57);          # hp = 12 -> hp = 92
-    file_write_all(g_persist_path, g_persist_slurp, tn);
+    _write_record_raw("Orderly", 7, g_persist_slurp, tn);
     var v3 = g_charge_verifies;
     assert_eq(player_auth_load(_mk_sess("Orderly", 7), "orderlypass", 11), 0 - 2,
               "a field-tampered record is still refused as tampered");
@@ -5199,7 +5220,7 @@ fn test_freeze(): i64 {
     o = _str_into(rec, o, "sig = \"");
     o = _str_into(rec, o, hex_encode(sig, SIG_LEN));
     o = _str_into(rec, o, "\"\n");
-    file_write_all(g_persist_path, rec, o);
+    _write_record_raw("FreezeHero", 10, rec, o);
     var s3 = _mk_sess("FreezeHero", 10);
     # M11-B: a too-new record gets its OWN code, distinct from the
     # unreadable/tampered code. It is intact and correctly signed — it just
@@ -5229,8 +5250,7 @@ fn _plant_record(blk, body): i64 {
     o = _str_into(rec, o, "sig = \"");
     o = _str_into(rec, o, hex_encode(sig, SIG_LEN));
     o = _str_into(rec, o, "\"\n");
-    _path_for("FreezeHero", 10, g_persist_path);
-    file_write_all(g_persist_path, rec, o);
+    _write_record_raw("FreezeHero", 10, rec, o);
     return 0;
 }
 

@@ -6,8 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [1.7.2] — 2026-07-29
 
-**The carry cap becomes a bound, and the operator gets a say.** 938 assertions
-(was 921). The class sweep this release was named for found the defect **inside
+**The carry cap becomes a bound, and the operator gets a say.** 946 assertions (was 921). The class sweep this release was named for found the defect **inside
 1.7.1's fix for it**, which is the most useful thing in these notes.
 
 ### Fixed
@@ -83,6 +82,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   it. The four frozen names are untouched; verbs, save schema, wire behaviour and
   the zone format stay frozen. A sixth knob would need its own argument —
   "1.7.2 did it" is explicitly not one.
+
+### Note for anyone with a pre-1.7.2 `data/`
+
+Nothing to do — the flat layout is read and each record migrates on its next
+save. But be aware the compatibility fallback makes **stale** flat records visible
+again: a name whose sharded record you delete stays "taken" while a legacy copy
+remains. That is correct (a record exists), and it is worth knowing if you have
+been hand-managing files. The suite's `_player_unlink` helper clears both layouts
+for the same reason.
 
 ### Known-unbounded (tracked, not fixed here)
 
