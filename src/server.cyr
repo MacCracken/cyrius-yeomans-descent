@@ -689,7 +689,13 @@ fn advance_tick(): i64 {
     # flood that STOPS leaves its tail counted but unwritten until its key happens
     # to fire again, which for an attack that ended is never. One walk of a
     # 16-entry table per tick; no allocation unless something is actually pending.
-    audit_flush_due(clock_now_ms());
+    # 1.7.4 — one clock sample for both audit rules. The rollup flush lands the
+    # tail of a flood that stopped; ADR 0009's size probe is metered by
+    # audit_rotate_check_due, so it costs nothing on 23 ticks out of 24 and ~2.6 us
+    # (zero arena) on the 24th — against ADR 0001's 50 ms.
+    var audit_now = clock_now_ms();
+    audit_flush_due(audit_now);
+    if (audit_rotate_check_due(g_tick_count) == 1) { audit_rotate_maybe(audit_now); }
     mob_tick_all(g_tick_count);   # M13 — every living mob takes a turn
     corpse_decay_sweep();   # M12-A — age out corpses and reclaim them
     maybe_zone_reset();  # M7 — respawn mobs/loot when the zone empties out

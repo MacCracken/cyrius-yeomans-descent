@@ -138,6 +138,8 @@ fn persist_init(): i64 {
     # kept, so the in-memory cost is O(1) instead of O(events). The durable
     # chain in data/audit.libro is unchanged and verifies the same.
     if (g_audit_head == 0) { g_audit_head = alloc(AUDIT_HEAD_CAP); }
+    if (g_audit_segbuf == 0) { g_audit_segbuf = alloc(PATH_CAP); }
+    if (g_audit_mark == 0) { g_audit_mark = alloc(AUDIT_MARK_CAP); }
     g_audit_chain = chain_new_streaming();
     g_audit_store = filestore_open(str_from(DP_AUDIT));
     _audit_resume_head();
@@ -174,41 +176,26 @@ fn persist_init(): i64 {
 # for anything else.
 fn _audit_resume_head(): i64 {
     if (g_audit_chain == 0) { return 0; }
-    var fd = file_open(DP_AUDIT, O_RDONLY, 0);
-    if (fd < 0) { return 0; }
-    var size = syscall(SYS_LSEEK, fd, 0, 2);          # SEEK_END
-    if (size <= 0) { file_close(fd); return 0; }
-    var want = SLURP_CAP - 1;
-    if (size < want) { want = size; }
-    syscall(SYS_LSEEK, fd, size - want, 0);           # SEEK_SET
-    var n = sys_read(fd, g_persist_slurp, want);
-    file_close(fd);
-    if (n <= 0) { return 0; }
-    var h = _audit_last_hash(g_persist_slurp, n);
-    if (h == 0) { return 0; }
-    # 1.7.3 — COPY the hash rather than handing the chain a borrow.
+    # 1.7.4 / ADR 0009 — THE CRASH WINDOW, and this is where it closes.
     #
-    # WHAT IS ESTABLISHED. `str_new` STORES THE POINTER; it does not copy
-    # (lib/str.cyr:43). So this used to leave the chain's prev-link pointing into
-    # `g_persist_slurp` — the same buffer `player_auth_load` reads a player record
-    # into. A stored reference to a buffer that other code overwrites is a hazard
-    # on its own terms, and removing it costs one memcpy of at most 64 bytes at
-    # boot.
-    #
-    # WHAT IS NOT ESTABLISHED, stated plainly so nobody inherits an assumption:
-    # I have NOT demonstrated this producing a broken link. A probe that resumes
-    # the head and then authenticates reports zero broken links both with and
-    # without this copy, because a successful `player_auth_load` also appends
-    # `login.ok`, and the ordering that would expose a stale link did not
-    # reproduce. The working log does contain exactly one broken link (record 554
-    # of 39,245) and I do not know its cause — attributing it to this would be a
-    # guess dressed as a finding.
-    #
-    # So: a latent hazard removed cheaply, not a diagnosed outage.
-    var hl = str_len(h);
-    if (hl > AUDIT_HEAD_CAP) { hl = AUDIT_HEAD_CAP; }
-    memcpy(g_audit_head, str_data(h), hl);
-    chain_set_prev_hash(g_audit_chain, str_new(g_audit_head, hl));
+    # 1.6.6 read the tail of the live file and stopped there. From 1.7.4 the live
+    # file can be legitimately EMPTY OR ABSENT: rotation renames it away and the
+    # first append recreates it, so a crash between those two leaves nothing to
+    # read. Falling back to genesis there re-manufactures exactly the broken link
+    # H11 removed — one per boundary, indistinguishable from a deletion, in a log
+    # whose only job is to be tamper-evident. So the newest SEGMENT is consulted
+    # second.
+    var hn = _audit_tail_hash(DP_AUDIT, g_audit_head);
+    if (hn == 0) {
+        var hi = _audit_seg_hi();
+        if (hi > 0) {
+            if (_audit_seg_path(hi, g_audit_segbuf) > 0) {
+                hn = _audit_tail_hash(g_audit_segbuf, g_audit_head);
+            }
+        }
+    }
+    if (hn == 0) { return 0; }
+    chain_set_prev_hash(g_audit_chain, str_new(g_audit_head, hn));
     return 0;
 }
 
@@ -260,6 +247,45 @@ var g_audit_emitted = 0;
 # Owned storage for the chain's resumed prev-link (1.7.3). A SHA-256 hex digest
 # is 64 bytes; 128 is headroom for a longer digest without another edit here.
 enum AuditHead { AUDIT_HEAD_CAP = 128; }
+
+# === ADR 0009 — audit-log rotation (1.7.4). ===
+#
+# Seal and continue: rename the live file to data/audit.libro.<N> and keep
+# appending to the live path with the SAME streaming chain, so the first entry
+# after the rename carries the sealed segment's tail hash as its prev_hash. The
+# boundary is recorded BY THE CHAIN, not by external metadata. See
+# docs/adr/0009-audit-log-rotation.md for why this needs no on-disk format change
+# and why libro's own chain_rotate is a no-op here.
+enum AuditRotate {
+    # Sealed segments retained. The on-disk bound is the ADR's multiplication and
+    # nothing else: AUDIT_SIZE_WARN_BYTES x AUDIT_SEG_KEEP = 8 MiB x 4 = 32 MiB of
+    # sealed history, plus a live file at most 8 MiB + one check interval. ~40 MiB
+    # total, with NO traffic term. 4 because the retained window is a forensic
+    # tail, not an archive — at ~350 bytes/event that is ~96,000 events.
+    AUDIT_SEG_KEEP = 4;
+    # Highest segment number this build will create. Serial and never reused, so
+    # the highest number is always the newest — which both the crash-window
+    # fallback and the boundary walk assume.
+    AUDIT_SEG_MAX = 4096;
+    # Ticks between size probes. A TICK COUNT, not a clock: a `now - last` rule
+    # never fires on AGNOS's frozen sys_uptime_ms, which would silently disable
+    # rotation on one of the two supported targets. 24 ticks = 60 s at the
+    # authored 2.5 s cadence; the probe is 2.6 us and zero arena, so it costs
+    # nothing on the other 23.
+    AUDIT_ROTATE_TICKS = 24;
+    # "<segno> <hash>": 19 digits + a space + a 64-byte hash = 84, rounded up.
+    # Well under the 153-byte str_builder doubling cliff _audit_rollup documents.
+    AUDIT_MARK_CAP = 96;
+}
+
+var g_audit_segbuf = 0;      # a segment path, NUL-terminated
+var g_audit_mark   = 0;      # marker details, "<segno> <hash>"
+# Highest segment on disk; -1 means "not scanned yet". A top-level var because an
+# enum cannot hold a negative literal.
+var g_audit_seg_hi = 0 - 1;
+# Test observables, same shape as g_audit_rollups / g_audit_dropped.
+var g_audit_rotations = 0;
+var g_audit_pruned    = 0;
 var g_audit_head = 0;
 
 # Append a security event to the libro audit chain (+ flush to the
@@ -359,7 +385,10 @@ enum AuditKeys {
     AK_SAVE_FAIL_CREATE = 14;
     AK_AUDIT_SIZE       = 15;
     AK_ACCOUNTS_FULL    = 16;
-    AK_NKEYS            = 17;
+    AK_AUDIT_ROTATE     = 17;
+    AK_AUDIT_PRUNE      = 18;
+    AK_AUDIT_ROTFAIL    = 19;
+    AK_NKEYS            = 20;
 }
 
 # One table entry. Byte offsets, matching the house SS_* / g_persist_* style.
@@ -795,6 +824,183 @@ fn audit_size_check(): i64 {
     if (audit_size_warn_due(n) == 0) { return 0; }
     audit_keyed(AK_AUDIT_SIZE, SEV_WARNING, "audit.size", 0, 0, clock_now_ms());
     return 1;
+}
+
+# === ADR 0009 rotation — segments, markers, and the crash window. ===
+
+# data/audit.libro.<n>, NUL-terminated, into `out`. Returns the length excluding
+# the NUL, or 0 if it would not fit.
+#
+# Derived from DP_AUDIT rather than a second literal: DP_AUDIT already carries the
+# per-target #ifdef (agnos needs an absolute /data/...) AND is the seam the suite
+# reassigns to a fixture. A second path constant would need both and would drift.
+fn _audit_seg_path(n, out): i64 {
+    var off = 0;
+    var i = 0;
+    while ((load8(DP_AUDIT + i) & 0xFF) != 0) {
+        # 24 = '.' + at most 19 digits + NUL, with margin. DP_AUDIT is a var, so
+        # a caller could point it anywhere; this is the only bound there is.
+        if (off >= PATH_CAP - 24) { store8(out, 0); return 0; }
+        store8(out + off, load8(DP_AUDIT + i));
+        off = off + 1;
+        i = i + 1;
+    }
+    store8(out + off, 46); off = off + 1;          # '.'
+    off = _audit_put_num(out, off, n);             # 1.7.1's decimal appender
+    store8(out + off, 0);
+    return off;
+}
+
+# Highest existing segment number, 0 if none. Cached for the process.
+#
+# `dir_list` would answer this in one syscall and is REJECTED: lib/fs.cyr's
+# dir_list alloc()s 4096 bytes of BUMP arena per call, permanently, and rotation
+# calls this forever — precisely the leak class 1.7.1 spent a release removing.
+# file_exists probing is ~2 us each and zero arena.
+fn _audit_seg_hi(): i64 {
+    if (g_audit_seg_hi >= 0) { return g_audit_seg_hi; }
+    var hi = 0;
+    var miss = 0;
+    var n = 1;
+    while (n <= AUDIT_SEG_MAX) {
+        var got = 0;
+        if (_audit_seg_path(n, g_audit_segbuf) > 0) { got = file_exists(g_audit_segbuf); }
+        if (got == 1) { hi = n; miss = 0; }
+        else {
+            miss = miss + 1;
+            # The retained run is contiguous and at most AUDIT_SEG_KEEP long, so
+            # KEEP consecutive misses after a hit means nothing is above. Stopping
+            # early is SAFE, not merely fast: an under-reported `hi` collides on
+            # the next rotation, and the collision guard in audit_rotate_now
+            # refuses rather than clobbering a sealed segment.
+            if (hi > 0) {
+                if (miss >= AUDIT_SEG_KEEP) { n = AUDIT_SEG_MAX; }
+            }
+        }
+        n = n + 1;
+    }
+    g_audit_seg_hi = hi;
+    return hi;
+}
+
+# Copy the hash of the LAST complete record of `path` into `out`. Returns the byte
+# count, or 0 if the file is missing, empty, or holds no complete record.
+#
+# It COPIES, for the reason _audit_resume_head documents: _audit_last_hash returns
+# a Str that BORROWS g_persist_slurp, and that buffer is reused constantly.
+fn _audit_tail_hash(path, out): i64 {
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd < 0) { return 0; }
+    var size = xlseek(fd, 0, 2);                   # SEEK_END
+    if (size <= 0) { file_close(fd); return 0; }
+    var want = SLURP_CAP - 1;
+    if (size < want) { want = size; }
+    xlseek(fd, size - want, 0);                    # SEEK_SET
+    var n = sys_read(fd, g_persist_slurp, want);
+    file_close(fd);
+    if (n <= 0) { return 0; }
+    var h = _audit_last_hash(g_persist_slurp, n);
+    if (h == 0) { return 0; }
+    var hn = str_len(h);
+    if (hn > AUDIT_HEAD_CAP) { hn = AUDIT_HEAD_CAP; }
+    memcpy(out, str_data(h), hn);
+    return hn;
+}
+
+# "<segno> <hash>" into g_audit_mark; returns the length. A BARE SCALAR, not a
+# JSON object, for the reason _audit_rollup records: libro's canonical hasher
+# takes an allocating path for objects and a free one for scalars.
+fn _audit_mark(n, hash, hlen): i64 {
+    var off = _audit_put_num(g_audit_mark, 0, n);
+    store8(g_audit_mark + off, 32); off = off + 1;   # ' '
+    var k = hlen;
+    if (off + k > AUDIT_MARK_CAP) { k = AUDIT_MARK_CAP - off; }
+    if (k > 0) { memcpy(g_audit_mark + off, hash, k); off = off + k; }
+    return off;
+}
+
+# Is this the tick that probes the log's size? Pure and total, taking the counter
+# as a PARAMETER. A tick count rather than a clock because a `now - last` rule
+# never fires on AGNOS's frozen sys_uptime_ms — which would silently disable
+# rotation on exactly one of the two supported targets.
+fn audit_rotate_check_due(ticks): i64 {
+    if (ticks <= 0) { return 0; }
+    if ((ticks % AUDIT_ROTATE_TICKS) == 0) { return 1; }
+    return 0;
+}
+
+# Retire the segment that falls out of the keep window. The victim is
+# `newest - AUDIT_SEG_KEEP` — arithmetic, not a scan — and it is self-correcting:
+# already gone means a no-op.
+fn _audit_prune(newest, now_ms): i64 {
+    var victim = newest - AUDIT_SEG_KEEP;
+    if (victim < 1) { return 0; }
+    if (_audit_seg_path(victim, g_audit_segbuf) <= 0) { return 0; }
+    if (file_exists(g_audit_segbuf) == 0) { return 0; }
+    # Read the head hash and write the marker BEFORE the unlink. A deletion must
+    # be attested inside the chain that survives, and the attestation IS the hash
+    # — a marker naming a file with no hash attests nothing. Reading first is also
+    # what makes the ordering mutation-visible: unlink first and _audit_tail_hash
+    # returns 0, so the marker carries no hash.
+    var hlen = _audit_tail_hash(g_audit_segbuf, g_audit_head);
+    var mlen = _audit_mark(victim, g_audit_head, hlen);
+    audit_keyed(AK_AUDIT_PRUNE, SEV_WARNING, "audit.prune", g_audit_mark, mlen, now_ms);
+    _audit_seg_path(victim, g_audit_segbuf);       # rebuild: the read reused segbuf
+    xunlink(g_audit_segbuf);
+    g_audit_pruned = g_audit_pruned + 1;
+    return 1;
+}
+
+# Seal the live log into the next segment and continue appending. Returns 1 if a
+# rotation happened.
+fn audit_rotate_now(now_ms): i64 {
+    if (g_audit_chain == 0) { return 0; }
+    var n = _audit_seg_hi() + 1;
+    if (n > AUDIT_SEG_MAX) {
+        audit_keyed(AK_AUDIT_ROTFAIL, SEV_WARNING, "audit.rotate.fail", 0, 0, now_ms);
+        return 0;
+    }
+    if (_audit_seg_path(n, g_audit_segbuf) <= 0) {
+        audit_keyed(AK_AUDIT_ROTFAIL, SEV_WARNING, "audit.rotate.fail", 0, 0, now_ms);
+        return 0;
+    }
+    # Never clobber a sealed segment. rename(2) replaces its target silently, so a
+    # stale g_audit_seg_hi — an operator dropping a file in mid-run — would be an
+    # unrecoverable deletion of attested history. Dropping the cache here makes
+    # the next check re-scan and self-heal.
+    if (file_exists(g_audit_segbuf) == 1) {
+        g_audit_seg_hi = 0 - 1;
+        audit_keyed(AK_AUDIT_ROTFAIL, SEV_WARNING, "audit.rotate.fail", 0, 0, now_ms);
+        return 0;
+    }
+    # Read the tail hash from the FILE, before the rename. NOT chain_head_hash,
+    # which returns 0 on a streaming chain (ADR 0009 Context 3): filestore appends
+    # under flock, so the on-disk tail is what a verifier actually compares.
+    var hlen = _audit_tail_hash(DP_AUDIT, g_audit_head);
+    # file_rename, not the raw syscall above: that one predates io.cyr's wrapper
+    # and misses the agnos 4-arg form. And on failure we must NOT repoint anything
+    # — the live file is still live, and a half-done rotation splits the chain.
+    if (file_rename(DP_AUDIT, g_audit_segbuf) != 0) {
+        audit_keyed(AK_AUDIT_ROTFAIL, SEV_WARNING, "audit.rotate.fail", 0, 0, now_ms);
+        return 0;
+    }
+    g_audit_seg_hi = n;
+    g_audit_rotations = g_audit_rotations + 1;
+    # The first append after the rename recreates the live file, and its prev_hash
+    # is the sealed tail — carried by the chain, not by metadata.
+    var mlen = _audit_mark(n, g_audit_head, hlen);
+    audit_keyed(AK_AUDIT_ROTATE, SEV_INFO, "audit.rotate", g_audit_mark, mlen, now_ms);
+    _audit_prune(n, now_ms);
+    return 1;
+}
+
+# Probe the size, rotate if it is over. The size predicate is audit_size_warn_due
+# — the SAME function and constant the boot-time warning uses, which is what makes
+# it impossible for the warning and the rotation to disagree about where the line
+# is.
+fn audit_rotate_maybe(now_ms): i64 {
+    if (audit_size_warn_due(_audit_store_size()) == 0) { return 0; }
+    return audit_rotate_now(now_ms);
 }
 
 # Roll up everything pending, whatever the clock says. For shutdown: a tally that

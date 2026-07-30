@@ -4133,6 +4133,317 @@ fn test_account_cap(): i64 {
     return 0;
 }
 
+# Byte-equality for the rotation group's hash comparisons.
+fn _audit_bytes_same_t(a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# === 1.7.5 — ground decay for player-dropped items. ===
+#
+# Nothing reclaimed a dropped item: obj_free could not reach a non-corpse object
+# on a floor, so ordinary play (kill, loot, drop, quit) grew the floor forever —
+# measured 40 cycles taking it 0 -> 80, monotonic — and `look` walked it every
+# time, 801 us at 10,000 objects, charged ZERO by the 1.7.0 meter because the cost
+# is unbounded in the WORLD STATE rather than in the line.
+#
+# The lifetime is TWO ZONE-RESET INTERVALS: 30 minutes at the authored 900 s
+# cadence. The floor is how players hand things to each other, and a handoff is
+# minutes.
+fn test_ground_decay(): i64 {
+    test_group("ground-decay");
+
+    if (g_obj_tpl_count == 0) { assert(0, "ground-decay: needs object templates"); return 0; }
+    if (world_room_count() == 0) { assert(0, "ground-decay: needs a zone"); return 0; }
+
+    # --- The threshold is DERIVED from the zone's own cadence, so a zone authored
+    # with a faster rhythm reclaims faster and an operator lowering YD_RESET_SECS
+    # gets faster decay for free. No new knob; ADR 0007 stays clean.
+    var saved_override = g_reset_secs_override;
+    var saved_tick = g_tick_ms;
+    g_reset_secs_override = 0;
+    g_tick_ms = 2500;
+    var expect = clamp_reset_secs(g_zone_reset_secs) * 1000 * GROUND_RESET_MULT / 2500;
+    assert_eq(ground_decay_ticks(), expect, "the threshold is two reset intervals in ticks");
+    assert_eq(ground_decay_ticks(), 720,
+              "...which at the authored 900 s cadence is 720 ticks — 30 minutes");
+
+    # An operator override drives it too.
+    # Above GROUND_TICKS_MIN, so this tests the DERIVATION rather than the floor —
+    # 60 s would compute 48 ticks and be clamped to 120, which would have made
+    # this assertion silently about the clamp instead.
+    g_reset_secs_override = 300;
+    assert_eq(ground_decay_ticks(), 300 * 1000 * GROUND_RESET_MULT / 2500,
+              "YD_RESET_SECS drives ground decay as well as the reset itself");
+    assert(ground_decay_ticks() > GROUND_TICKS_MIN, "...and that value is above the floor");
+
+    # And it is FLOORED. A zone authored `reset_secs = 1` would otherwise reclaim
+    # a dropped item inside a second, which is a handoff nobody can complete.
+    g_reset_secs_override = 1;
+    assert_eq(ground_decay_ticks(), GROUND_TICKS_MIN,
+              "an absurdly fast zone still leaves time to pick something up");
+    assert(GROUND_TICKS_MIN >= CORPSE_TICKS,
+           "...and a dropped item never expires faster than a corpse");
+    g_reset_secs_override = saved_override;
+
+    # --- ARMING. Authored zone furniture is minted at OI_AGE 0 and must NEVER
+    # decay, or a room loses its own contents between resets. Only a player
+    # putting something on a floor arms the clock.
+    var slot = room_at(0) + RM_OBJ_HEAD;
+    var pre = load64(slot);
+    store64(slot, 0);                       # isolate this room's floor
+    var live0 = g_obj_live;
+
+    var furniture = item_new(ot_at(0));     # as zone_reset_room_objs mints it
+    ilist_push(slot, furniture);
+    assert_eq(load64(furniture + OI_AGE), 0, "authored furniture is minted UNARMED");
+
+    var dropped = item_new(ot_at(0));
+    ilist_push(slot, dropped);
+    ground_arm(dropped);
+    assert_eq(load64(dropped + OI_AGE), 1, "a player-dropped item is armed");
+
+    # --- Run the sweep past the threshold. The armed item goes; the furniture stays.
+    g_reset_secs_override = 1;              # threshold = GROUND_TICKS_MIN
+    var k = 0;
+    while (k < GROUND_TICKS_MIN + 2) { corpse_decay_sweep(); k = k + 1; }
+    assert_eq(_on_ilist(slot, dropped), 0, "the dropped item is reclaimed past its lifetime");
+    assert_eq(_on_ilist(slot, furniture), 1,
+              "...and the zone's own furniture is UNTOUCHED, however long it sits");
+    assert_eq(g_obj_live, live0 + 1, "exactly one instance was freed");
+
+    # --- Re-arming restarts the clock: passing something hand to hand must not
+    # hand along an almost-expired timer.
+    var relay = item_new(ot_at(0));
+    ilist_push(slot, relay);
+    ground_arm(relay);
+    k = 0;
+    while (k < GROUND_TICKS_MIN - 10) { corpse_decay_sweep(); k = k + 1; }
+    assert_eq(_on_ilist(slot, relay), 1, "still there just under the threshold");
+    ground_arm(relay);                      # picked up and dropped again
+    assert_eq(load64(relay + OI_AGE), 1, "a re-drop restarts the clock at 1");
+    k = 0;
+    while (k < 20) { corpse_decay_sweep(); k = k + 1; }
+    assert_eq(_on_ilist(slot, relay), 1,
+              "...so it survives past where the ORIGINAL clock would have expired");
+
+    # Retire the relay before the next section. It is still ARMED, so it would
+    # expire during the bag's sweep and be counted as one of the bag's contents —
+    # which is exactly the kind of cross-contamination that makes an instance
+    # count prove the wrong thing.
+    ilist_remove(slot, relay); obj_free(relay);
+
+    # --- A bag decays as one unit; obj_free recurses through OI_CONTENTS.
+    var bag = item_new(ot_at(0));
+    ilist_push(slot, bag);
+    ground_arm(bag);
+    var bk = 0;
+    while (bk < 4) { ilist_push(bag + OI_CONTENTS, item_new(ot_at(0))); bk = bk + 1; }
+    var live_bag = g_obj_live;
+    k = 0;
+    while (k < GROUND_TICKS_MIN + 2) { corpse_decay_sweep(); k = k + 1; }
+    assert_eq(_on_ilist(slot, bag), 0, "a dropped bag decays");
+    assert_eq(g_obj_live, live_bag - 5,
+              "...and takes its four contents with it, so nothing is orphaned");
+
+    # --- ground_arm refuses a corpse, asserted DIRECTLY.
+    #
+    # No drop path can reach here with one today — get_from refuses to pick a
+    # corpse up and cmd_give refuses to hand one over — so this guard is
+    # defensive, and the mutation removing it survives every behavioural test.
+    # Asserted at the function rather than left as decoration: a corpse armed for
+    # ground decay would get the 30-minute clock instead of its own 5-minute one,
+    # which is a body lying around six times too long.
+    var body = corpse_new("a test corpse", 13);
+    store64(body + OI_AGE, 7);
+    ground_arm(body);
+    assert_eq(load64(body + OI_AGE), 7,
+              "arming a CORPSE is refused — its own shorter clock is untouched");
+    obj_free(body);
+
+    # --- Cleanup.
+    ilist_remove(slot, furniture); obj_free(furniture);
+    store64(slot, pre);
+    g_reset_secs_override = saved_override;
+    g_tick_ms = saved_tick;
+    return 0;
+}
+
+# === 1.7.4 — audit-log rotation (ADR 0009). ===
+#
+# Seal and continue: rename the live log to data/audit.libro.<N> and keep
+# appending, so the first entry after the rename carries the sealed tail as its
+# prev_hash. The boundary is recorded BY THE CHAIN, not by metadata.
+#
+# The crash window is why this waited a release. Rename succeeds, process dies
+# before the first append: the live file is gone, a naive boot restarts the chain
+# at genesis, and there is one broken link per boundary — indistinguishable from a
+# deletion, which is the H11 bug of 1.6.6 reintroduced as a feature.
+fn test_audit_rotation(): i64 {
+    test_group("audit-rotation");
+
+    # A private log for this group. DP_AUDIT is the seam the whole suite already
+    # uses; restoring it at the end matters because later groups audit too.
+    var saved_audit = DP_AUDIT;
+    var saved_hi = g_audit_seg_hi;
+    DP_AUDIT = "data/rot-test.libro";
+    xunlink(DP_AUDIT);
+    var sp = alloc(PATH_CAP);
+    var sn = 1;
+    while (sn <= AUDIT_SEG_KEEP + 3) { _audit_seg_path(sn, sp); xunlink(sp); sn = sn + 1; }
+    g_audit_seg_hi = 0 - 1;
+
+    # --- The trigger predicate, over its domain. A TICK COUNT, not a clock: on
+    # AGNOS sys_uptime_ms is documented frozen, so a `now - last` rule would
+    # silently disable rotation on one of the two supported targets.
+    assert_eq(audit_rotate_check_due(0), 0, "tick 0 does not probe");
+    assert_eq(audit_rotate_check_due(1), 0, "an arbitrary tick does not probe");
+    assert_eq(audit_rotate_check_due(AUDIT_ROTATE_TICKS), 1, "the Nth tick probes");
+    assert_eq(audit_rotate_check_due(AUDIT_ROTATE_TICKS * 3), 1, "...and every Nth after");
+    assert_eq(audit_rotate_check_due(AUDIT_ROTATE_TICKS + 1), 0, "...and only those");
+    assert_eq(audit_rotate_check_due(0 - 5), 0, "a negative tick count never probes");
+
+    # --- Segment paths.
+    assert(_audit_seg_path(1, sp) > 0, "a segment path builds");
+    assert(_find_cstr(sp, PATH_CAP, "rot-test.libro.1") >= 0, "...and is <live>.<n>");
+    assert(_audit_seg_path(4096, sp) > 0, "a high segment number builds too");
+    assert(_find_cstr(sp, PATH_CAP, "rot-test.libro.4096") >= 0, "...with the number appended");
+
+    # --- Rotation seals the live file and continues.
+    var chain_save = g_audit_chain;
+    var store_save = g_audit_store;
+    g_audit_chain = chain_new_streaming();
+    g_audit_store = filestore_open(str_from(DP_AUDIT));
+    audit_coalesce_reset();
+
+    var i = 0;
+    while (i < 6) { audit_event(SEV_INFO, "rot.seed", "seeder", 6); i = i + 1; }
+    var live_before = _audit_store_size();
+    assert(live_before > 0, "the live log has content to seal");
+
+    # Capture the tail the sealed segment will end on — this is what the first
+    # entry of the new live file must chain to.
+    var tail = alloc(AUDIT_HEAD_CAP);
+    var tlen = _audit_tail_hash(DP_AUDIT, tail);
+    assert(tlen > 0, "the live log's tail hash is readable");
+    store8(tail + tlen, 0);      # _find_cstr uses strlen; do not rely on alloc zeroing
+
+    var rots = g_audit_rotations;
+    assert_eq(audit_rotate_now(1000), 1, "rotation happens");
+    assert_eq(g_audit_rotations - rots, 1, "...and is counted once");
+    assert_eq(_audit_seg_path(1, sp), _audit_seg_path(1, sp), "path build is stable");
+    _audit_seg_path(1, sp);
+    assert_eq(file_exists(sp), 1, "the sealed segment exists on disk");
+
+    # THE BOUNDARY. The first entry written after the rename must record the
+    # sealed segment's tail as its predecessor — that is the entire ADR.
+    var newtail = alloc(AUDIT_HEAD_CAP);
+    var nlen = _audit_tail_hash(sp, newtail);
+    assert_eq(nlen, tlen, "the sealed segment ends on the hash we captured");
+    assert_eq(_audit_bytes_same_t(newtail, tail, tlen), 1, "...byte for byte");
+
+    var livebuf = alloc(SLURP_CAP);
+    var ln = file_read_all(DP_AUDIT, livebuf, SLURP_CAP - 1);
+    assert(ln > 0, "the live log was recreated by the first append");
+    assert(_find_cstr(livebuf, ln, "audit.rotate") >= 0,
+           "the new live file opens with an audit.rotate marker");
+    # The marker names the segment AND carries its head hash: a marker naming a
+    # file with no hash attests nothing.
+    assert(_find_cstr(livebuf, ln, "details") >= 0,
+           "...and the marker carries a details field");
+    # The marker names the segment AND its head hash. Checking for the hash text
+    # is the assertion that matters: a marker naming a file with no hash attests
+    # nothing, which is exactly what pruning-before-reading would produce.
+    # Search for the MARKER TEXT — "<segno> <hash>" — not for the hash alone. The
+    # hash also appears in this very entry's prev_hash field (that is the whole
+    # point of seal-and-continue), so a bare hash search finds it whether or not
+    # the marker carries it, and cannot tell the two apart. It could not: zeroing
+    # the marker's hash survived mutation against the weaker assertion.
+    var want = alloc(AUDIT_MARK_CAP);
+    var wo = _str_into(want, 0, "1 ");
+    memcpy(want + wo, tail, tlen);
+    store8(want + wo + tlen, 0);
+    assert(_find_cstr(livebuf, ln, want) >= 0,
+           "...and the marker itself names the segment AND its head hash");
+
+    # --- THE CRASH WINDOW. Rename, then die before the first append. A boot must
+    # resume from the newest SEGMENT, not restart at genesis.
+    xunlink(DP_AUDIT);                     # the process died here
+    g_audit_chain = chain_new_streaming();
+    assert_eq(chain_prev_hash(g_audit_chain), 0, "a fresh chain starts at genesis");
+    _audit_resume_head();
+    var resumed = chain_prev_hash(g_audit_chain);
+    assert(resumed != 0,
+           "with the live file GONE, the head resumes from the newest segment");
+    assert(str_len(resumed) > 0, "...with a real hash, not an empty string");
+
+    # --- Prune: the segment falling out of the keep window is attested, then
+    # removed. Deletion must be recorded inside the chain that survives.
+    var pr = g_audit_pruned;
+    g_audit_store = filestore_open(str_from(DP_AUDIT));
+    _audit_seg_path(1, sp);
+    assert_eq(file_exists(sp), 1, "segment 1 is still there before the prune");
+    # Capture the victim's head hash BEFORE it is deleted — that is what the
+    # attestation must carry, and it is unreadable afterwards.
+    var vhash = alloc(AUDIT_HEAD_CAP);
+    var vlen = _audit_tail_hash(sp, vhash);
+    assert(vlen > 0, "the victim segment's head hash is readable before pruning");
+    store8(vhash + vlen, 0);
+
+    _audit_prune(1 + AUDIT_SEG_KEEP, 2000);
+    assert_eq(g_audit_pruned - pr, 1, "the victim segment is pruned");
+    _audit_seg_path(1, sp);
+    assert_eq(file_exists(sp), 0, "...and is gone from disk");
+    var pl = file_read_all(DP_AUDIT, livebuf, SLURP_CAP - 1);
+    assert(_find_cstr(livebuf, pl, "audit.prune") >= 0,
+           "...with the deletion attested in the surviving chain");
+    # THE ORDERING GUARD. The marker must carry the victim's hash, which is only
+    # possible if it was read BEFORE the unlink. Asserting the marker merely
+    # exists does not catch unlink-first — the entry is still written, it just
+    # attests nothing. That weaker assertion let the mutation survive.
+    var pwant = alloc(AUDIT_MARK_CAP);
+    var pwo = _str_into(pwant, 0, "1 ");
+    memcpy(pwant + pwo, vhash, vlen);
+    store8(pwant + pwo + vlen, 0);
+    assert(_find_cstr(livebuf, pl, pwant) >= 0,
+           "...and the attestation carries the deleted segment's HASH, so it was read first");
+
+    # A victim that does not exist is a no-op, not an error — pruning is
+    # self-correcting if an operator removed a file by hand.
+    var pr2 = g_audit_pruned;
+    _audit_prune(1 + AUDIT_SEG_KEEP, 2001);
+    assert_eq(g_audit_pruned - pr2, 0, "pruning an absent segment does nothing");
+
+    # --- Never clobber a sealed segment. rename(2) replaces silently, so a stale
+    # cache would be an unrecoverable deletion of attested history.
+    _audit_seg_path(2, sp);
+    file_write_all(sp, "planted", 7);
+    g_audit_seg_hi = 1;                   # stale: says the next free is 2
+    var rots2 = g_audit_rotations;
+    assert_eq(audit_rotate_now(3000), 0, "rotation REFUSES to overwrite a sealed segment");
+    assert_eq(g_audit_rotations - rots2, 0, "...and is not counted");
+    assert_eq(g_audit_seg_hi, 0 - 1, "...and drops its cache so the next check re-scans");
+    var chk = alloc(64);
+    assert_eq(file_read_all(sp, chk, 64), 7, "the planted segment is untouched");
+    xunlink(sp);
+
+    # --- Cleanup.
+    _audit_seg_path(1, sp); xunlink(sp);
+    sn = 1;
+    while (sn <= AUDIT_SEG_KEEP + 3) { _audit_seg_path(sn, sp); xunlink(sp); sn = sn + 1; }
+    xunlink(DP_AUDIT);
+    DP_AUDIT = saved_audit;
+    g_audit_seg_hi = saved_hi;
+    g_audit_chain = chain_save;
+    g_audit_store = store_save;
+    audit_coalesce_reset();
+    return 0;
+}
+
 # === 1.7.3 — a failing save backs off instead of retrying every tick. ===
 #
 # `player_save` clears SS_SAVE_DIRTY only after a successful rename, so a session
@@ -5667,6 +5978,8 @@ fn main() {
     test_player_sharding();
     test_legacy_guards();
     test_save_backoff();
+    test_audit_rotation();
+    test_ground_decay();
 
     return assert_summary();
 }

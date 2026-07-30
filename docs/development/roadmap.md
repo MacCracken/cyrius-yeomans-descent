@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-29 (v1.7.3 — 1.7.0–1.7.3 shipped; 1.7.4 next, and it is where rotation lands)
+> **Last Updated**: 2026-07-29 (v1.7.5 — ground decay shipped; the 1.6/1.7 audit line is clear bar one low item, then the gate re-run)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -25,7 +25,9 @@ ownership and fix size.
 | — | ~~1.7.1~~ | ~~3~~ | ✅ **Shipped.** Bound what the reconnect rate sets — the audit rollup window, `passwd`'s rate limit, ADR 0009, and a live audit-log integrity bug found on the way | — |
 | — | ~~1.7.2~~ | ~~5~~ | ✅ **Shipped.** The carry cap becomes a bound (both halves) · operator config + account cap · sharded player records · ADR 0007 amended. Found the defect class recurring inside 1.7.1's fix for it | — |
 | — | ~~1.7.3~~ | ~~4 of 6~~ | ✅ **Shipped.** `cmd_give`'s overshoot · the per-tick save-failure retry · the two uncovered guards · the borrowed audit chain-link | — |
-| 1 | [**1.7.4**](#174--object-lifetime) | 3 | **Audit-log rotation (ADR 0009 mechanism, incl. the crash window)** · the room floor has no cap · restore 1.6.12's audit granularity | **yes** |
+| — | ~~1.7.4~~ | ~~1 of 3~~ | ✅ **Shipped.** Audit-log rotation (ADR 0009 mechanism), incl. the crash window, the prune attestation, and the clobber guard | — |
+| — | ~~1.7.5~~ | ~~1 of 2~~ | ✅ **Shipped.** Ground decay — player-dropped items expire after two zone-reset intervals (30 min). The last item of the 1.6/1.7 audit line | — |
+| 1 | [**1.7.6**](#173--cover-the-guards-that-predate-the-mutation-habit) | 1 | Restore 1.6.12's audit granularity, now affordable under the rollup window | no |
 | 3 | [**gate re-run**](#the-gate--what-closes-the-1x-line) | — | Closes the 1.x line if it returns no critical or high findings | **yes** |
 | 4 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 5 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
@@ -426,6 +428,29 @@ so it is not mistaken for complete)*
   it is this release's main body of work.
 - **Test story for the release.** Every pre-1.6.7 guard has a mutation that fails
   when the guard is reverted.
+
+### 2.0 — the donation bin
+
+**Q. A room container is a permanent, unbounded shared stash.** *(2.0 — needs a
+zone field and a cap, both frozen by ADR 0007)*
+
+- **What it is.** Authored zone furniture is minted unarmed, so it never
+  ground-decays (1.7.5), and `cmd_put` does not arm what goes inside it. So items
+  put into a town barrel stay forever — which is a **feature people will want**:
+  a donation bin, a guild chest, a shared stash. It exists today by accident
+  rather than by design.
+- **Why it is listed anyway.** Nothing caps how much a room container holds, and
+  `look` does not walk contents, so it accumulates silently — the same unbounded
+  shape ground decay just closed for floors, one level down. A town barrel is the
+  obvious place for it to happen.
+- **What 2.0 owes it.** A real bin needs to be *authored* (a zone field marking a
+  container as persistent), *capped* (how many items), and probably *persistent*
+  across restarts — floors are not saved at all today, so a "stash" that a restart
+  empties is a trap. All three are frozen surfaces in 1.x: zone fields and the
+  save schema are ADR 0007 §3/§5.
+- **Interim behaviour is deliberate and documented** at `cmd_put` in
+  [`src/item.cyr`](../../src/item.cyr): a container a PLAYER dropped is armed and
+  decays with its contents; authored furniture is not.
 
 ### 2.0 — bound the broadcast fan-out
 

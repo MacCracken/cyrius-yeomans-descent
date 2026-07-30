@@ -4,7 +4,7 @@
 - **Date**: 2026-07-29
 - **Supersedes**: none
 - **Amends**: [ADR 0006 — Persistence shape](0006-persistence-shape.md) (the audit-chain half only; 0006 stays Accepted)
-- **Implemented in**: 1.7.2 — see [Implementation status](#implementation-status). The *decision* is 1.7.1.
+- **Implemented in**: 1.7.4 (mechanism) — the *decision* and the seam were 1.7.1. See [Implementation status](#implementation-status).
 
 > **Numbering note.** This is 0009, not 0008. 0008 is **reserved for M14**, which
 > supersedes ADR 0007 with the 2.x surface, and is referenced by that number in
@@ -179,7 +179,7 @@ simple multiplication (`threshold × keep`) rather than a function of traffic.
   byte-delta assertions would fail.
 - `.gitignore` covers `data/audit*.libro*`.
 
-**1.7.2 — the mechanism** (tracked in
+**1.7.4 — the mechanism** ✅ **SHIPPED** (was tracked in
 [`roadmap.md`](../development/roadmap.md)): the rename/reopen, segment
 enumeration, the keep-count prune, the `audit.rotate` / `audit.prune` markers, and
 the boot-time head fallback that closes the crash window. Tracked as an explicit

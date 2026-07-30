@@ -3,13 +3,73 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.7.3 — the gate sweep's 8 items are closed; 1.7.4 carries rotation + the floor cap)
+> **Last refresh**: 2026-07-29 (v1.7.5 — ground decay shipped; one low item left, then the gate re-run)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.5** — 2026-07-29. **1024 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build.
+
+**Ground decay — the last item of the 1.6/1.7 audit line.** Player-dropped items
+expire after two zone-reset intervals (30 min at the authored cadence). Nothing
+had ever reclaimed a dropped item: ordinary play grew a floor 0 -> 80 across 40
+kill/loot/drop cycles, and `look` walked it at 801 us per call for 10,000 objects
+while the charge meter billed it zero.
+
+The design is anchored to `reset_secs` rather than a new constant, so a faster
+zone reclaims faster and `YD_RESET_SECS` tunes it for free — no new knob, ADR 0007
+clean. Two traps avoided: reset INTERVALS rather than reset EVENTS (resets defer
+while a zone is occupied, so a town square would never have decayed anything), and
+`OI_AGE == 0` as "not armed" so authored furniture never expires out from under a
+room.
+
+**The donation bin already exists, unbounded.** Items in an authored room
+container never decay — that is the shape players want, and nothing caps it.
+Documented at `cmd_put`, filed for 2.0.
+
+**Lessons carried, added this release:**
+
+- *Check whether the assertion is testing the rule or the clamp.* A threshold test
+  used a value below its own floor, so it asserted the clamp while claiming to
+  assert the derivation.
+- *Fixtures left armed contaminate the next measurement.* An instance count came
+  out one low because an earlier test's item was still decaying during it.
+
+**1.7.4** — 2026-07-29. **1007 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build; suite green against an empty `data/players`.
+
+**Audit-log rotation ships** — the ADR 0009 mechanism 1.7.1 decided and 1.7.3
+deliberately deferred so its crash window could be a release's subject rather than
+its fifth item. On-disk audit growth is now `8 MiB x 4 segments` plus a live file:
+**a constant the code owns, with no traffic term.**
+
+The three parts that carry the risk, each mutation-verified:
+
+- **The crash window.** Rename succeeds, process dies before the first append —
+  the live file is gone and a naive boot restarts the chain at genesis, which is
+  the H11 bug of 1.6.6 reintroduced as a feature. The head resume now falls back
+  to the newest segment; its test deletes the live file and requires the chain to
+  resume anyway.
+- **Attest before deleting.** `audit.prune` is written before the unlink and
+  carries the victim's head hash. A marker naming a file with no hash attests
+  nothing, which is exactly what unlink-first produces.
+- **Never clobber a sealed segment.** `rename(2)` replaces silently, so a stale
+  cache would be an unrecoverable deletion of attested history.
+
+**Lessons carried, added this release:**
+
+- *Search for what only the guard produces.* Two rotation assertions initially
+  proved nothing: the sealed hash appears in BOTH the marker's details and the
+  entry's own `prev_hash`, so searching the line for the hash found it either way.
+  Asserting the marker TEXT — "<segno> <hash>" — is what discriminates. The weaker
+  form let two mutations survive.
+- *A mutation script that fails to apply reports a false SURVIVED.* One pattern did
+  not match, the run printed "survived", and it took a second look to see the
+  mutation had never been applied. Assert the substitution happened.
 
 **1.7.3** — 2026-07-29. **971 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build; suite green against an empty `data/players` (the fresh-checkout

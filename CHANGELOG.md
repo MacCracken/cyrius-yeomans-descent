@@ -4,6 +4,110 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.5] — 2026-07-29
+
+**Ground decay — the last item of the 1.6/1.7 audit line.** 1024 assertions
+(was 1007).
+
+### Fixed
+
+- **Nothing reclaimed a dropped item.** `obj_free` could not reach a non-corpse
+  object on a room floor, so ordinary play — kill, loot, drop, quit — grew the
+  floor forever: measured **40 cycles taking it from 0 to 80, monotonic**. And
+  `look` walked that floor every time, **801 µs at 10,000 objects**, billed
+  **zero** by 1.7.0's charge meter because the cost is unbounded in the *world
+  state* rather than in the line. No budget of any denomination fixes that.
+
+  Player-dropped items now decay after **two zone-reset intervals** — 30 minutes
+  at the authored 900 s cadence, 720 ticks.
+
+**Three decisions worth stating, because each has a trap behind it:**
+
+- **Intervals, not reset events.** `maybe_zone_reset` *defers* while a player is
+  in the zone and deliberately does not advance its timestamp when it does. So
+  counting reset events would mean a permanently-occupied zone never decays
+  anything — and a town square, the case this exists for, is the zone that is
+  never empty.
+- **`OI_AGE == 0` means "not armed".** `item_new` memsets, so authored zone
+  furniture is minted unarmed and never decays; only a player putting something on
+  a floor arms the clock. No new field, no new flag, and a reset's own furniture
+  cannot expire out from under the room between resets.
+- **Anchored to `reset_secs`, so there is no new knob.** A zone authored with a
+  faster rhythm reclaims faster, and an operator lowering `YD_RESET_SECS` gets
+  faster decay for free. ADR 0007 stays clean. Floored at `GROUND_TICKS_MIN` so a
+  `reset_secs = 1` zone still leaves time to pick something up.
+
+Re-dropping restarts the clock, so passing something hand to hand does not hand
+along an almost-expired timer. A dropped bag decays as one unit — `obj_free`
+already recurses through `OI_CONTENTS`.
+
+### Note — the donation bin already exists
+
+Items put into a **room container** are deliberately not armed, and authored
+containers never decay, so a town barrel is a permanent shared stash. That is the
+"donation bin" shape and it predates this release — but it is **unbounded**:
+nothing caps a room container's contents and `look` does not walk them. Documented
+at `cmd_put` and filed as a 2.0 item, where a real bin needs a zone field, a cap,
+and persistence — all frozen surfaces in 1.x. A container a *player* dropped is
+armed and decays with its contents.
+
+## [1.7.4] — 2026-07-29
+
+**Audit-log rotation ships.** 1007 assertions (was 971). The mechanism ADR 0009
+decided in 1.7.1 and 1.7.3 deliberately deferred — because its crash window needed
+to be the subject of a release, not a fifth item in one.
+
+### Added
+
+- **Audit-log rotation, seal-and-continue** ([ADR 0009](docs/adr/0009-audit-log-rotation.md)).
+  On crossing 8 MiB the live log is renamed to `data/audit.libro.<N>` and appending
+  continues to the same path with the **same streaming chain**, so the first entry
+  after the rename carries the sealed segment's tail as its `prev_hash`. **The
+  boundary is recorded by the chain itself, not by external metadata** — which is
+  why no on-disk format change was needed and no libro release.
+
+  On-disk growth is now a constant the code owns: `8 MiB × AUDIT_SEG_KEEP (4)` =
+  32 MiB of sealed history plus a live file, **with no traffic term in it**.
+
+- **The crash window is closed, and that is the load-bearing part.** Rename
+  succeeds, process dies before the first append: the live file is gone, and a
+  naive boot restarts the chain at genesis — one broken link per boundary,
+  indistinguishable from a deletion, which is the H11 bug of 1.6.6 reintroduced as
+  a feature. `_audit_resume_head` now falls back to the newest **segment**. Its
+  mutation test deletes the live file and asserts the chain still resumes.
+
+- **Deletions are attested before they happen.** `audit.prune` is written *before*
+  the unlink, carrying the victim segment's head hash — a marker naming a file
+  with no hash attests nothing. The test captures that hash before pruning and
+  requires it in the marker, which is what makes the ordering mutation-visible.
+
+- **Rotation refuses to clobber a sealed segment.** `rename(2)` replaces its target
+  silently, so a stale segment cache — an operator dropping a file in mid-run —
+  would be an unrecoverable deletion of attested history. It refuses, drops the
+  cache, and self-heals on the next check.
+
+- The size probe is metered by tick count, not by a clock: `sys_uptime_ms` is
+  documented frozen on AGNOS, so a `now - last` rule would silently disable
+  rotation on one of the two supported targets. It costs nothing on 23 ticks in 24.
+
+### Notes
+
+- Rotation reuses `audit_size_warn_due` and `AUDIT_SIZE_WARN_BYTES` — the same
+  predicate and constant as 1.7.1's boot-time warning — so the warning and the
+  rotation cannot disagree about where the line is.
+- `dir_list` was rejected for segment enumeration: it `alloc()`s 4 kB of bump arena
+  per call, permanently, and rotation calls it forever. That is the leak class
+  1.7.1 spent a release removing. `file_exists` probing is ~2 µs and zero arena.
+- Verification is no longer a single-file operation. The procedure is in ADR 0009;
+  a `validate` argv verb is M14-E.
+
+### Still open
+
+- **The uncapped room floor** — nothing reclaims a dropped item, `look` costs
+  801 µs at 10,000 floor objects, and the charge meter bills it zero. Design work
+  was in flight when this released; it is the last item of the 1.6/1.7 audit line.
+- Restoring 1.6.12's audit granularity, now affordable under the rollup window.
+
 ## [1.7.3] — 2026-07-29
 
 971 assertions (was 946). Four of 1.7.2's six items; **audit-log rotation did not

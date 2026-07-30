@@ -37,7 +37,11 @@ enum OI {
     OI_DESC_LEN  = 176;
     OI_TPL_ID    = 184;  # inline originating template id (M6 inventory persist)
     OI_TPL_ID_LEN = 216;
-    OI_AGE       = 224;  # ticks since a corpse was created (M12-A); unused on items
+    # Ticks since a corpse was created (M12-A). Since 1.7.5 it is ALSO the ground-
+    # decay clock for player-dropped items, where **0 means NOT ARMED** — authored
+    # zone furniture is minted at 0 and stays there, so only what a player put on
+    # a floor ages. (This comment used to read "unused on items".)
+    OI_AGE       = 224;
     OI_SIZE      = 232;
 }
 enum OiCap { OI_NAME_CAP = 64; OI_KW_CAP = 64; OI_TPL_ID_CAP = 32; }
@@ -338,6 +342,7 @@ fn player_drop_all(s, room): i64 {
     while (o != 0) {
         var nxt = oi_next(o);
         ilist_push(room_at(room) + RM_OBJ_HEAD, o);
+        ground_arm(o);                         # 1.7.5
         o = nxt;
     }
     store64(s + SS_INV, 0);
@@ -580,6 +585,7 @@ fn cmd_drop(s, pa): i64 {
             if (take == 1) {
                 ilist_remove(inv_slot, o);
                 ilist_push(room_slot, o);
+                ground_arm(o);                 # 1.7.5
                 session_appendtx_cstr(s, "You drop ");
                 append_item_name(s, o);
                 session_appendtx_cstr(s, ".\r\n");
@@ -596,6 +602,7 @@ fn cmd_drop(s, pa): i64 {
     if (o == 0) { session_appendtx_cstr(s, "You aren't carrying that.\r\n"); return 0; }
     ilist_remove(inv_slot, o);
     ilist_push(room_slot, o);
+    ground_arm(o);                             # 1.7.5
     session_appendtx_cstr(s, "You drop ");
     append_item_name(s, o);
     session_appendtx_cstr(s, ".\r\n");
@@ -654,6 +661,24 @@ fn cmd_put(s, pa): i64 {
     }
 
     ilist_remove(inv_slot, o);
+    # 1.7.5 — deliberately NOT ground-armed, and this is a decision rather than an
+    # omission.
+    #
+    # An item put into a container is not lying on the floor, and if that container
+    # is authored zone furniture (minted unarmed, so it never decays) neither the
+    # barrel nor its contents ever expire. That is a permanent shared stash — the
+    # "donation bin" shape — and it already existed before ground decay; this
+    # release just makes it the explicit exception to a rule that now has one.
+    #
+    # It is UNBOUNDED: cmd_put caps nothing about how much a room container holds,
+    # so a town barrel can accumulate forever, and `look` does not walk contents so
+    # nothing surfaces it. Tracked for 2.0, where a real donation bin gets a zone
+    # field and a cap — both frozen surfaces today (ADR 0007), which is why this is
+    # documented here rather than fixed here.
+    #
+    # A container a PLAYER dropped is armed, so it decays and takes its contents
+    # with it (obj_free recurses). The distinction is who put the container there,
+    # which is exactly the distinction ground decay is built on.
     ilist_push(c + OI_CONTENTS, o);
     session_appendtx_cstr(s, "You put ");
     append_item_name(s, o);
@@ -912,6 +937,80 @@ fn zone_reset_objs(): i64 {
 # 15-minute zone reset.
 enum CorpseDecay { CORPSE_TICKS = 120; }
 
+# === 1.7.5 — ground decay for player-dropped items. ===
+#
+# THE PROBLEM. Nothing reclaimed a dropped item. `obj_free` was reachable only
+# from corpse decay, a disconnecting player's inventory, and its own recursion —
+# so a non-corpse object left on a floor was permanent for the life of the
+# process. Ordinary play, no malice: kill, loot, drop, quit; the zone resets its
+# mobs and the dropped instances stay. Measured 40 cycles taking a floor from 0 to
+# 80, monotonic. And `look` walks that floor on every use — 801 us at 10,000
+# objects — while 1.7.0's charge meter bills it ZERO, because the cost is
+# unbounded in the WORLD STATE rather than in the line. No budget fixes that; only
+# lifetime does.
+#
+# THE LIFETIME, and why it is anchored here. Two zone-reset INTERVALS —
+# 30 minutes at the authored 900 s Hub cadence. The floor is how players hand
+# things to each other ("it's by the fountain, grab it"), and a handoff is
+# minutes; two full reset cycles is generous for that and still short enough that
+# a town square does not silently become a permanent landfill. Anchoring to
+# `reset_secs` rather than to a fresh constant means a zone authored with a faster
+# rhythm reclaims faster, and an operator who lowers YD_RESET_SECS for testing
+# gets faster decay for free — with no new knob, so ADR 0007 stays clean.
+#
+# INTERVALS, NOT RESET EVENTS. `maybe_zone_reset` DEFERS while any player is in
+# the zone and deliberately does not advance `g_zone_last_reset_ms` when it does
+# (server.cyr). So counting reset *events* would mean a permanently-occupied zone
+# never decays anything — and a town square, the case this exists for, is exactly
+# the zone that is never empty. Elapsed time bounds regardless of occupancy.
+#
+# WHAT DOES NOT DECAY: authored zone furniture. `item_new` memsets, so every
+# instance starts at OI_AGE 0, and **0 means "not armed"**. Only a player putting
+# something on a floor arms it. That needs no new field and no new flag, and it
+# falls out of the existing layout: zone-spawned objects are never armed, so a
+# reset's own furniture cannot decay out from under the room between resets.
+enum GroundDecay {
+    # Two reset intervals. A bare literal because an enum initializer that is an
+    # expression derails the parser for the rest of the file.
+    GROUND_RESET_MULT = 2;
+    # Floor of the computed threshold, in ticks. A zone authored with
+    # `reset_secs = 1` would otherwise reclaim a dropped item inside a second,
+    # which is a handoff nobody can complete. 120 ticks matches CORPSE_TICKS —
+    # the shortest lifetime already in the game.
+    GROUND_TICKS_MIN = 120;
+}
+
+# How many ticks a player-dropped item survives on a floor.
+#
+# Derived, not stored: reset_secs is authored content and the operator override
+# can change at boot, so computing it keeps the two from drifting. Both operands
+# are clamped at their source, and the result is floored, so this cannot return
+# zero or a negative however the zone is authored.
+fn ground_decay_ticks(): i64 {
+    var secs = clamp_reset_secs(g_zone_reset_secs);
+    if (g_reset_secs_override > 0) { secs = clamp_reset_secs(g_reset_secs_override); }
+    var ms = secs * 1000 * GROUND_RESET_MULT;
+    var per = g_tick_ms;
+    if (per < 1) { per = 1; }
+    var ticks = ms / per;
+    if (ticks < GROUND_TICKS_MIN) { return GROUND_TICKS_MIN; }
+    return ticks;
+}
+
+# Arm a player-dropped item for ground decay. Called wherever a player puts
+# something on a floor — and NOWHERE else, which is the whole distinction between
+# a player's discarded gear and the zone's own furniture.
+#
+# Re-arming from 1 on every drop matters: an item picked up and dropped again
+# starts its clock over, so passing something hand to hand does not hand along an
+# almost-expired timer.
+fn ground_arm(o): i64 {
+    if (o == 0) { return 0; }
+    if (oi_is_corpse(o) == 1) { return 0; }   # corpses have their own, shorter clock
+    store64(o + OI_AGE, 1);
+    return 0;
+}
+
 # Age every corpse in `ri` by one tick and free those past the limit, along
 # with whatever loot is still inside them. Returns the number decayed.
 fn corpse_decay_room(ri): i64 {
@@ -927,6 +1026,21 @@ fn corpse_decay_room(ri): i64 {
                 ilist_remove(slot, o);   # off the graph first, then free
                 obj_free(o);
                 freed = freed + 1;
+            }
+        } else {
+            # 1.7.5 — ground decay. OI_AGE == 0 means NOT ARMED: authored zone
+            # furniture is minted at 0 and stays there, so only what a player put
+            # on this floor ages. A bag ages as one unit; obj_free already
+            # recurses through OI_CONTENTS, so its contents go with it.
+            var gage = load64(o + OI_AGE);
+            if (gage > 0) {
+                gage = gage + 1;
+                store64(o + OI_AGE, gage);
+                if (gage >= ground_decay_ticks()) {
+                    ilist_remove(slot, o);   # off the graph first, then free
+                    obj_free(o);
+                    freed = freed + 1;
+                }
             }
         }
         o = nxt;
