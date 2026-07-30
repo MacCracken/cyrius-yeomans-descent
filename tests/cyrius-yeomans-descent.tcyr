@@ -4070,6 +4070,67 @@ fn test_account_cap(): i64 {
     assert_eq(accounts_full(0, 1), 0, "a cap of 1 admits the first character");
     assert_eq(accounts_full(1, 1), 1, "...and refuses the second");
 
+    # --- 1.7.6: the count must survive the SHARDED layout.
+    #
+    # This counted top-level ENTRIES, which was right for the flat layout and wrong
+    # from the moment 1.7.2 sharded records into `data/players/<c>/` — in the SAME
+    # release. Entries then become mostly shard DIRECTORIES, so the count collapses
+    # towards the number of distinct first letters: 26 counted against 40 real
+    # records mid-migration. An operator who set `max_accounts` had a cap that
+    # silently stopped enforcing.
+    #
+    # Asserted against records this test WRITES, so it does not depend on whatever
+    # the working data directory happens to hold.
+    var base = accounts_count_disk();
+    _player_unlink("Countaa", 7);
+    _player_unlink("Zountaa", 7);
+    var c1 = _mk_sess("Countaa", 7);
+    var csalt2 = alloc(SALT_LEN);
+    var cq2 = 0;
+    while (cq2 < SALT_LEN) { store8(csalt2 + cq2, 13 + cq2); cq2 = cq2 + 1; }
+    var cb1 = sess_ident(c1);
+    memcpy(cb1, csalt2, SALT_LEN);
+    ident_derive(csalt2, "countphrase", 11, cb1 + IDENT_SK, cb1 + IDENT_PK);
+    store64(cb1 + IDENT_CREATED, 1000000);
+    store64(c1 + SS_ROOM, 0 - 1);
+    store64(c1 + SS_HP, 4); store64(c1 + SS_MAXHP, 4);
+    store64(c1 + SS_AUTHED, 1);
+    assert_eq(player_save(c1), 1, "a sharded record is written");
+    assert_eq(accounts_count_disk(), base + 1,
+              "a record in a SHARD DIRECTORY is counted — the whole point of the fix");
+
+    # A second record under a DIFFERENT shard letter, so the count cannot be
+    # passing by accident on a single directory.
+    var c2 = _mk_sess("Zountaa", 7);
+    var cb2 = sess_ident(c2);
+    memcpy(cb2, csalt2, SALT_LEN);
+    ident_derive(csalt2, "countphrase", 11, cb2 + IDENT_SK, cb2 + IDENT_PK);
+    store64(cb2 + IDENT_CREATED, 1000000);
+    store64(c2 + SS_ROOM, 0 - 1);
+    store64(c2 + SS_HP, 4); store64(c2 + SS_MAXHP, 4);
+    store64(c2 + SS_AUTHED, 1);
+    assert_eq(player_save(c2), 1, "a record under another shard letter is written");
+    assert_eq(accounts_count_disk(), base + 2,
+              "...and records across DIFFERENT shards are both counted");
+
+    # A legacy flat record counts too — both layouts are live during migration.
+    var rec = alloc(SLURP_CAP);
+    _path_for("Countaa", 7, g_persist_path);
+    var rn2 = file_read_all(g_persist_path, rec, SLURP_CAP - 1);
+    assert(rn2 > 0, "the sharded record reads back");
+    _path_for_flat("Legacycount", 11, g_persist_path);
+    assert(file_write_all(g_persist_path, rec, rn2) >= 0, "a legacy flat record is planted");
+    assert_eq(accounts_count_disk(), base + 3,
+              "a LEGACY flat record is counted as well — both layouts are live");
+    syscall(87, g_persist_path);
+
+    # And a shard DIRECTORY is not itself an account.
+    assert_eq(accounts_count_disk(), base + 2, "removing that record removes exactly one");
+    _player_unlink("Countaa", 7);
+    _player_unlink("Zountaa", 7);
+    assert_eq(accounts_count_disk(), base,
+              "...and the count returns to where it started — directories are not accounts");
+
     # --- The config file. An absent file must leave the default alone, because
     # every existing deployment has no such file and must behave as 1.7.1 did.
     g_max_accounts = 0;

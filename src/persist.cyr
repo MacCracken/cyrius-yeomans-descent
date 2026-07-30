@@ -777,11 +777,80 @@ fn accounts_full(count, cap): i64 {
 # nothing else writes there, and a filter that silently skipped an unexpected file
 # would UNDERCOUNT, which is the direction that breaks the cap. Overcounting a
 # stray file only makes the operator's limit slightly conservative.
+# Does this directory entry name a player record? (Ends in ".cyml".)
+#
+# Counting only records, rather than every entry, is what makes the count survive
+# the sharded layout: a shard directory is an entry too, and counting it as an
+# account is exactly the bug this replaced.
+fn _is_record_name(nm): i64 {
+    var n = str_len(nm);
+    if (n < 5) { return 0; }
+    var d = str_data(nm);
+    if ((load8(d + n - 5) & 0xFF) != 46)  { return 0; }   # '.'
+    if ((load8(d + n - 4) & 0xFF) != 99)  { return 0; }   # 'c'
+    if ((load8(d + n - 3) & 0xFF) != 121) { return 0; }   # 'y'
+    if ((load8(d + n - 2) & 0xFF) != 109) { return 0; }   # 'm'
+    if ((load8(d + n - 1) & 0xFF) != 108) { return 0; }   # 'l'
+    return 1;
+}
+
+# Count the records on disk, across BOTH layouts. Called ONCE, from persist_init —
+# see g_account_count for why never again.
+#
+# 1.7.6 — this used to return `vec_len(dir_list(DP_PLAYERS))`, the count of
+# top-level ENTRIES. That was right for the flat layout and wrong the moment 1.7.2
+# sharded records into `data/players/<c>/` — in the SAME release. Entries then
+# become mostly shard DIRECTORIES, so the count collapses towards the number of
+# distinct first letters: measured 26 counted against 40 real records mid-
+# migration, and converging on ~26 as records move. An operator who set
+# `max_accounts` would have had a cap that silently stopped enforcing.
+#
+# Two changes were added together and never checked against each other. That is
+# the same shape as the cap/loop class this line has hit seven times — the check
+# counted one collection and the data lived in another.
+#
+# Records are counted by NAME, and shard directories are descended into. The
+# double dir_list is boot-only (one top level plus one per shard, ~27 calls), so
+# its bump-arena cost is a one-time startup charge like the zone loaders — not the
+# per-operation leak that ruled dir_list out for rotation.
 fn accounts_count_disk(): i64 {
-    var names = dir_list(str_from(DP_PLAYERS));
-    var n = vec_len(names);
-    if (n < 0) { return 0; }
-    return n;
+    var total = 0;
+    var top = dir_list(str_from(DP_PLAYERS));
+    var n = vec_len(top);
+    if (n <= 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var nm = vec_get(top, i);
+        if (_is_record_name(nm) == 1) {
+            total = total + 1;                       # a legacy flat record
+        } else {
+            # Anything else is a shard directory (or something an operator left
+            # here). Listing a non-directory returns an empty vec, so this is
+            # safe either way.
+            var sub = str_from(DP_PLAYERS_S);
+            var subpath = alloc(PATH_CAP);
+            var off = 0;
+            var k = 0;
+            while ((load8(DP_PLAYERS_S + k) & 0xFF) != 0) {
+                store8(subpath + off, load8(DP_PLAYERS_S + k)); off = off + 1; k = k + 1;
+            }
+            var dn = str_len(nm);
+            if (off + dn < PATH_CAP - 1) {
+                memcpy(subpath + off, str_data(nm), dn);
+                off = off + dn;
+                store8(subpath + off, 0);
+                var inner = dir_list(str_from(subpath));
+                var m = vec_len(inner);
+                var j = 0;
+                while (j < m) {
+                    if (_is_record_name(vec_get(inner, j)) == 1) { total = total + 1; }
+                    j = j + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return total;
 }
 
 # === Audit-log size (1.7.1) — the seam ADR 0009's rotation inherits. ===
