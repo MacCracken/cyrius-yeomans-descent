@@ -22,13 +22,13 @@ ownership and fix size.
 | # | Next | Items | Contains | Blocks 2.0? |
 |---|---|---|---|---|
 | — | ~~1.7.0~~ | ~~2~~ | ✅ **Shipped.** The tick budget becomes a budget — the auth reorder, the charge window, the drain re-arm, the teardown charge, and the bench that should have caught it | — |
-| 1 | [**1.7.1**](#171--bound-what-the-reconnect-rate-sets) | 3 | Bound what the reconnect rate sets — the per-connection arena loss, the unrotated audit log, and `passwd`'s missing rate limit | **yes** |
-| 2 | [**1.7.2**](#172--the-carry-cap-becomes-a-bound) | 1 | The carry cap becomes a bound — enforce it on load, then sweep the class | no |
-| 3 | [**1.7.3**](#173--cover-the-guards-that-predate-the-mutation-habit) | 3 | Cover the guards that predate the mutation habit | no |
-| 4 | [**1.7.4**](#174--object-lifetime) | 1 | Object lifetime — nothing reclaims a dropped item, and `look` pays for it | no |
-| 5 | [**gate re-run**](#the-gate--what-closes-the-1x-line) | — | Closes the 1.x line if it returns no critical or high findings | **yes** |
-| 6 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
-| 7 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
+| — | ~~1.7.1~~ | ~~3~~ | ✅ **Shipped.** Bound what the reconnect rate sets — the audit rollup window, `passwd`'s rate limit, ADR 0009, and a live audit-log integrity bug found on the way | — |
+| 1 | [**1.7.2**](#172--the-carry-cap-becomes-a-bound) | 5 | The carry cap becomes a bound — **incl. the container-flatten save poison (player-armable data loss)** · audit-log rotation per ADR 0009 · the per-tick save-failure retry · an account-creation rate limit | **yes** |
+| 2 | [**1.7.3**](#173--cover-the-guards-that-predate-the-mutation-habit) | 3 | Cover the guards that predate the mutation habit | no |
+| 3 | [**1.7.4**](#174--object-lifetime) | 1 | Object lifetime — nothing reclaims a dropped item, and `look` pays for it | no |
+| 4 | [**gate re-run**](#the-gate--what-closes-the-1x-line) | — | Closes the 1.x line if it returns no critical or high findings | **yes** |
+| 5 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
+| 6 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
 **Every issue the 1.6.0 sweep and its two re-runs produced is closed** — 1.6.0
 through 1.6.15. The **third (gate) sweep found 8 items, two of them high**;
@@ -49,7 +49,7 @@ the release.
 
 ---
 
-## Open issues — 8 raised, 2 closed in 1.7.0, 6 open (+4 raised by 1.7.0's own work)
+## Open issues — 8 raised by the sweep; 5 closed (1.7.0, 1.7.1); 3 open, +8 raised by 1.7.0's and 1.7.1's own work
 
 From the third (gate) sweep, 2026-07-29, run against 1.6.15. Worst first. Every
 item says what breaks, whether it can happen to a running server today, whose
@@ -134,7 +134,35 @@ the reason A exists)*
   each budget constant against the measured worst-case line cost, so the next
   edit that widens a budget has to move a number a test is watching.
 
-### 1.7.1 — bound what the reconnect rate sets
+### ✅ 1.7.1 — bound what the reconnect rate sets (SHIPPED)
+
+Items C, D and I are **closed**. Kept in place because the corrections matter more
+than the fixes.
+
+**Two numbers in this file were wrong.** C said 1640 bytes per event with "~224 of
+it ours". Measured: **1944 bytes** permanent per event (1640 of bump plus 304 of
+freelist blocks nothing ever frees — libro has no `hasher_free`, and the freelist
+never munmaps), of which **48** are ours. The 224 was `chain_append`'s total, 176 of
+it inside libro's `entry_new`. So the flood was **667 MiB/hour**, not 563, and
+Descent's own share was 2.9%, not 14%. What is entirely ours is the event *count*,
+which is the only lever that exists — and that is what the rollup window bounds,
+by ~3000×.
+
+**D's scoping was wrong in our favour.** This file said rotation moves to 2.0 if it
+changes the on-disk format. It does not need to: `verify_chain` never checks
+`entries[0].prev_hash`, so a sealed segment is a valid standalone file and the
+streaming chain's carried head hash records the boundary itself. No format change,
+no libro release. [ADR 0009](../adr/0009-audit-log-rotation.md) is Accepted and the
+mechanism is a 1.7.2 item. Also worth the warning it carries: libro's own
+`chain_rotate` is a **no-op** on a streaming chain and would have silently done
+nothing.
+
+**A live data-integrity bug, found while measuring C.** 436 of the audit log's
+37,902 records reported *themselves* as tampered with, because libro substitutes
+`{}` for an empty `details` on read while the hash covers the details. And the test
+suite had written 1,545 records into the operator's log. Both closed; the 436 are
+deliberately not repaired, because rewriting a hash-chained log is what it exists
+to prevent.
 
 **C. 1640 bytes of memory are permanently lost per failed connection attempt —
 563 MB/hour at 100 reconnects/s, and it never comes back.** *(high)*
@@ -224,6 +252,80 @@ the reason A exists)*
   `get all.X` scanning past `MAX_INV`.
 
 ### 1.7.2 — the carry cap becomes a bound
+
+Four items were added here by 1.7.1's own investigation. They are listed first
+because two of them are worse than the item this release is named after.
+
+**L. A carried container flattens past the carry cap and poisons the save.**
+*(high — raised by 1.7.1; player-armable data loss)*
+
+- **What breaks.** `_build_record`'s inner contents loop sets `SAVE_ERR` — which
+  M11-D turned into "refuse the whole record" — about ten lines below a comment
+  saying *"TRUNCATE the inventory here, do not poison the record."* So 1.6.13's
+  defect (a player silently stops persisting) is **fully reachable through a bag**:
+  `inv_count` walks only the top-level `SS_INV` chain, `cmd_put` moves items into a
+  carried container with **no count check**, and F11 flattens one level into the
+  same `inv` field. Probe-confirmed: 3 top-level items (well under `MAX_INV = 100`)
+  plus 200 items in one bag → the record is refused whole.
+- **Can it happen today? Yes**, by an ordinary player with a bag and no malice. This
+  is what turns `save.fail.sweep` into a per-tick event (item N).
+- **Whose code.** Ours. **Fix size.** Contained — make the container path truncate
+  like the top-level one, and count contained items against the cap.
+- **1.7.1 made this harder to notice, not better.** The rollup window bounds the
+  arena cost of the resulting `save.fail` storm, so the symptom is quieter while the
+  data loss is unchanged. Tracked for exactly that reason.
+
+**M. Audit-log rotation — the mechanism.** *(medium — the decision is done)*
+
+- [ADR 0009](../adr/0009-audit-log-rotation.md) is **Accepted**: seal-and-continue,
+  no on-disk format change, no libro release. 1.7.1 landed the decision and the
+  seam (`_audit_store_size`, `audit_size_warn_due`, the boot warning, the test
+  fixture redirect). This item is the rename/reopen, segment enumeration, the
+  keep-count prune, the `audit.rotate` / `audit.prune` markers, and the boot-time
+  head fallback.
+- **The crash window is the load-bearing part**: rename succeeds, process dies
+  before the first append, the live file is empty, a naive boot restarts the chain
+  at genesis — one broken link per boundary, indistinguishable from a deletion. That
+  is the H11 bug (fixed in 1.6.6) reintroduced as a feature. ~8 lines, and it needs
+  its own mutation test.
+- **Two traps, both verified**: libro's `chain_rotate` is a **no-op** on a streaming
+  chain (it reads the always-empty entries vec), and `chain_head_hash` returns 0 for
+  the same reason — `chain_prev_hash` is the accessor that works. Also: do **not**
+  repoint the store unless `file_rename` returned 0.
+
+**N. `save.fail.sweep` fires per TICK, not per 300 s.** *(medium — raised by 1.7.1)*
+
+- **What breaks.** `player_save` clears `SS_SAVE_DIRTY` only after a successful
+  rename, so once saves start failing every session stays due on **every** tick —
+  `SAVE_BATCH_MAX = 4` signed attempts per 2.5 s, unbounded in time, from sessions
+  merely sitting there. Under ENOSPC the audit log grows fastest exactly when it can
+  least afford to.
+- **Note also** that `save_sweep` runs *before* `charge_window_open` in
+  `advance_tick`, so this path is not charge-metered at all.
+- **Whose code.** Ours. **Fix size.** Small — a backoff or a failure stamp.
+
+**O. Nothing caps the number of accounts.** *(medium — raised by 1.7.1)*
+
+- **What breaks.** Registration is open, names are 2–16 alnum, `player_exists` is a
+  bare `stat`, and there is **no account-count or per-connection creation limit
+  anywhere**. Each account costs four lines and leaves a permanent
+  `data/players/<name>.cyml` — a disk lever entirely independent of the audit log.
+- **Why it matters beyond disk.** It is the reason "authenticated" is not a rate
+  bound anywhere in this tree: every `passwd`-path and `save`-path argument that
+  leans on "a real player sets that rate" leans on this, and this does not hold.
+  1.7.1's `passwd` rate limit is per-session; accounts are free.
+- **Whose code.** Ours. **Fix size.** Real — it needs a policy decision (invite?
+  per-IP? a cap?) before an implementation.
+
+**P. Restore G3's per-attempt audit granularity.** *(low — now affordable)*
+
+- 1.6.12 gave up per-attempt `create.fail` / `login.fail` entries to bound arena.
+  Under 1.7.1's rollup window that granularity costs the same arena and reports a
+  **truer** number, so the trade can be reversed. Deliberately not bundled with the
+  window itself (one change at a time). Listed because the code will look
+  deliberate and nobody will revisit it otherwise.
+
+
 
 **E. The 100-item carry cap is not enforced when a character loads.** *(medium)*
 

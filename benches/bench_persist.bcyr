@@ -56,6 +56,10 @@ enum PersistBench {
     # is the expensive half. It happens once per connection, off the tick, so
     # the budget is generous — it exists to catch an order-of-magnitude change.
     AUTH_BUDGET_US   = 20000;
+    # 1.7.1 — coalesced audit occurrences. A HARD ZERO, deliberately: the whole
+    # claim of the rollup window is that a suppressed occurrence allocates nothing.
+    NSUPPRESS = 5000;
+    AUDIT_SUPPRESSED_BYTES_MAX = 0;
 }
 
 var g_fail = 0;
@@ -182,6 +186,60 @@ fn main(): i64 {
     # fix lands would just encode today's libro version. Printed, not gated.
     report_op("player_auth_load (derive keypair + verify signature)",
               auth_ns, auth_by, NAUTH, AUTH_BUDGET_US, 999999);
+
+    # --- The audit rollup window (1.7.1). ===
+    #
+    # An audit_event costs 1944 bytes this process can NEVER reuse: 1640 of bump
+    # arena (alloc has no free) plus 304 of freelist blocks nothing releases —
+    # libro's hasher_new and its SHA-256 context, for which there is no
+    # hasher_free, and the freelist never munmaps, so an un-freed block is as
+    # permanent as a bump byte. Any budget written against 1640 alone understates
+    # the bug by 18.5%.
+    #
+    # The asserted property is a HARD ZERO on the suppressed path, in the same
+    # spirit as RECORD_BYTES_MAX = 0 above: a coalesced occurrence must allocate
+    # nothing at all. A ceiling would drift with libro; zero cannot, and zero IS
+    # the property this release exists to establish.
+    println("audit coalescing:");
+    audit_coalesce_init();
+    audit_coalesce_reset();
+    var anm = alloc(8);
+    memcpy(anm, "Flooder", 7);
+
+    # One verbatim entry first, to open the window and to price the thing being
+    # avoided.
+    var av0 = alloc_used();
+    audit_keyed(AK_LOGIN_FAIL, SEV_WARNING, "login.fail", anm, 7, 1000);
+    var verbatim_b = alloc_used() - av0;
+
+    # Then NSUPPRESS occurrences inside the same window.
+    var as0 = alloc_used();
+    var ai = 0;
+    while (ai < NSUPPRESS) {
+        audit_keyed(AK_LOGIN_FAIL, SEV_WARNING, "login.fail", anm, 7, 1000 + (ai % 100));
+        ai = ai + 1;
+    }
+    var supp_b = alloc_used() - as0;
+
+    print("  one verbatim audit entry        : ", 36); print_num(verbatim_b);
+    print(" bytes of bump arena", 20); println("");
+    print("  ", 2); print_num(NSUPPRESS);
+    print(" SUPPRESSED occurrences     : ", 30); print_num(supp_b);
+    print(" bytes  (max ", 13); print_num(AUDIT_SUPPRESSED_BYTES_MAX); println(")");
+    if (supp_b > AUDIT_SUPPRESSED_BYTES_MAX) {
+        println("    RESULT: FAIL — a coalesced occurrence is allocating. The bound is gone.");
+        g_fail = 1;
+    } else {
+        println("    RESULT: PASS (a coalesced occurrence allocates nothing)");
+    }
+    # State the reduction in the terms the release note uses, computed rather than
+    # asserted in prose.
+    print("  at 100 reconnects/s that is ", 30);
+    print_num(verbatim_b * 360000 / 1048576);
+    print(" MiB/h before vs ", 17);
+    print_num(verbatim_b * 2 * 60 / 1024);
+    println(" KiB/h after (bump only)");
+    audit_coalesce_reset();
 
     if (g_fail != 0) { return 1; }
     return 0;

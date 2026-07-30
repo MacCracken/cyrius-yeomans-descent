@@ -309,8 +309,8 @@ fn login_on_class(s, buf, len): i64 {
     # H10 (1.6.5) — the character's FIRST record. Failing silently here means a
     # player finishes creation, plays, and finds nothing to log back in to.
     if (player_save(s) != 1) {
-        audit_event(SEV_WARNING, "save.fail.create",
-        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+        audit_keyed(AK_SAVE_FAIL_CREATE, SEV_WARNING, "save.fail.create",
+        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
         session_appendtx_cstr(s, "\r\nWARNING: your character could not be written to disk.\r\n");
     }
     session_send_cmd_prompt(s);

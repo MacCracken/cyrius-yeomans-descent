@@ -30,4 +30,5 @@ Thumbs.db
 
 # M6 runtime state (player saves + audit chain)
 data/players/
-data/audit.libro
+data/audit*.libro*
+data/test-audit.libro*

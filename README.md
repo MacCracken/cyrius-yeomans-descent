@@ -17,7 +17,7 @@ Full design: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
 ## Status
 
-**v1.7.0 — feature-complete, maintained.** The full game loop is implemented and
+**v1.7.1 — feature-complete, maintained.** The full game loop is implemented and
 playable: the Telnet wire (RFC 854 / 1143), the verb-noun parser, a hand-authored
 21-room Hub zone, the 2.5 s combat tick with THAC0 hit/damage math, four playable
 classes with abilities, crash-safe player persistence (reconnect restores your
@@ -40,7 +40,7 @@ live snapshot.
 ```sh
 cyrius deps                                               # resolve deps into lib/
 cyrius build src/main.cyr build/cyrius-yeomans-descent    # compile
-cyrius test                                               # 821 unit + integration assertions
+cyrius test                                               # 873 unit + integration assertions
 ./build/cyrius-yeomans-descent serve 4000                 # start the server on port 4000
 ```
 
@@ -122,7 +122,7 @@ See [`docs/guides/running.md`](docs/guides/running.md) for the operator guide.
 - [Current state](docs/development/state.md) — live snapshot, refreshed every release
 - [Getting started](docs/guides/getting-started.md) — build, test, contribute
 - [Playing](docs/guides/playing.md) · [Commands](docs/guides/commands.md) · [Running a server](docs/guides/running.md)
-- [Decision records](docs/adr/) — *why did we choose X over Y?* (ADRs 0001–0007)
+- [Decision records](docs/adr/) — *why did we choose X over Y?* (ADRs 0001–0009)
 - [Architecture notes](docs/architecture/) — non-obvious invariants
 
 ## Contributing

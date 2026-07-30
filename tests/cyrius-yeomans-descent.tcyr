@@ -3781,13 +3781,20 @@ fn test_passwd_meter(): i64 {
     # Counted through the durable store, which is where the entries actually
     # land — the streaming chain retains nothing by design (1.6.1), so its
     # length is not the observable.
-    # The store is append-only across every run the machine has ever done, so it
-    # is megabytes. Size the buffer generously and REFUSE to assert if the read
-    # saturates it — a truncated read makes every length compare equal, which
-    # would turn this into a test that always passes. (It did, first time.)
-    var ACAP = 67108864;
-    var abuf = alloc(ACAP);
-    var before = file_read_all(DP_AUDIT, abuf, ACAP);
+    # 1.7.1 — counted with g_audit_emitted, not by diffing the store file's byte
+    # length. The old form read the whole append-only store into a 64 MB buffer and
+    # compared lengths, which needed a "refuse to assert if the read saturates"
+    # guard (it had silently always passed once), and — worse — could only ever
+    # assert `after > before`. That cannot tell ONE entry from a hundred, which is
+    # exactly the claim these assertions exist to make. The counter makes them
+    # EXACT, and the buffer goes away.
+    # 1.7.1 — reset the rollup windows first. Coalescing is per (severity, action)
+    # key across the whole process, so an earlier group that already tripped
+    # create.fail leaves that key's window OPEN, and this group's occurrence is
+    # then correctly TALLIED rather than written. Without this the assertions below
+    # measure test-execution order instead of the behaviour under test.
+    audit_coalesce_reset();
+    var before = g_audit_emitted;
     var cs = _mk_sess("Auditee", 7);
     store64(cs + SS_LINE_BUF, fl_alloc(LINE_CAP));
     store64(cs + SS_FD, 0 - 1);
@@ -3804,17 +3811,14 @@ fn test_passwd_meter(): i64 {
         login_on_confirm(cs, "wrongphrase", 11);
         k = k + 1;
     }
-    var mid = file_read_all(DP_AUDIT, abuf, ACAP);
-    assert(before < ACAP, "the audit store fits the probe buffer");
-    assert_eq(mid, before, "four failed creation attempts write NO durable audit entries");
+    var mid = g_audit_emitted;
+    assert_eq(mid - before, 0, "four failed creation attempts write NO durable audit entries");
     login_on_confirm(cs, "wrongphrase", 11);           # the fifth trips the cap
     assert_eq(load64(cs + SS_QUIT), 1, "the cap fired");
-    var after = file_read_all(DP_AUDIT, abuf, ACAP);
-    if (after >= ACAP) {
-        assert(0, "audit store exceeded the probe buffer — this check cannot run");
-    } else {
-        assert(after > mid, "and the capped-out session writes one entry, so a flood is still visible");
-    }
+    # EXACTLY one. The byte-delta form could only say "more than before", so a
+    # regression back to per-attempt auditing would have passed it five times over.
+    assert_eq(g_audit_emitted - mid, 1,
+              "and the capped-out session writes exactly ONE entry, so a flood is still visible");
 
     # The SAME assertion on the returning-player path. Covering one of two
     # symmetric paths is precisely the mistake this release exists to correct —
@@ -3837,18 +3841,19 @@ fn test_passwd_meter(): i64 {
     var lp = _mk_sess("Auditee2", 8);
     store64(lp + SS_LINE_BUF, fl_alloc(LINE_CAP));
     store64(lp + SS_FD, 0 - 1);
-    var lbase = file_read_all(DP_AUDIT, abuf, ACAP);
+    audit_coalesce_reset();
+    var lbase = g_audit_emitted;
     k = 0;
     while (k < MAX_LOGIN_FAILS - 1) {
         login_on_pass(lp, "wrongphrase", 11);
         k = k + 1;
     }
-    assert_eq(file_read_all(DP_AUDIT, abuf, ACAP), lbase,
+    assert_eq(g_audit_emitted - lbase, 0,
               "four wrong passphrases write NO durable audit entries either");
     login_on_pass(lp, "wrongphrase", 11);
     assert_eq(load64(lp + SS_QUIT), 1, "the login cap fired");
-    assert(file_read_all(DP_AUDIT, abuf, ACAP) > lbase,
-           "and it writes exactly one entry at the cap");
+    assert_eq(g_audit_emitted - lbase, 1,
+              "and it writes exactly one entry at the cap — the assertion the byte delta could not make");
 
     return 0;
 }
@@ -3980,6 +3985,325 @@ fn test_carry_cap(): i64 {
     _drain_ilist(taker + SS_INV);
     _drain_ilist(s + SS_INV);
     _drain_ilist(room_slot);
+    return 0;
+}
+
+# === 1.7.1 — the audit rollup window. ===
+#
+# Every audit_event costs 1944 permanently-unreclaimable bytes (1640 bump, which
+# has no free, plus 304 of freelist blocks nothing ever releases). At 100
+# reconnects/s that was 667 MiB/hour with no ceiling, unauthenticated.
+#
+# The bound is asserted through `audit_keyed`, which takes `now_ms` as a PARAMETER
+# so a whole hour of window behaviour is enumerable without a clock.
+fn test_audit_coalesce(): i64 {
+    test_group("audit-coalesce");
+
+    audit_coalesce_init();
+    audit_coalesce_reset();
+
+    var nm = alloc(8);
+    memcpy(nm, "Flooder", 7);
+
+    # --- The first occurrence of a key is written VERBATIM. Normal operation is
+    # byte-identical to 1.7.0, which is what makes this safe to land.
+    var e0 = g_audit_emitted;
+    assert_eq(audit_keyed(AK_LOGIN_FAIL, SEV_WARNING, "login.fail", nm, 7, 1000), 1,
+              "the first occurrence of a key is written verbatim");
+    assert_eq(g_audit_emitted - e0, 1, "...and it really is one durable entry");
+
+    # --- Every later occurrence in the window writes NOTHING.
+    var e1 = g_audit_emitted;
+    var i = 0;
+    while (i < 500) {
+        audit_keyed(AK_LOGIN_FAIL, SEV_WARNING, "login.fail", nm, 7, 1000 + i);
+        i = i + 1;
+    }
+    assert_eq(g_audit_emitted - e1, 0, "500 further occurrences write NO durable entries");
+    assert_eq(g_audit_dropped, 0, "...and none has been reported yet — they are still pending");
+
+    # --- The clock arm. Crossing the window rolls up the pending count and opens
+    # a fresh window, so the flood remains VISIBLE. That is the acceptance
+    # criterion for this item: bound the bytes, keep the signal.
+    var e2 = g_audit_emitted;
+    var r2 = g_audit_rollups;
+    audit_keyed(AK_LOGIN_FAIL, SEV_WARNING, "login.fail", nm, 7, 1000 + AUDIT_WINDOW_MS);
+    assert_eq(g_audit_rollups - r2, 1, "crossing the window emits exactly one rollup");
+    assert_eq(g_audit_emitted - e2, 2, "...which is the rollup plus the new window's verbatim entry");
+    assert_eq(g_audit_dropped, 500, "and the rollup reports the EXACT suppressed count");
+
+    # --- Distinct names are captured, deduped, and bounded.
+    audit_coalesce_reset();
+    var a = alloc(8); memcpy(a, "Alice", 5);
+    var b = alloc(8); memcpy(b, "Bob", 3);
+    audit_keyed(AK_CREATE_FAIL, SEV_WARNING, "create.fail", a, 5, 2000);   # verbatim
+    audit_keyed(AK_CREATE_FAIL, SEV_WARNING, "create.fail", a, 5, 2001);   # tallied
+    audit_keyed(AK_CREATE_FAIL, SEV_WARNING, "create.fail", b, 3, 2002);   # tallied, new name
+    audit_keyed(AK_CREATE_FAIL, SEV_WARNING, "create.fail", a, 5, 2003);   # tallied, dupe
+    var slot = _audit_slot(AK_CREATE_FAIL);
+    assert_eq(load64(slot + AKE_SUPP), 3, "three occurrences tallied");
+    assert_eq(load64(slot + AKE_NNAMES), 2,
+              "two DISTINCT names captured — a repeat name does not consume a slot");
+
+    # A name flood cannot grow the table: names are bounded at AUDIT_NAMES_MAX and
+    # the count keeps counting. Keying on the name instead would have handed the
+    # attacker the key space, which is why the key is a call-site constant.
+    audit_coalesce_reset();
+    audit_keyed(AK_CREATE_DUP, SEV_WARNING, "create.dup", a, 5, 3000);
+    i = 0;
+    while (i < 50) {
+        var un = alloc(24);
+        memcpy(un, "Attacker", 8);
+        store8(un + 8, 65 + (i % 26));
+        store8(un + 9, 65 + (i / 26));
+        audit_keyed(AK_CREATE_DUP, SEV_WARNING, "create.dup", un, 10, 3000 + i);
+        i = i + 1;
+    }
+    var dslot = _audit_slot(AK_CREATE_DUP);
+    assert_eq(load64(dslot + AKE_SUPP), 50, "all 50 distinct-name occurrences are counted");
+    assert_eq(load64(dslot + AKE_NNAMES), AUDIT_NAMES_MAX,
+              "...but the names captured are capped, so the table cannot grow");
+
+    # --- THE COUNT ARM, and it reads no clock. This is where the bound lives: on
+    # AGNOS clock_now_ms is sys_uptime_ms and is documented FROZEN for a
+    # foreground `run` program, so a clock-only design would be NO design there.
+    # Driven at a literal constant `now` to prove it.
+    audit_coalesce_reset();
+    var e3 = g_audit_emitted;
+    var r3 = g_audit_rollups;
+    i = 0;
+    while (i < AUDIT_SUPPRESS_MAX + 10) {
+        audit_keyed(AK_SAVE_FAIL_SWEEP, SEV_WARNING, "save.fail.sweep", nm, 7, 0);
+        i = i + 1;
+    }
+    assert_eq(g_audit_rollups - r3, 1,
+              "with the clock FROZEN at 0, the count arm still reports — exactly once per 8192");
+    assert_eq(g_audit_emitted - e3, 2,
+              "...one verbatim opener plus one rollup, for 8202 occurrences");
+    # The property that matters, stated as arithmetic: entries grow like N/8192,
+    # not like N. 8202 occurrences that would have cost 8202 x 1944 = 15.9 MB now
+    # cost two entries.
+    assert(g_audit_emitted - e3 < (AUDIT_SUPPRESS_MAX + 10) / 100,
+           "a frozen-clock flood costs entries proportional to N/8192, not to N");
+
+    # --- audit_flush_due lands the tail of a flood that STOPPED. Without it a
+    # finished attack stays counted but unwritten until its key fires again, which
+    # for an attack that ended is never.
+    audit_coalesce_reset();
+    audit_keyed(AK_LOAD_TAMPER, SEV_SECURITY, "load.tamper", nm, 7, 5000);
+    audit_keyed(AK_LOAD_TAMPER, SEV_SECURITY, "load.tamper", nm, 7, 5001);
+    assert_eq(audit_flush_due(5000 + AUDIT_WINDOW_MS - 1), 0,
+              "a window that has not expired is not flushed early");
+    assert_eq(audit_flush_due(5000 + AUDIT_WINDOW_MS), 1,
+              "an expired window is flushed by the tick even though the key went quiet");
+    assert_eq(audit_flush_due(5000 + AUDIT_WINDOW_MS), 0,
+              "...and flushing is idempotent — nothing pending, nothing written");
+
+    # --- audit_flush_all ignores the clock entirely, for shutdown.
+    audit_coalesce_reset();
+    audit_keyed(AK_PASSWD_FAIL, SEV_WARNING, "passwd.fail", nm, 7, 9000);
+    audit_keyed(AK_PASSWD_FAIL, SEV_WARNING, "passwd.fail", nm, 7, 9001);
+    assert_eq(audit_flush_all(), 1, "shutdown flushes a pending tally whatever the clock says");
+    assert_eq(audit_flush_all(), 0, "...and is idempotent");
+
+    # --- Fail OPEN on an out-of-range key: behave as 1.7.0 rather than index past
+    # the table. A forgotten AK_NKEYS bump must degrade, not corrupt.
+    var e4 = g_audit_emitted;
+    assert_eq(audit_keyed(AK_NKEYS, SEV_INFO, "test.oob", nm, 7, 1), 1,
+              "an out-of-range key falls back to writing verbatim");
+    assert_eq(audit_keyed(0 - 1, SEV_INFO, "test.neg", nm, 7, 1), 1,
+              "...and so does a negative one");
+    assert_eq(g_audit_emitted - e4, 2, "both wrote a durable entry rather than being lost");
+
+    # --- Keys are independent: one hot key must not suppress another. A flood of
+    # create.fail must not hide a single load.tamper.
+    audit_coalesce_reset();
+    i = 0;
+    while (i < 100) {
+        audit_keyed(AK_CREATE_FAIL, SEV_WARNING, "create.fail", nm, 7, 7000);
+        i = i + 1;
+    }
+    var e5 = g_audit_emitted;
+    assert_eq(audit_keyed(AK_LOAD_TAMPER, SEV_SECURITY, "load.tamper", nm, 7, 7000), 1,
+              "a SECURITY event is written verbatim despite another key flooding");
+    assert_eq(g_audit_emitted - e5, 1, "...as its own durable entry");
+
+    # --- The table is sized as the arithmetic says. If someone adds a key without
+    # bumping AK_NKEYS, or changes AUDIT_NAMES_MAX without AKE_SIZE, this fails.
+    assert_eq(AKE_SIZE, AKE_NAMES + AUDIT_NAMES_MAX * AKE_NSTRIDE,
+              "AKE_SIZE is exactly the header plus the name slots");
+    assert_eq(AKE_NSTRIDE, 8 + NAME_MAX, "a name slot is a length plus NAME_MAX bytes");
+    assert(AUDIT_SUPPRESS_MAX > 6000,
+           "the count arm sits above the design flood's per-window count, so the clock arm governs there");
+    assert(1 + 20 + AUDIT_NAMES_MAX * (1 + NAME_MAX) <= AUDIT_DET_CAP,
+           "the worst-case rollup details fits the scratch buffer");
+
+    # --- ADR 0009's size seam. A pure boundary predicate, so the threshold is
+    # testable without an 8 MiB file — and 1.7.2's rotation trigger calls the SAME
+    # predicate with the SAME constant, so the warning and the rotation cannot
+    # disagree about where the line is.
+    assert_eq(audit_size_warn_due(0), 0, "an empty log does not warn");
+    assert_eq(audit_size_warn_due(AUDIT_SIZE_WARN_BYTES - 1), 0, "one byte under does not warn");
+    assert_eq(audit_size_warn_due(AUDIT_SIZE_WARN_BYTES), 1, "exactly at the threshold warns");
+    assert_eq(audit_size_warn_due(AUDIT_SIZE_WARN_BYTES + 1), 1, "over the threshold warns");
+    # An unreadable store is not "large". Without this an absent log would warn on
+    # every boot of a fresh deployment, which is the opposite of a useful signal.
+    assert_eq(audit_size_warn_due(0 - 1), 0, "an unreadable store does not warn");
+    # And the probe returns a real size for a store that exists.
+    assert(_audit_store_size() >= 0, "the size probe reads the fixture store");
+
+    audit_coalesce_reset();
+    return 0;
+}
+
+# === 1.7.1 — an audit entry must verify as written. ===
+#
+# libro's read path (lib/libro.cyr:4155) substitutes str_from("{}") when a loaded
+# record's `details` is absent or zero-length. The entry hash covers the details,
+# so an entry WRITTEN with "" is READ BACK as "{}", recomputes to a different
+# hash, and fails entry_verify — and since each entry links to its predecessor,
+# it breaks chain verification from that point on.
+#
+# Every audit_event call site passes SS_NAME_LEN, which is 0 until a name is
+# accepted. Measured in the live data/audit.libro when this was found: 436 of
+# 37902 records, all create.fail / create.dup / save / char.create. A
+# tamper-evident log that manufactures its own tamper reports is worse than no
+# log, because it teaches an operator to ignore the alarm.
+#
+# This drives audit_event for real and then verifies what landed on disk, rather
+# than asserting on the argument — the whole bug lives in the round trip.
+fn test_audit_verifiable(): i64 {
+    test_group("audit-verifiable");
+
+    if (g_audit_chain == 0) {
+        assert(0, "no audit chain — persist_init did not run, this group cannot check anything");
+        return 0;
+    }
+
+    # An entry with a ZERO-LENGTH name: the exact shape that used to write a
+    # self-reported forgery.
+    var n0 = g_audit_emitted;
+    audit_event(SEV_INFO, "test.emptyname", 0, 0);
+    assert_eq(g_audit_emitted - n0, 1, "an empty-name event still writes one entry");
+
+    # And one with a real name, so the comparison is like-for-like.
+    var nm = alloc(8);
+    memcpy(nm, "Verifee", 7);
+    audit_event(SEV_INFO, "test.realname", nm, 7);
+    assert_eq(g_audit_emitted - n0, 2, "and a named event writes one more");
+
+    # Now read the durable store back and verify EVERY entry libro parses. This is
+    # the assertion the bug fails: before the fix, the empty-details entry read
+    # back as "{}" and its recomputed hash did not match the one on disk.
+    var st = filestore_open(str_from(DP_AUDIT));
+    var loaded = filestore_load_all(st);
+    var n = vec_len(loaded);
+    assert(n >= 2, "the store contains at least the two entries just written");
+
+    # Check the TAIL — the two entries this test wrote. Verifying the whole file
+    # would fail on the 436 pre-existing records, which are deliberately NOT
+    # repaired: rewriting a hash-chained log is the one thing it exists to
+    # prevent. So this asserts the property for what THIS release writes.
+    var bad = 0;
+    var i = n - 2;
+    while (i < n) {
+        if (entry_verify(vec_get(loaded, i)) != 1) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0,
+              "both entries just written verify against their own recorded hash");
+
+    # The adjacent-link check over the same tail — an entry can self-verify and
+    # still break the chain, so both properties are asserted.
+    var tail = vec_new();
+    i = n - 2;
+    while (i < n) { vec_push(tail, vec_get(loaded, i)); i = i + 1; }
+    assert_eq(verify_chain(tail, 1), 0,
+              "...and they link to each other, so the chain is intact across them");
+
+    return 0;
+}
+
+# === 1.7.1 — `passwd` has a rate, and the rate is bounded. ===
+#
+# G2 (1.6.12) capped the attempts inside one re-key and then RESET the counter on
+# abandoning it, so invocations were unbounded. PHASE_CHPASS_CONFIRM is the
+# dearest line reachable without a victim's credential — a derive and a sign.
+#
+# `chpass_rate_limited` takes `now_ms` as a parameter precisely so this group can
+# enumerate its domain instead of sleeping, which is what a wall-clock assertion
+# would degenerate into on a shared runner.
+fn test_chpass_rate(): i64 {
+    test_group("chpass-rate");
+
+    var s = _freeable_sess();
+    store64(s + SS_AUTHED, 1);
+
+    # --- The predicate, over its whole domain.
+    store64(s + SS_LAST_CHPASS_MS, 0);
+    assert_eq(chpass_rate_limited(s, 0), 0,
+              "a session that has never re-keyed is not limited, even at now == 0");
+    assert_eq(chpass_rate_limited(s, 5), 0,
+              "...and not limited on a host that booted 5 ms ago either");
+    # THE GUARD THAT MATTERS. clock_now_ms() is ms since BOOT, so without the
+    # `last == 0` check `now - 0 < CHPASS_MIN_INTERVAL_MS` refuses the first
+    # `passwd` on any server up for less than ten seconds. This is the exact bug
+    # 1.6.8 found in save_sweep_due, and the reason it is asserted here rather
+    # than trusted.
+    assert_eq(chpass_rate_limited(s, CHPASS_MIN_INTERVAL_MS - 1), 0,
+              "never-re-keyed is not limited even inside the interval since boot");
+
+    store64(s + SS_LAST_CHPASS_MS, 1000);
+    assert_eq(chpass_rate_limited(s, 1000), 1, "a re-key at the same instant is limited");
+    assert_eq(chpass_rate_limited(s, 1000 + CHPASS_MIN_INTERVAL_MS - 1), 1,
+              "one ms inside the interval is still limited");
+    assert_eq(chpass_rate_limited(s, 1000 + CHPASS_MIN_INTERVAL_MS), 0,
+              "exactly at the interval is allowed — the bound is a minimum GAP");
+    assert_eq(chpass_rate_limited(s, 1000 + CHPASS_MIN_INTERVAL_MS + 1), 0,
+              "and past it, allowed");
+
+    # The rate is deliberately slower than the `save` gate, because a re-key is a
+    # rare deliberate act and the line behind it is far dearer. If someone
+    # collapses the two constants this fails.
+    assert(CHPASS_MIN_INTERVAL_MS > SAVE_MIN_INTERVAL_MS,
+           "the re-key gate is slower than the anti-burst gate on `save`");
+
+    # --- The verb honours it, and stamps on the way through.
+    store64(s + SS_LAST_CHPASS_MS, 0);
+    store64(s + SS_PHASE, PHASE_CMD);
+    passwd_begin(s);
+    assert_eq(load64(s + SS_PHASE), PHASE_CHPASS_NEW, "a first `passwd` starts the re-key");
+    assert(load64(s + SS_LAST_CHPASS_MS) != 0, "...and stamps the invocation time");
+
+    # Immediately again: refused, and the phase must NOT move — a session left in
+    # PHASE_CHPASS_NEW by a refused invocation would have echo off and be waiting
+    # for a passphrase nobody asked it for.
+    store64(s + SS_PHASE, PHASE_CMD);
+    passwd_begin(s);
+    assert_eq(load64(s + SS_PHASE), PHASE_CMD,
+              "a re-key inside the interval is refused and leaves the phase alone");
+
+    # And it is a RATE limit, not a one-shot: rewinding the stamp past the
+    # interval lets it through again.
+    store64(s + SS_LAST_CHPASS_MS, 1);
+    store64(s + SS_PHASE, PHASE_CMD);
+    passwd_begin(s);
+    assert_eq(load64(s + SS_PHASE), PHASE_CHPASS_NEW,
+              "once the interval has passed, `passwd` works again");
+
+    # --- An UNAUTHENTICATED session is still refused for its own reason, and the
+    # rate gate must not have moved ahead of that check: an unauthed session owns
+    # no record, so re-keying it is meaningless whatever the clock says.
+    var u = _freeable_sess();
+    store64(u + SS_AUTHED, 0);
+    store64(u + SS_PHASE, PHASE_CMD);
+    passwd_begin(u);
+    assert_eq(load64(u + SS_PHASE), PHASE_CMD, "an unauthed session cannot start a re-key");
+    assert_eq(load64(u + SS_LAST_CHPASS_MS), 0,
+              "...and is not charged a rate-limit stamp for the attempt");
+    session_free(u);
+    session_free(s);
+
     return 0;
 }
 
@@ -4581,6 +4905,23 @@ fn test_migration(): i64 {
 fn main() {
     alloc_init();
 
+    # 1.7.1 — the suite writes to a FIXTURE audit log, not the operator's.
+    #
+    # Every group that calls persist_init() was appending to data/audit.libro, the
+    # real append-only hash chain. Measured when this was found: 1545 of its 37902
+    # records were written by test sessions — Auditee, TestPlayer, Doomed and
+    # friends — permanently interleaved with real operational history in a log that
+    # by design cannot be edited afterwards.
+    #
+    # DP_AUDIT is a plain `var`, and persist_init reads it, so one assignment ahead
+    # of the first group redirects the whole suite. This must stay BEFORE any
+    # persist_init() call, which is why it lives here rather than in a group.
+    #
+    # It is also a hard prerequisite for the audit-log rotation coming in 1.7.2:
+    # with a size threshold, the first append during `cyrius test` would rotate the
+    # operator's 13 MB log out from under them.
+    DP_AUDIT = "data/test-audit.libro";
+
     test_group("smoke");
     assert(1, "true is true");
     assert_eq(1 + 1, 2, "math works");
@@ -4632,6 +4973,9 @@ fn main() {
     test_hygiene_tail();
     test_auth_order();
     test_charge_window();
+    test_chpass_rate();
+    test_audit_verifiable();
+    test_audit_coalesce();
 
     return assert_summary();
 }

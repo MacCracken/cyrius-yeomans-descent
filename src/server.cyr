@@ -251,8 +251,8 @@ fn save_sweep(): i64 {
                 # a five-minute cadence. The player is still connected and has no
                 # idea; the audit chain is the only durable record.
                 if (player_save(s) != 1) {
-                    audit_event(SEV_WARNING, "save.fail.sweep",
-                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+                    audit_keyed(AK_SAVE_FAIL_SWEEP, SEV_WARNING, "save.fail.sweep",
+                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
                 }
                 budget = budget - 1;
                 saved = saved + 1;
@@ -685,6 +685,11 @@ fn advance_tick(): i64 {
     # which is the quantity the drift allowance actually constrains. That is a
     # tightening, not a loosening: it was never invisible-and-free, it was
     # invisible-and-charged-to-the-wrong-budget.
+    # 1.7.1 — roll up any audit window whose 60 s has elapsed. Without this a
+    # flood that STOPS leaves its tail counted but unwritten until its key happens
+    # to fire again, which for an attack that ended is never. One walk of a
+    # 16-entry table per tick; no allocation unless something is actually pending.
+    audit_flush_due(clock_now_ms());
     mob_tick_all(g_tick_count);   # M13 — every living mob takes a turn
     corpse_decay_sweep();   # M12-A — age out corpses and reclaim them
     maybe_zone_reset();  # M7 — respawn mobs/loot when the zone empties out
@@ -816,8 +821,8 @@ fn drop_session(epfd, s): i64 {
         # code (the socket is going away), so record it where an operator can
         # find it afterwards.
         if (player_save(s) != 1) {
-            audit_event(SEV_WARNING, "save.fail.disconnect",
-            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+            audit_keyed(AK_SAVE_FAIL_DISC, SEV_WARNING, "save.fail.disconnect",
+            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
         }
     }
     #ifndef CYRIUS_TARGET_AGNOS
@@ -1755,6 +1760,8 @@ fn cmd_serve(port): i64 {
     }
     #endif
     println("server: shutdown signal received; closing listener.");
+    # 1.7.1 — a tally that never reaches the log is a flood nobody can see.
+    audit_flush_all();
     sock_close(lfd);
     return 0;
 }

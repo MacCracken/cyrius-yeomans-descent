@@ -138,7 +138,9 @@ fn persist_init(): i64 {
     g_audit_chain = chain_new_streaming();
     g_audit_store = filestore_open(str_from(DP_AUDIT));
     _audit_resume_head();
+    audit_coalesce_init();          # 1.7.1 — the rollup window's table
     g_persist_ready = 1;
+    audit_size_check();             # 1.7.1 / ADR 0009 — one boot-time size warning
     return 0;
 }
 
@@ -214,11 +216,49 @@ fn _audit_last_hash(buf, n): i64 {
     return str_new(buf + found, stop - found);
 }
 
+# Lifetime count of durable audit entries actually written (1.7.1).
+#
+# An exact integer, incremented where the write happens. It exists because the
+# suite used to measure audit activity by diffing the STORE FILE's byte length,
+# which needed a 64 MB read buffer, could not distinguish two entries from one
+# long one, and is the shape that let 1.6.12's "one entry per session" claim ship
+# without a test that could see it. A counter at the call site cannot be wrong
+# about how many entries were written.
+var g_audit_emitted = 0;
+
 # Append a security event to the libro audit chain (+ flush to the
 # filestore). `action` is a literal; `who` / `wholen` the player name.
 fn audit_event(sev, action, who, wholen): i64 {
     if (g_audit_chain == 0) { return 0; }
-    var e = chain_append(g_audit_chain, sev, str_from("persist"), str_from(action), str_new(who, wholen));
+    # 1.7.1 — NEVER write an entry whose `details` is empty, because such an
+    # entry reports ITSELF as tampered with.
+    #
+    # libro's read path (lib/libro.cyr:4155) substitutes `str_from("{}")` when a
+    # loaded record's details is absent or zero-length. The hash is computed over
+    # the details, so an entry WRITTEN with "" is READ BACK as "{}", recomputes to
+    # a different hash, and fails entry_verify — and because each entry links to
+    # its predecessor, it breaks chain verification from that point on. A
+    # tamper-evident log that manufactures its own tamper reports is worse than no
+    # log, because it trains an operator to ignore the alarm.
+    #
+    # Every call site passes SS_NAME_LEN, which is 0 until a name is accepted, so
+    # any audit on a session that has not named itself yet writes one of these.
+    # Measured in the live data/audit.libro at the time of the fix: 436 of 37902
+    # records, all create.fail / create.dup / save / char.create.
+    #
+    # Writing exactly what the reader will reconstruct — "{}" — is what makes the
+    # round trip hash-stable. The upstream substitution is arguably the real bug
+    # (an entry should read back as it was written) and is filed against libro,
+    # but this side of it is ours: we chose to pass an empty details.
+    #
+    # The existing records are deliberately NOT repaired. Rewriting a
+    # hash-chained log is the one thing it exists to prevent.
+    var det = str_from("{}");
+    if (wholen > 0) {
+        if (who != 0) { det = str_new(who, wholen); }
+    }
+    var e = chain_append(g_audit_chain, sev, str_from("persist"), str_from(action), det);
+    g_audit_emitted = g_audit_emitted + 1;
     if (g_audit_store != 0) { filestore_append(g_audit_store, e); }
     # The streaming chain retains nothing, so this entry is ours to release once
     # the store has it — but ONLY because it is streaming. On a retaining chain
@@ -228,6 +268,386 @@ fn audit_event(sev, action, who, wholen): i64 {
     # comparison per audit event is nothing next to a latent use-after-free.
     if (chain_streaming(g_audit_chain) == 1) { entry_free(e); }
     return 0;
+}
+
+# === The audit rollup window (1.7.1). ===
+#
+# THE BUG. Every audit_event costs 1944 bytes that this process can never reuse —
+# 1640 of BUMP arena (alloc() has no free at all) plus 304 of freelist blocks that
+# nothing ever releases (libro's hasher_new and the SHA-256 context; there is no
+# hasher_free, and the freelist never munmaps, so an un-freed block is as
+# permanent as a bump byte). At 100 reconnects/s that is 667 MiB/hour with no
+# ceiling: lib/alloc.cyr mmaps a fresh 256 MB chunk on overflow, so it grows until
+# the kernel refuses and alloc() starts returning 0. Reachable unauthenticated —
+# connect, give a name, fail the confirm five times, disconnect, repeat.
+#
+# Only 48 of those 1944 bytes are ours (three str_from/str_new headers; str_new
+# BORROWS its payload rather than copying). 97% is inside lib/ and needs an
+# upstream release. WHAT IS ENTIRELY OURS IS THE EVENT COUNT, and it is the only
+# lever that exists.
+#
+# WHY NOT THE 1.7.0 CHARGE METER. It was the first thing considered and it cannot
+# work, for a reason worth writing down: the meter's quantifier is "for every
+# pass, cost <= 20 units" — a LATENCY bound. This needs "summed over the process
+# lifetime, bytes <= ceiling" — an ACCUMULATION bound. Passes per second is
+# bounded by nothing (server.cyr clamps the epoll timeout to 0 while g_rx_backlog
+# is non-zero, deliberately), so a per-pass allowance is a rate multiplier, not a
+# bound. And one audit_event is ~20 us = 0.08 charge units = zero in integers,
+# while costing 1944 permanent bytes. A microsecond meter structurally cannot see
+# a byte leak. That is how 1.7.0 walked past this bug with the right sessions
+# under the wrong ruler.
+#
+# WHAT THIS IS. The first occurrence of each (severity, action) key in a 60 s
+# window is written byte-for-byte as before. Every later occurrence increments an
+# i64 in a fixed table and allocates NOTHING. One durable entry lands per key per
+# window carrying the exact suppressed count plus up to six distinct names.
+#
+# THE KEY IS A COMPILE-TIME CALL-SITE CONSTANT, never a string and never attacker
+# data. Keying on `details` would hand the attacker the key space — they choose
+# the name, NAME_CAP is 32 — and a growing map would itself become the leak.
+enum AuditKeys {
+    AK_LOGIN_FAIL       = 0;
+    AK_LOGIN_DUP        = 1;
+    AK_LOGIN_OK         = 2;
+    AK_LOAD_TAMPER      = 3;
+    AK_CREATE_FAIL      = 4;
+    AK_CREATE_DUP       = 5;
+    AK_CHAR_CREATE      = 6;
+    AK_PASSWD_FAIL      = 7;
+    AK_PASSWD_ROLLBACK  = 8;
+    AK_PASSWD_CHANGE    = 9;
+    AK_SAVE             = 10;
+    AK_SAVE_INV_TRUNC   = 11;
+    AK_SAVE_FAIL_SWEEP  = 12;
+    AK_SAVE_FAIL_DISC   = 13;
+    AK_SAVE_FAIL_CREATE = 14;
+    AK_AUDIT_SIZE       = 15;
+    AK_NKEYS            = 16;
+}
+
+# One table entry. Byte offsets, matching the house SS_* / g_persist_* style.
+#
+# The severity and the action LITERAL are stored on the verbatim occurrence rather
+# than recovered from a key->action lookup function. That is deliberate: a lookup
+# is 16 hand-written arms that can silently disagree with the call site, and the
+# rollup would then name the wrong event. Storing what was actually passed cannot
+# disagree with itself. Action strings are compile-time literals, so retaining the
+# pointer is safe — nothing frees them.
+enum AuditKeyEnt {
+    AKE_SUPP    = 0;    # occurrences tallied and NOT written
+    AKE_EMITTED = 8;    # verbatim entries written in the open window
+    AKE_WOPEN   = 16;   # monotonic ms when the window opened
+    AKE_SEV     = 24;   # severity of the first occurrence
+    AKE_ACTION  = 32;   # action cstr (a literal; static for the process)
+    AKE_NNAMES  = 40;   # distinct names captured this window
+    AKE_NAMES   = 48;   # AUDIT_NAMES_MAX x AKE_NSTRIDE
+    AKE_NSTRIDE = 24;   # 8 length + 16 bytes of name (NAME_MAX)
+    AKE_SIZE    = 192;  # 48 + 6 * 24
+}
+
+enum AuditRollup {
+    # (a) worst reporting latency for a suppressed occurrence: 60 s = 24 combat
+    #     ticks, well inside operator reaction time.
+    # (b) clock-arm ceiling: AK_NKEYS(16) x (AUDIT_VERBATIM_MAX + 1 = 2) x
+    #     (3600/60 = 60) = 1920 entries/hour. A constant the code owns, with NO
+    #     rate term in it — that is the bound.
+    AUDIT_WINDOW_MS = 60000;
+    # Occurrence 1 of a window is byte-identical to 1.7.0: same severity, same
+    # action, same bare-name details, zero added latency. With six name slots the
+    # first SEVEN distinct names of a window are all durable, so a key firing <= 7
+    # times per window loses no name at all. On a 30-player MUD `login.ok` never
+    # fires 8x in a minute outside a flood, so normal operation is unchanged by
+    # construction rather than by a second code path.
+    AUDIT_VERBATIM_MAX = 1;
+    # THE BOUND LIVES HERE, and this arm reads no clock.
+    #
+    # Fixed, not doubling. Derived in both directions: it must sit ABOVE the design
+    # flood's per-window count (100 ev/s x 60 s = 6000) so that at and below that
+    # rate the clock arm governs and the hourly cost carries no rate term — 8192 is
+    # the smallest power of two above 6000. And it must be low enough that with the
+    # clock DEAD the report cadence stays the same order as the window:
+    # 8192/100 = 82 s against 60 s is 1.4x, not an order of magnitude.
+    #
+    # A frozen clock is therefore CHEAPER than a working one, not silent. That
+    # matters because on AGNOS clock_now_ms is sys_uptime_ms, which
+    # lib/syscalls_x86_64_agnos.cyr documents as FROZEN for a foreground `run`
+    # program executing with interrupts cleared.
+    AUDIT_SUPPRESS_MAX = 8192;
+    AUDIT_NAMES_MAX = 6;
+    # Scratch for the rollup details string. 1 ('+') + 20 (an i64 is at most 19
+    # digits, so one of margin) + 6 x (1 separator + 16 name bytes) = 123, rounded
+    # to 160. Must stay under the 153-byte str_builder doubling cliff in libro:
+    # with the longest action literal, a 153-byte details lands a 512-byte line,
+    # and 161 pulls a fourth doubling for +1032 bytes.
+    AUDIT_DET_CAP = 160;
+    # 1.7.1 / ADR 0009 — warn the operator here, and (in 1.7.2) rotate here. ONE
+    # constant for both so the warning and the rotation trigger cannot drift
+    # apart. 8 MiB is ~24,000 entries at the measured ~350 bytes/event, and a
+    # streamed verify of one segment that size is ~156 ms.
+    AUDIT_SIZE_WARN_BYTES = 8388608;
+}
+
+# The table, and the single reused details scratch. alloc()'d once and never
+# again: 16 x 192 + 160 = 3232 bytes one-time, which is 1.66 audit events, for a
+# ~3000x bound.
+#
+# alloc() rather than a top-level `var A[N]` on purpose. A top-level `var A[N]` is
+# N i64 SLOTS (N x 8 bytes) while a LOCAL `var buf[N]` is N BYTES — two different
+# meanings for one syntax, and lib/freelist.cyr and lib/dynlib.cyr both carry
+# comments that get it backwards and are silently 8x over-allocated. alloc(n) is
+# unambiguously n bytes.
+var g_audit_tab = 0;
+var g_audit_det = 0;
+# Test observables. NOT exposed through @stats — ADR 0007 freezes its output.
+var g_audit_rollups = 0;
+var g_audit_dropped = 0;
+
+# Allocate and zero the rollup table. Idempotent, and safe to call from both
+# persist_init and audit_keyed's lazy guard — a bench or test that drives
+# audit_keyed without a full persist_init still gets a table.
+fn audit_coalesce_init(): i64 {
+    if (g_audit_tab == 0) { g_audit_tab = alloc(AK_NKEYS * AKE_SIZE); }
+    if (g_audit_det == 0) { g_audit_det = alloc(AUDIT_DET_CAP); }
+    memset(g_audit_tab, 0, AK_NKEYS * AKE_SIZE);
+    return 0;
+}
+
+# Drop all window state. For tests, and for a clean shutdown after a flush.
+fn audit_coalesce_reset(): i64 {
+    if (g_audit_tab == 0) { return 0; }
+    memset(g_audit_tab, 0, AK_NKEYS * AKE_SIZE);
+    g_audit_rollups = 0;
+    g_audit_dropped = 0;
+    return 0;
+}
+
+fn _audit_slot(key): i64 {
+    return g_audit_tab + key * AKE_SIZE;
+}
+
+# Append the decimal form of `v` at dst+off; returns the new offset. Written here
+# rather than using fmt_int_buf, which builds DOWNWARD from index 23 inside its own
+# buffer and then shifts — so handing it a pointer into the middle of the scratch
+# is a bug waiting to happen.
+fn _audit_put_num(dst, off, v): i64 {
+    if (v == 0) { store8(dst + off, 48); return off + 1; }
+    var tmp[32];
+    var n = 0;
+    var x = v;
+    while (x > 0) { store8(&tmp + n, 48 + (x % 10)); n = n + 1; x = x / 10; }
+    var o = off;
+    while (n > 0) { n = n - 1; store8(dst + o, load8(&tmp + n)); o = o + 1; }
+    return o;
+}
+
+# Record `who` in this key's name set if it is not already there. Bounded by
+# AUDIT_NAMES_MAX; extra distinct names are counted by AKE_SUPP but not named.
+fn _audit_add_name(sl, who, wholen): i64 {
+    if (wholen <= 0) { return 0; }
+    if (who == 0)    { return 0; }
+    var n = wholen;
+    if (n > NAME_MAX) { n = NAME_MAX; }
+    var have = load64(sl + AKE_NNAMES);
+    var i = 0;
+    while (i < have) {
+        var ent = sl + AKE_NAMES + i * AKE_NSTRIDE;
+        if (load64(ent) == n) {
+            if (_audit_bytes_same(ent + 8, who, n) == 1) { return 0; }   # already named
+        }
+        i = i + 1;
+    }
+    if (have >= AUDIT_NAMES_MAX) { return 0; }
+    var slot = sl + AKE_NAMES + have * AKE_NSTRIDE;
+    store64(slot, n);
+    memcpy(slot + 8, who, n);
+    store64(sl + AKE_NNAMES, have + 1);
+    return 1;
+}
+
+# Byte-equality over n bytes. Used by the name dedupe above, which needs it before
+# it is declared — Cyrius resolves calls file-wide, so the definition sits here
+# next to its only caller rather than being hoisted.
+fn _audit_bytes_same(a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Write the rollup entry for `key` and close its window. No-op if nothing was
+# suppressed. `details` is a BARE SCALAR — "+<count> <name>[,<name>]*" — not a
+# JSON object: libro's canonical hasher takes an allocating path for objects
+# (4 vec_new plus a str_new per key = +672 bytes/entry) and a free one for
+# scalars. The leading '+' is an unambiguous discriminator, because
+# login_name_ok admits alnum only, so a verbatim details can never start with it.
+fn _audit_rollup(key): i64 {
+    var sl = _audit_slot(key);
+    var supp = load64(sl + AKE_SUPP);
+    if (supp <= 0) {
+        store64(sl + AKE_EMITTED, 0);
+        store64(sl + AKE_NNAMES, 0);
+        return 0;
+    }
+    var off = 0;
+    store8(g_audit_det + off, 43); off = off + 1;              # '+'
+    off = _audit_put_num(g_audit_det, off, supp);
+    var have = load64(sl + AKE_NNAMES);
+    var i = 0;
+    while (i < have) {
+        if (off + 1 + NAME_MAX > AUDIT_DET_CAP) { i = have; continue; }
+        if (i == 0) { store8(g_audit_det + off, 32); }         # ' '
+        else        { store8(g_audit_det + off, 44); }         # ','
+        off = off + 1;
+        var ent = sl + AKE_NAMES + i * AKE_NSTRIDE;
+        var ln = load64(ent);
+        memcpy(g_audit_det + off, ent + 8, ln);
+        off = off + ln;
+        i = i + 1;
+    }
+    # The borrow is safe for exactly one call: str_new does not copy, and
+    # chain_append hashes then filestore_append serialises synchronously before
+    # audit_event returns. So one scratch buffer serves every rollup forever.
+    audit_event(load64(sl + AKE_SEV), load64(sl + AKE_ACTION), g_audit_det, off);
+    g_audit_rollups = g_audit_rollups + 1;
+    g_audit_dropped = g_audit_dropped + supp;
+    store64(sl + AKE_SUPP, 0);
+    store64(sl + AKE_EMITTED, 0);
+    store64(sl + AKE_NNAMES, 0);
+    return 1;
+}
+
+# The coalescing entry point. Every call site goes through this instead of calling
+# audit_event directly.
+#
+# Returns 1 if a durable entry was written, 0 if the occurrence was tallied.
+fn audit_keyed(key, sev, action, who, wholen, now_ms): i64 {
+    # Fail OPEN for an out-of-range key: behave exactly as 1.7.0 did rather than
+    # index past a 3072-byte table. A forgotten AK_NKEYS bump degrades to today.
+    # Fall back to a verbatim write, and report it as one. audit_event itself
+    # always returns 0, so these cannot just forward its value.
+    if (key < 0)         { audit_event(sev, action, who, wholen); return 1; }
+    if (key >= AK_NKEYS) { audit_event(sev, action, who, wholen); return 1; }
+    if (g_audit_tab == 0) { audit_coalesce_init(); }
+    var sl = _audit_slot(key);
+
+    # "A window is open" is AKE_EMITTED > 0, never a timestamp sentinel. This is
+    # load-bearing: clock_now_ms is CLOCK_MONOTONIC and on AGNOS can read 0 and
+    # stay there, so a `wopen == 0 means closed` test would re-open the window on
+    # every event and write verbatim every time — silently removing the bound
+    # entirely, on the one target where you cannot watch it happen. Same bug class
+    # as save_sweep_due's `last == 0` (1.6.8) and chpass_rate_limited's.
+    if (load64(sl + AKE_EMITTED) == 0) {
+        store64(sl + AKE_WOPEN, now_ms);
+        store64(sl + AKE_SEV, sev);
+        store64(sl + AKE_ACTION, action);
+        store64(sl + AKE_EMITTED, 1);
+        audit_event(sev, action, who, wholen);
+        return 1;
+    }
+
+    # Clock arm — freshness. An expired window rolls up and this occurrence opens
+    # a fresh one.
+    if (now_ms - load64(sl + AKE_WOPEN) >= AUDIT_WINDOW_MS) {
+        _audit_rollup(key);
+        store64(sl + AKE_WOPEN, now_ms);
+        store64(sl + AKE_SEV, sev);
+        store64(sl + AKE_ACTION, action);
+        store64(sl + AKE_EMITTED, 1);
+        audit_event(sev, action, who, wholen);
+        return 1;
+    }
+
+    # Tally. This path allocates NOTHING.
+    store64(sl + AKE_SUPP, load64(sl + AKE_SUPP) + 1);
+    _audit_add_name(sl, who, wholen);
+
+    # Count arm — the bound. Reads no clock, so it survives a dead one.
+    if (load64(sl + AKE_SUPP) >= AUDIT_SUPPRESS_MAX) {
+        _audit_rollup(key);
+        # Re-open immediately so the next occurrence is tallied rather than
+        # written verbatim: leaving EMITTED at 0 here would make a sustained flood
+        # alternate rollup/verbatim and double the entry count.
+        store64(sl + AKE_WOPEN, now_ms);
+        store64(sl + AKE_EMITTED, 1);
+    }
+    return 0;
+}
+
+# Roll up any window that has expired. Called once per tick so a flood that STOPS
+# still lands its tail promptly instead of waiting for its key to fire again.
+fn audit_flush_due(now_ms): i64 {
+    if (g_audit_tab == 0) { return 0; }
+    var flushed = 0;
+    var k = 0;
+    while (k < AK_NKEYS) {
+        var sl = _audit_slot(k);
+        if (load64(sl + AKE_EMITTED) > 0) {
+            if (now_ms - load64(sl + AKE_WOPEN) >= AUDIT_WINDOW_MS) {
+                flushed = flushed + _audit_rollup(k);
+                store64(sl + AKE_EMITTED, 0);
+            }
+        }
+        k = k + 1;
+    }
+    return flushed;
+}
+
+# === Audit-log size (1.7.1) — the seam ADR 0009's rotation inherits. ===
+#
+# Bytes in the durable audit store, or -1 if it cannot be read.
+#
+# `file_open` + `xlseek(SEEK_END)` + `file_close`, measured at ~2.6 us and ZERO
+# arena. Deliberately not the two obvious alternatives:
+#   - `xstat` is faster (~1 us) but sys_stat's arity differs per target, and that
+#     split has already bitten this file once (see the #ifdef around _path_for's
+#     existence check).
+#   - `filestore_len` is not an option at all: it counts NEWLINES across the whole
+#     file — 27.8 ms on the 13 MB working log, on a path that would run at boot.
+fn _audit_store_size(): i64 {
+    var fd = file_open(DP_AUDIT, O_RDONLY, 0);
+    if (fd < 0) { return 0 - 1; }
+    var n = xlseek(fd, 0, 2);          # 2 = SEEK_END
+    file_close(fd);
+    return n;
+}
+
+# Is the audit store large enough to warn about? A pure boundary predicate, so the
+# threshold is testable without a 8 MiB file — and it is the same predicate ADR
+# 0009's rotation trigger will call in 1.7.2, with the same constant, so the
+# warning and the rotation can never disagree about where the line is.
+fn audit_size_warn_due(size): i64 {
+    if (size < 0) { return 0; }                       # unreadable is not "large"
+    if (size >= AUDIT_SIZE_WARN_BYTES) { return 1; }
+    return 0;
+}
+
+# Warn once, at boot, if the log is already oversized. Boot-only on purpose: no
+# per-append cost, no latch to get wrong, and no recursion (this is the one
+# audit_event whose own growth cannot compound).
+#
+# Nothing has ever told an operator this file is large. At the time this landed the
+# working log was 13,336,880 bytes over 37,902 records and silent.
+fn audit_size_check(): i64 {
+    var n = _audit_store_size();
+    if (audit_size_warn_due(n) == 0) { return 0; }
+    audit_keyed(AK_AUDIT_SIZE, SEV_WARNING, "audit.size", 0, 0, clock_now_ms());
+    return 1;
+}
+
+# Roll up everything pending, whatever the clock says. For shutdown: a tally that
+# never reaches the log is a flood nobody can see.
+fn audit_flush_all(): i64 {
+    if (g_audit_tab == 0) { return 0; }
+    var flushed = 0;
+    var k = 0;
+    while (k < AK_NKEYS) {
+        flushed = flushed + _audit_rollup(k);
+        store64(_audit_slot(k) + AKE_EMITTED, 0);
+        k = k + 1;
+    }
+    return flushed;
 }
 
 # === small utilities =======================================================
@@ -525,8 +945,8 @@ fn _build_record(s): i64 {
             # should make this unreachable; this is the net under it, and it
             # writes an audit entry so the operator can see it happened.
             if (off > SAVE_CAP - SIG_TAIL) {
-                audit_event(SEV_WARNING, "save.inv.truncated",
-                load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+                audit_keyed(AK_SAVE_INV_TRUNC, SEV_WARNING, "save.inv.truncated",
+                load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
                 it = 0;
                 continue;
             }
@@ -601,7 +1021,7 @@ fn player_save(s): i64 {
     if (syscall(SYS_RENAME_NR, g_persist_tmp, g_persist_path) != 0) { return 0 - 1; }
     store64(s + SS_LAST_SAVE_MS, clock_now_ms());
     store64(s + SS_SAVE_DIRTY, 0);
-    audit_event(SEV_INFO, "save", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    audit_keyed(AK_SAVE, SEV_INFO, "save", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
     return 1;
 }
 
@@ -761,7 +1181,7 @@ fn player_auth_load(s, pass, passlen): i64 {
     # reordering in place without a timing assertion.
     g_charge_verifies = g_charge_verifies + 1;
     if (ed25519_verify(filepk, g_persist_slurp, prefix, filesig) != 1) {
-        audit_event(SEV_SECURITY, "load.tamper", nm, nl);
+        audit_keyed(AK_LOAD_TAMPER, SEV_SECURITY, "load.tamper", nm, nl, clock_now_ms());
         return 0 - 2;
     }
 
@@ -843,7 +1263,7 @@ fn player_auth_load(s, pass, passlen): i64 {
     g_loaded_last_login = toml_int(pairs, "last_login", 0);   # 0.8.1 greeting
     store64(s + SS_AUTHED, 1);
     store64(s + SS_SAVE_DIRTY, 0);
-    audit_event(SEV_INFO, "login.ok", nm, nl);
+    audit_keyed(AK_LOGIN_OK, SEV_INFO, "login.ok", nm, nl, clock_now_ms());
     return 1;
 }
 
@@ -908,7 +1328,8 @@ fn login_on_pass(s, buf, len): i64 {
             session_echo_on(s);
             session_appendtx_cstr(s, "\r\nThat character is already connected from another session.\r\n");
             store64(s + SS_QUIT, 1);
-            audit_event(SEV_WARNING, "login.dup", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+            audit_keyed(AK_LOGIN_DUP, SEV_WARNING, "login.dup",
+            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
             return 0;
         }
         store64(s + SS_FAILS, 0);
@@ -937,7 +1358,8 @@ fn login_on_pass(s, buf, len): i64 {
         # attacker's, each entry is 1640 B of unreclaimable arena, and the
         # flood signal is fully preserved.
         if (fails >= MAX_LOGIN_FAILS) {
-            audit_event(SEV_WARNING, "login.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+            audit_keyed(AK_LOGIN_FAIL, SEV_WARNING, "login.fail",
+            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
             session_appendtx_cstr(s, "\r\nToo many failed attempts. Closing.\r\n");
             store64(s + SS_QUIT, 1);
             return 0;
@@ -1011,10 +1433,26 @@ fn _confirm_mismatch(s): i64 {
     # exactly that: every session that hammers the limit still writes one
     # SEV_WARNING naming it. What is given up is per-attempt granularity on a
     # path whose rate the ATTACKER sets — which is the path where granularity
-    # buys the least and costs the most. The authenticated `passwd` path keeps
-    # its per-attempt entry, because a real player sets that rate.
+    # buys the least and costs the most.
+    #
+    # CORRECTED in 1.7.1. This paragraph used to end: "The authenticated `passwd`
+    # path keeps its per-attempt entry, because a real player sets that rate."
+    # That premise was false. _chpass_mismatch caps the attempts inside ONE re-key
+    # and then clears SS_FAILS and returns to the prompt, so `passwd` could be
+    # re-entered immediately and forever; and registration is open, so the
+    # "authenticated" account costs an attacker four lines. It was a second
+    # unbounded lever, not a player-paced one. 1.7.1 bounds the rate
+    # (CHPASS_MIN_INTERVAL_MS) and routes every site through the rollup window, so
+    # the argument no longer rests on who is typing.
+    #
+    # Also corrected: logging "at the cap" was never one entry per session either.
+    # SS_FAILS keeps incrementing past MAX_LOGIN_FAILS, so `fails >= MAX` stays
+    # true and every further line dispatched to a condemned session audits again.
+    # Harmless now that the window coalesces it; recorded so nobody re-derives it
+    # as a fresh bug.
     if (fails >= MAX_LOGIN_FAILS) {
-        audit_event(SEV_WARNING, "create.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+        audit_keyed(AK_CREATE_FAIL, SEV_WARNING, "create.fail",
+        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
         session_echo_on(s);
         session_appendtx_cstr(s, "\r\nToo many failed attempts. Closing.\r\n");
         store64(s + SS_QUIT, 1);
@@ -1031,7 +1469,8 @@ fn _create_taken(s): i64 {
     session_echo_on(s);
     session_appendtx_cstr(s, "\r\nThat name was just taken. Please reconnect and choose another.\r\n");
     store64(s + SS_QUIT, 1);
-    audit_event(SEV_WARNING, "create.dup", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    audit_keyed(AK_CREATE_DUP, SEV_WARNING, "create.dup",
+    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
     return 0;
 }
 
@@ -1078,7 +1517,8 @@ fn login_on_confirm(s, buf, len): i64 {
     store64(blk + IDENT_CREATED, get_epoch_secs());
     store64(s + SS_AUTHED, 1);
     session_echo_on(s);   # 0.8.1 — passphrase set; restore echo
-    audit_event(SEV_INFO, "char.create", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    audit_keyed(AK_CHAR_CREATE, SEV_INFO, "char.create",
+    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
     session_appendtx_cstr(s, "\r\nIdentity sealed into the grid.\r\n");
     store64(s + SS_PHASE, PHASE_CLASS);
     class_send_prompt(s);
@@ -1099,6 +1539,28 @@ fn passwd_begin(s): i64 {
         session_appendtx_cstr(s, "You have no persistent record to re-key.\r\n");
         return 0;
     }
+    # 1.7.1 — bound the RATE, not just the attempts per invocation.
+    #
+    # G2 (1.6.12) capped the attempts inside one re-key at MAX_LOGIN_FAILS, and on
+    # hitting that cap it clears SS_FAILS and returns to the command prompt — so
+    # `passwd` could be re-entered immediately, forever. Its own comment says the
+    # cap "bounds the work per invocation", which was true and was not a bound on
+    # anything an attacker cares about: PHASE_CHPASS_CONFIRM is the dearest line in
+    # the game reachable without a victim's credential (a derive AND a sign, 2461
+    # us measured), and registration is open.
+    #
+    # This is the FOURTH appearance of the shape "a per-item cap is not a bound on
+    # how many items there are" — after H5 (1.6.2) on the login path, E3 (1.6.10)
+    # on creation, and G2 itself here. `grep -n MAX_LOGIN_FAILS src/` was always
+    # the whole answer; what it does not show is where the counter gets RESET.
+    #
+    # Refused rather than queued: a re-key is interactive, and silently deferring
+    # one would leave the player at a prompt that does nothing.
+    if (chpass_rate_limited(s, clock_now_ms()) == 1) {
+        session_appendtx_cstr(s, "You changed your passphrase very recently. Try again shortly.\r\n");
+        return 0;
+    }
+    store64(s + SS_LAST_CHPASS_MS, clock_now_ms());
     store64(s + SS_PHASE, PHASE_CHPASS_NEW);
     session_echo_off(s);
     session_appendtx_cstr(s, "New passphrase (4-64 chars): ");
@@ -1175,7 +1637,8 @@ fn _chpass_mismatch(s): i64 {
     sess_cand_clear(s);
     var fails = load64(s + SS_FAILS) + 1;
     store64(s + SS_FAILS, fails);
-    audit_event(SEV_WARNING, "passwd.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    audit_keyed(AK_PASSWD_FAIL, SEV_WARNING, "passwd.fail",
+    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
     if (fails >= MAX_LOGIN_FAILS) {
         store64(s + SS_FAILS, 0);
         store64(s + SS_PHASE, PHASE_CMD);
@@ -1228,7 +1691,14 @@ fn chpass_on_confirm(s, buf, len): i64 {
         memcpy(blk, &keep, IDENT_LEN);      # roll the identity back
         store64(s + SS_PHASE, PHASE_CMD);
         session_echo_on(s);
-        audit_event(SEV_WARNING, "passwd.fail", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+        # 1.7.1 — renamed from "passwd.fail". This is H10's ROLLBACK (the re-key
+        # derived fine and the save failed, so the identity was restored), not a
+        # wrong passphrase. Sharing one action string with _chpass_mismatch was
+        # merely imprecise before; with per-key rollup counting it would report a
+        # disk failure and a mistyped passphrase as one number, which is actively
+        # misleading in the log an operator reaches for first.
+        audit_keyed(AK_PASSWD_ROLLBACK, SEV_WARNING, "passwd.rollback",
+        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
         session_appendtx_cstr(s, "\r\nThe re-key could not be saved. Your passphrase is UNCHANGED.\r\n");
         session_send_cmd_prompt(s);
         return 0;
@@ -1236,7 +1706,8 @@ fn chpass_on_confirm(s, buf, len): i64 {
     store64(s + SS_FAILS, 0);   # G2 — a successful re-key clears the count
     store64(s + SS_PHASE, PHASE_CMD);
     session_echo_on(s);
-    audit_event(SEV_INFO, "passwd.change", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
+    audit_keyed(AK_PASSWD_CHANGE, SEV_INFO, "passwd.change",
+    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
     session_appendtx_cstr(s, "\r\nPassphrase changed. Your record is re-keyed.\r\n");
     session_send_cmd_prompt(s);
     return 0;

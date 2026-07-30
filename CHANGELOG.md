@@ -4,6 +4,130 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-07-29
+
+**Bound what the reconnect rate sets.** Three items, one of them a live
+data-integrity bug found while measuring the other two. 873 assertions (was 821);
+all 19 new guards mutation-verified.
+
+### Fixed
+
+- **436 records in the audit log reported themselves as tampered with.** libro's
+  read path substitutes `{}` for an absent or empty `details`, and the entry hash
+  covers the details — so an entry *written* with `""` is *read back* as `{}`,
+  recomputes to a different hash, fails `entry_verify`, and breaks chain
+  verification from that point on. Every `audit_event` call site passes
+  `SS_NAME_LEN`, which is 0 until a name is accepted, so any audit on an unnamed
+  session wrote one. Measured in the working log at the time of the fix: **436 of
+  37,902 records**, all `create.fail` / `create.dup` / `save` / `char.create`.
+
+  A tamper-evident log that manufactures its own tamper reports is worse than no
+  log, because it teaches an operator to ignore the alarm. `audit_event` now writes
+  what the reader will reconstruct, so the round trip is hash-stable.
+
+  **The existing 436 records are deliberately not repaired.** Rewriting a
+  hash-chained log is the one thing it exists to prevent. The code path is closed
+  and the suite no longer creates more.
+
+- **The test suite had written 1,545 records into the operator's audit log.** Every
+  group calling `persist_init()` appended to the real `data/audit.libro` —
+  permanently interleaved with operational history, in a log that by design cannot
+  be edited afterwards. The suite now writes to a fixture. Verified empirically:
+  a full run adds **zero** records to the live log.
+
+- **1,944 bytes were permanently lost per audit event, 667 MiB/hour under a
+  reconnect flood, unauthenticated.** The roadmap's figure was 1,640 and "~224 of
+  it ours". Both were wrong, in opposite directions:
+  - Descent's own code allocates **48** bytes (three `str_from`/`str_new` headers;
+    `str_new` borrows rather than copies). 1,592 is inside `lib/` — the 224 was
+    `chain_append`'s total, 176 of which is libro's `entry_new`.
+  - There is a further **304 bytes/event of freelist** that nothing ever frees —
+    libro's `hasher_new` and its SHA-256 context, for which **there is no
+    `hasher_free`** — and the freelist never munmaps, so an un-freed block is as
+    permanent as a bump byte. Any budget written against 1,640 alone understates
+    the bug by 18.5%.
+
+  Fixed by an **audit rollup window**: the first occurrence of each
+  (severity, action) key in a 60 s window is written byte-for-byte as before, and
+  every later occurrence increments an `i64` in a fixed 3 kB table and allocates
+  **nothing** — measured as a hard zero over 5,000 suppressed occurrences. One
+  durable entry lands per key per window carrying the exact suppressed count plus
+  up to six distinct names, so **a flood is still visible**. Reduction: ~3,000× on
+  memory, ~2,600× on disk.
+
+  The key is a **compile-time call-site constant**, never a string and never
+  attacker data — keying on `details` would hand the attacker the key space, and a
+  growing map would itself become the leak.
+
+- **`passwd` had no rate limit.** G2 (1.6.12) capped the attempts inside one
+  re-key, then cleared `SS_FAILS` and returned to the prompt — so `passwd` could be
+  re-entered immediately, forever. `PHASE_CHPASS_CONFIRM` is the dearest line in
+  the game reachable without a victim's credential (a keypair derive **and** a
+  record sign, 2,461 µs measured), and registration is open, so the
+  "authenticated" account costs an attacker four lines.
+
+  This is the **fourth** appearance of "a per-item cap is not a bound on how many
+  items there are". `grep -n MAX_LOGIN_FAILS src/` was always the whole answer —
+  what grep does not show is where the counter gets **reset**.
+
+- `passwd.fail` at the H10 re-key-save-rollback site is now `passwd.rollback`. One
+  string naming two unrelated events was imprecise before; under per-key rollup
+  counting it would report a disk failure and a mistyped passphrase as one number.
+
+### Added
+
+- **[ADR 0009 — Audit-log rotation](docs/adr/0009-audit-log-rotation.md)**, at
+  status Accepted. The investigation came back **"no on-disk format change
+  needed"**, so this is a 1.7.x item rather than 2.0: `verify_chain` never checks
+  `entries[0].prev_hash`, so a sealed segment is a valid standalone file, and the
+  streaming chain's carried head hash records the boundary itself. The mechanism
+  lands in 1.7.2; the reasons for that ordering are in the ADR.
+
+  Recorded there because it is the dangerous part: **libro's own `chain_rotate` is
+  a no-op here.** It reads the in-memory entries vec, which a streaming chain
+  always leaves empty, so it would silently do nothing. `chain_head_hash` returns 0
+  for the same reason.
+
+- A boot-time `audit.size` warning, and `audit_size_warn_due` — the same predicate
+  and the same constant 1.7.2's rotation trigger will use, so the two cannot drift
+  apart. **This is the first signal an operator has ever had** that the log is
+  large; the working one is 13.3 MB over 37,902 records and was silent.
+
+- `audit-coalesce`, `audit-verifiable` and `chpass-rate` test groups (+52
+  assertions), and a hard-zero arena budget on the suppressed path in
+  `bench_persist`.
+
+### Changed
+
+- Audit assertions count exact entries via `g_audit_emitted` instead of diffing
+  the store file's byte length. The old form needed a 64 MB read buffer and a
+  "refuse to assert if the read saturates" guard (it had silently always passed
+  once), and could only ever say `after > before` — which cannot tell one entry
+  from a hundred, the exact claim those assertions exist to make.
+- Three comments corrected where 1.7.1 disproved their premises — most importantly
+  1.6.12's "the authenticated `passwd` path keeps its per-attempt entry, because a
+  real player sets that rate", which was false, and "one entry per session at the
+  cap", which was never true (`SS_FAILS` keeps incrementing past the cap, so
+  post-cap lines audit again).
+
+### Known-unbounded (tracked, not fixed here)
+
+Named so they are not mistaken for covered; each is a roadmap item:
+
+- **A container flattens past the carry cap and poisons the save.** `inv_count`
+  walks only the top-level chain and `cmd_put` moves items into a carried container
+  with no count check, so 3 top-level items plus 200 in one bag refuses the whole
+  record — the 1.6.13 defect reachable through a bag. **Player-armable data loss.**
+- **`save.fail.sweep` fires per tick, not per 300 s.** `SS_SAVE_DIRTY` clears only
+  after a successful rename, so once saves fail every session stays due forever.
+- **No account-creation rate limit.** Names are 2–16 alnum, nothing caps the number
+  of accounts, and each leaves a permanent file — a disk lever independent of the
+  audit log, and the reason "authenticated" is not a rate bound anywhere here.
+- Sustained CPU is still bounded only by `MAX_LOGIN_FAILS`, `MAX_SESSIONS` and the
+  pre-auth idle timeout; the rollup window bounds bytes, not rate.
+- Four upstream libro issues to file: `filestore_head_hash`, a size accessor, a
+  `hasher_free`, and the empty-`details` substitution that caused the bug above.
+
 ## [1.7.0] — 2026-07-29
 
 **The tick budget becomes a budget.** The gate sweep found that every per-tick

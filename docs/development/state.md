@@ -3,7 +3,7 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.6.15 — all sweep issues closed; only the gate remains)
+> **Last refresh**: 2026-07-29 (v1.7.1 — 5 of the gate sweep's 8 items closed; 1.7.2 is next)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
@@ -11,8 +11,47 @@
 
 ## Version
 
-**1.7.0** — 2026-07-29. **821 assertions**; `cyrius audit` exits 0; 6/6 benches;
+**1.7.1** — 2026-07-29. **873 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build (`x86_64` + `--agnos`).
+
+**Bound what the reconnect rate sets.** The audit rollup window takes a reconnect
+flood's permanently-lost memory from **667 MiB/hour to ~229 KiB/hour** (~3000×) and
+its disk growth by ~2600×, by bounding the event COUNT — the only part of the cost
+that is ours. Measured hard zero: 5000 suppressed occurrences allocate 0 bytes.
+
+Three corrections to numbers this project had published:
+
+- **1944 bytes per audit event, not 1640.** There is a further 304 B/event of
+  freelist that nothing ever frees (libro's `hasher_new` + SHA-256 context; there is
+  **no `hasher_free`**, and the freelist never munmaps, so an un-freed block is as
+  permanent as a bump byte).
+- **48 bytes of it are ours, not 224.** The 224 was `chain_append`'s total, 176 of it
+  inside libro's `entry_new`. Descent's share is 2.9%.
+- **Rotation needs no on-disk format change**, so it is 1.7.x work rather than 2.0.
+  [ADR 0009](../adr/0009-audit-log-rotation.md) is Accepted; the mechanism is 1.7.2.
+
+And a live data-integrity bug, found while measuring the above: **436 of the audit
+log's 37,902 records reported themselves as tampered with**, because libro
+substitutes `{}` for an empty `details` on read while the entry hash covers the
+details. Every call site passes `SS_NAME_LEN`, which is 0 until a name is accepted.
+Separately, **the test suite had written 1,545 records into the operator's log**;
+it now writes to a fixture, verified as a zero-record delta on a full run. The 436
+are deliberately **not** repaired — rewriting a hash-chained log is precisely what
+it exists to prevent.
+
+**Lessons carried, added this release:**
+
+- *A per-item cap is not a bound on how many items there are* — fourth appearance
+  (`passwd`). `grep` finds the cap; what it does not show is where the counter gets
+  **reset**, which is where three of the four hid.
+- *Reach for the obviously-named library function last.* libro's `chain_rotate` and
+  `chain_head_hash` both look like the answer to rotation and both silently do
+  nothing on a streaming chain, because they read an entries vec that is always
+  empty here.
+- *A latency meter cannot see a byte leak.* 1.7.0's charge window was the first
+  thing tried for this bug and structurally could not work: its quantifier is
+  per-pass cost, this needed per-lifetime accumulation, and one audit event rounds
+  to zero charge units while costing 1944 permanent bytes.
 
 **The tick budget becomes a budget.** The drift-relevant quantity — work that
 delays a scheduled tick — went from **~247 ms to 4 ms**, and a wrong passphrase
@@ -57,18 +96,17 @@ Both docs also picked up the two user-visible changes of the whole 1.6.x line,
 neither of which had reached them: the **100-item carry cap** and the **30 s
 pre-auth disconnect**.
 
-**The gate sweep's two high findings are closed by this release.** Six of its
-eight items remain, plus four more that 1.7.0's own design work turned up — all
-in [`roadmap.md`](roadmap.md). The next one is **1.7.1**: 1640 bytes of
-unreclaimable arena per failed connection attempt (563 MB/hour at 100
-reconnects/s, unauthenticated), the never-rotated audit log, and `passwd`'s
-missing rate limit.
+**Five of the gate sweep's eight items are now closed** (two highs in 1.7.0, three
+in 1.7.1). Three remain, plus eight more that 1.7.0's and 1.7.1's own
+investigations turned up — all in [`roadmap.md`](roadmap.md).
 
-Of the arena loss, ~1.4 kB per event is inside libro's `filestore_append` and
-needs an upstream fix; **the event rate is ours and is what is unbounded**, so
-1.7.1 is schedulable work here. An earlier version of this file described the
-whole item as blocked upstream with Descent's share "already zero" — that was
-wrong about the part we own.
+**Next is 1.7.2**, and two of its items are worse than the one it is named after:
+a **carried container flattens past the carry cap and poisons the save**, which is
+player-armable data loss reachable with an ordinary bag and no malice; and
+**nothing caps the number of accounts**, which is why "authenticated" is not a rate
+bound anywhere in this tree. Also there: the rotation mechanism per ADR 0009, the
+per-tick save-failure retry, and restoring the audit granularity 1.6.12 traded
+away (now affordable under the rollup window).
 
 **Two corrections this release made to its own prior claims**, recorded because
 both were published:

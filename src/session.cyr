@@ -86,7 +86,14 @@ enum SS {
     # same edit keeps session_new's memset(s, 0, SS_SIZE) covering it — which
     # matters, because fl_alloc hands back blocks WITHOUT zeroing them.
     SS_TX_DIRTY     = 368;
-    SS_SIZE         = 376;
+    # 1.7.1 — monotonic ms when this session last STARTED a `passwd` re-key.
+    # A new slot for the same reason SS_TX_DIRTY was: enum names share one flat
+    # global namespace, and SS_LAST_SAVE_MS is a different rule doing a different
+    # job (see chpass_rate_limited). Bumping SS_SIZE in the same edit keeps
+    # session_new's memset(s, 0, SS_SIZE) covering it, which matters because
+    # fl_alloc hands back blocks WITHOUT zeroing them.
+    SS_LAST_CHPASS_MS = 376;
+    SS_SIZE         = 384;
 }
 
 # The published epoll fd, used by room broadcasts (M3-C) and combat
@@ -140,6 +147,25 @@ enum SessConst {
     SAVE_SWEEP_MIN_MS = 300000;
     # Consecutive failed passphrase attempts before the session is closed.
     MAX_LOGIN_FAILS = 5;
+    # 1.7.1 — minimum gap between two `passwd` re-key STARTS on one session.
+    #
+    # Why this exists at all. G2 (1.6.12) capped the attempts within ONE re-key at
+    # MAX_LOGIN_FAILS — and then, on hitting the cap, resets SS_FAILS to 0 and
+    # returns the player to the command prompt so they can type `passwd` again.
+    # That bounds the work per INVOCATION and leaves invocations unbounded, which
+    # the G2 comment says outright ("That still bounds the work per invocation,
+    # which is the point"). PHASE_CHPASS_CONFIRM is the dearest line in the game
+    # that needs no victim's credential — an ident_derive AND a record sign, two
+    # Ed25519 operations in one line, measured 2461 us — and registration is open,
+    # so the "authenticated" account an attacker needs costs four lines.
+    #
+    # Deliberately 10x SAVE_MIN_INTERVAL_MS, not equal to it. A re-key is a rare,
+    # deliberate act; the anti-burst gate on `save` is tuned for a verb a player
+    # may reasonably repeat. Ten seconds costs a legitimate user essentially
+    # nothing — reaching this gate at all means failing five confirms in a row
+    # inside one invocation, since a mismatch re-prompts WITHIN the re-key rather
+    # than requiring a new one — and it is 10x the bound.
+    CHPASS_MIN_INTERVAL_MS = 10000;
 }
 
 # Is this session standing in a room that actually exists? (H18, 1.6.9.)
@@ -177,6 +203,31 @@ fn save_rate_limited(s): i64 {
     var last = load64(s + SS_LAST_SAVE_MS);
     if (last == 0) { return 0; }
     if (clock_now_ms() - last < SAVE_MIN_INTERVAL_MS) { return 1; }
+    return 0;
+}
+
+# Has this session started a `passwd` re-key too recently to start another?
+# (1.7.1 — see CHPASS_MIN_INTERVAL_MS for why the rate, not just the per-attempt
+# count, has to be bounded.)
+#
+# `now_ms` is a PARAMETER rather than a clock_now_ms() call inside, unlike
+# save_rate_limited above. That is the deliberate difference: it makes the rule
+# total over its domain and testable without arranging a clock, which is the seam
+# save_sweep_due and tick_step already use and the one 1.7.0 settled on after two
+# timing-flaky tests. save_rate_limited is left alone — changing its signature
+# would be churn in a release that is not about it.
+#
+# A zero SS_LAST_CHPASS_MS — a session that has never re-keyed — is never limited.
+# That guard is LOAD-BEARING, not belt-and-braces: clock_now_ms() is
+# CLOCK_MONOTONIC (ms since BOOT), so `now - 0 < INTERVAL` is true on any host up
+# for less than ten seconds, and without it the first `passwd` of a freshly booted
+# server would be refused. This is the exact bug 1.6.8 fixed in save_sweep_due,
+# which had been written from a version of the comment that got the reasoning
+# backwards.
+fn chpass_rate_limited(s, now_ms): i64 {
+    var last = load64(s + SS_LAST_CHPASS_MS);
+    if (last == 0) { return 0; }
+    if (now_ms - last < CHPASS_MIN_INTERVAL_MS) { return 1; }
     return 0;
 }
 
