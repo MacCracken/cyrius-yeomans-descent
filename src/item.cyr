@@ -698,7 +698,20 @@ fn cmd_give(s, pa): i64 {
 
     # G1 — the RECIPIENT's cap. Handing someone their 101st item would push them
     # over a limit they cannot see and did not choose.
-    if (inv_count(target) >= MAX_INV) {
+    #
+    # 1.7.3 — the gift's CONTENTS count too. This tested `>= MAX_INV` and then
+    # transferred one item *and everything inside it*, so handing a full bag to
+    # someone at 99 left them at ~199 — a clean factor of two past a cap the check
+    # appears to enforce. The same shape as the carry-cap hole 1.7.2 closed on the
+    # acquisition path: the check counted one collection and the transfer moved a
+    # different one.
+    #
+    # Counted as "would this transfer exceed the cap" rather than "is the target
+    # at the cap", because the answer depends on what is being handed over.
+    var moving = 1;
+    var gi = oi_contents(o);
+    while (gi != 0) { moving = moving + 1; gi = oi_next(gi); }
+    if (inv_count(target) + moving > MAX_INV) {
         session_appendtx_cstr(s, "They can't carry any more.\r\n");
         return 0;
     }

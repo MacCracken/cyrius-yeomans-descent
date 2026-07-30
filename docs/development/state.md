@@ -3,13 +3,39 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.7.2 — 6 of the gate sweep's 8 items closed; 1.7.3 is next)
+> **Last refresh**: 2026-07-29 (v1.7.3 — the gate sweep's 8 items are closed; 1.7.4 carries rotation + the floor cap)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.3** — 2026-07-29. **971 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build; suite green against an empty `data/players` (the fresh-checkout
+check CI taught us in 1.7.2).
+
+Four of 1.7.2's six items. `cmd_give` counted the gift but not its contents
+(measured 141 against a cap of 100 — the 1.7.2 carry-cap shape again, one release
+later, on the verb nobody re-checked). A failing save retried every tick because
+"last saved" only advances on success. And the two guards that had never had a
+test — the `passwd` secret-key wipe and the double-login refusal — are now covered
+and mutation-verified.
+
+**Rotation did not land, deliberately.** The ADR 0009 crash window (rename, then
+die, then the chain restarts at genesis — H11 as a feature) is the load-bearing
+part and belongs in a release where it is the subject. It is first in 1.7.4.
+
+**Lessons carried, added this release:**
+
+- *State what was proven, not what is plausible.* The borrowed audit chain-link is
+  a real hazard and its consequence was never demonstrated — a probe showed zero
+  broken links either way. The one break in the working log has an unknown cause.
+  Writing "confirmed at record 554" would have put a guess into the record where a
+  future reader would inherit it as fact.
+- *A probe that measures the wrong quantity is worse than none.* Two drafts of that
+  probe compared a chain link across an operation that legitimately advances it,
+  so "the link changed" proved nothing either time.
 
 **1.7.2** — 2026-07-29. **946 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build.

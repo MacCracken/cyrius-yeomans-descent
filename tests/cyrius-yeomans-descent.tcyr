@@ -4133,6 +4133,169 @@ fn test_account_cap(): i64 {
     return 0;
 }
 
+# === 1.7.3 — a failing save backs off instead of retrying every tick. ===
+#
+# `player_save` clears SS_SAVE_DIRTY only after a successful rename, so a session
+# whose save fails stays dirty AND stays due: the "last success" stamp never
+# advances either, so `save_sweep_due` said yes on every tick. Four signed saves
+# every 2.5 s, from sessions merely sitting there, unbounded in time — and under
+# ENOSPC the audit log grows fastest exactly when it can least afford to.
+#
+# `now` is a parameter, so the whole backoff window is enumerable without a clock.
+fn test_save_backoff(): i64 {
+    test_group("save-backoff");
+
+    var s = _freeable_sess();
+    store64(s + SS_AUTHED, 1);
+    store64(s + SS_SAVE_DIRTY, 1);
+    store64(s + SS_LAST_SAVE_MS, 0);
+    store64(s + SS_LAST_SAVE_TRY_MS, 0);
+
+    # Never attempted: due immediately. The zero-stamp guard matters because
+    # clock_now_ms is ms since BOOT — reading 0 as "attempted at time 0" would
+    # suppress the first autosave of every session on a young host, which is the
+    # bug 1.6.8 found in this very function.
+    assert_eq(save_sweep_due(s, 0), 1, "a never-attempted dirty session is due at now == 0");
+    assert_eq(save_sweep_due(s, 1000), 1, "...and at any later now");
+
+    # After an attempt, it backs off for SAVE_RETRY_MIN_MS — whether or not the
+    # attempt succeeded, which is the point: failure must not get MORE attention.
+    store64(s + SS_LAST_SAVE_TRY_MS, 10000);
+    assert_eq(save_sweep_due(s, 10000), 0, "an attempt just now is not retried immediately");
+    assert_eq(save_sweep_due(s, 10000 + SAVE_RETRY_MIN_MS - 1), 0,
+              "...nor one millisecond inside the backoff");
+    assert_eq(save_sweep_due(s, 10000 + SAVE_RETRY_MIN_MS), 1,
+              "...and is retried once the backoff has passed");
+
+    # Clean sessions are still never due, backoff or not.
+    store64(s + SS_SAVE_DIRTY, 0);
+    assert_eq(save_sweep_due(s, 10000 + SAVE_RETRY_MIN_MS), 0,
+              "a session with nothing to save is never due");
+    store64(s + SS_SAVE_DIRTY, 1);
+
+    # The retry gap is deliberately shorter than the autosave cadence: a transient
+    # failure should recover in seconds, not in five minutes.
+    assert(SAVE_RETRY_MIN_MS < SAVE_SWEEP_MIN_MS,
+           "the retry backoff is shorter than the autosave interval");
+
+    # --- The real writer stamps the attempt even when it FAILS. Drive an actual
+    # failure: an unwritable path. Without the stamp the session is due again on
+    # the very next tick, which is the defect.
+    var nm = load64(s + SS_NAME_BUF);
+    memcpy(nm, "Backoff", 7);
+    store64(s + SS_NAME_LEN, 7);
+    var salt = alloc(SALT_LEN);
+    var q = 0;
+    while (q < SALT_LEN) { store8(salt + q, 51 + q); q = q + 1; }
+    var blk = sess_ident(s);
+    memcpy(blk, salt, SALT_LEN);
+    ident_derive(salt, "backoffphrase", 13, blk + IDENT_SK, blk + IDENT_PK);
+    store64(s + SS_ROOM, 0 - 1);
+    store64(s + SS_LAST_SAVE_TRY_MS, 0);
+
+    var saved_dir = DP_PLAYERS_S;
+    DP_PLAYERS_S = "/proc/nonexistent-dir-for-test/";   # writes here cannot succeed
+    var rc = player_save(s);
+    DP_PLAYERS_S = saved_dir;
+    assert_eq(rc, 0 - 1, "the save really did fail");
+    assert(load64(s + SS_LAST_SAVE_TRY_MS) != 0,
+           "a FAILED save still stamps the attempt, so the retry backs off");
+    assert_eq(load64(s + SS_SAVE_DIRTY), 1, "...and the session stays dirty, so nothing is lost");
+
+    session_free(s);
+    return 0;
+}
+
+# === 1.7.3 — two guards that predate the mutation habit. ===
+#
+# Both were found by a coverage check, not by a failure: reverting either changed
+# no test. A guard with no test is a guard that will be removed by someone tidying
+# up, and these two protect a secret key and a duplicated character respectively.
+fn test_legacy_guards(): i64 {
+    test_group("legacy-guards");
+
+    # --- F: the `passwd` candidate block holds a DERIVED SECRET KEY, and
+    # sess_cand_clear wipes it before returning the block to the freelist. That
+    # matters because fl_free reuses blocks WITHOUT zeroing (H8, 1.6.4), so an
+    # unwiped candidate would hand the next allocation someone's private key.
+    var s = _freeable_sess();
+    var cand = sess_cand(s);
+    assert(cand != 0, "the candidate block allocates");
+    # Fill it the way a real re-key does — a recognisable non-zero pattern.
+    var i = 0;
+    while (i < CAND_LEN) { store8(cand + i, 0xA5); i = i + 1; }
+    var nonzero = 0;
+    i = 0;
+    while (i < CAND_LEN) {
+        if ((load8(cand + i) & 0xFF) != 0) { nonzero = nonzero + 1; }
+        i = i + 1;
+    }
+    assert_eq(nonzero, CAND_LEN, "the candidate really is full of key material");
+
+    sess_cand_clear(s);
+    assert_eq(load64(s + SS_IDENT_CAND), 0, "the session no longer references the block");
+    # Read the freed block deliberately. This is the only way to assert the wipe:
+    # the bytes are what the next fl_alloc of this size class will hand out, and
+    # fl_free does not zero them.
+    var still = 0;
+    i = 0;
+    while (i < CAND_LEN) {
+        if ((load8(cand + i) & 0xFF) != 0) { still = still + 1; }
+        i = i + 1;
+    }
+    assert_eq(still, 0,
+              "the secret key is WIPED before the block returns to the freelist");
+    session_free(s);
+
+    # --- G: the double-login refusal, asserted AT ITS CALL SITE. The predicate
+    # had a test; the refusal did not, so replacing the check with a constant
+    # false broke nothing. Two sessions on one character means two writers to one
+    # save record — the inventory duplication 1.6.6 fixed.
+    var gh = g_session_head;
+    _player_unlink("Twinned", 7);
+    var first = _mk_sess("Twinned", 7);
+    var fsalt = alloc(SALT_LEN);
+    var fq = 0;
+    while (fq < SALT_LEN) { store8(fsalt + fq, 23 + fq); fq = fq + 1; }
+    var fblk = sess_ident(first);
+    memcpy(fblk, fsalt, SALT_LEN);
+    ident_derive(fsalt, "twinnedphrase", 13, fblk + IDENT_SK, fblk + IDENT_PK);
+    store64(fblk + IDENT_CREATED, 1000000);
+    store64(first + SS_ROOM, 0 - 1);
+    store64(first + SS_HP, 8); store64(first + SS_MAXHP, 8);
+    store64(first + SS_AUTHED, 1);
+    assert_eq(player_save(first), 1, "the first session has a record");
+
+    # Put the authenticated first session on the live list — that is what
+    # session_already_online walks.
+    store64(first + SS_NEXT, 0);
+    g_session_head = first;
+
+    var second = _mk_sess("Twinned", 7);
+    store64(second + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(second + SS_FD, 0 - 1);
+    store64(second + SS_PHASE, PHASE_PASS);
+    _tx_reset(second);
+    login_on_pass(second, "twinnedphrase", 13);
+    # The refusal CONDEMNS the session (SS_QUIT) rather than un-authenticating it:
+    # player_auth_load has already proved who they are by this point, which is
+    # deliberate — checking earlier would let the prompt be used to probe who is
+    # online. So the observable is SS_QUIT, not SS_AUTHED.
+    assert_eq(load64(second + SS_QUIT), 1,
+              "a SECOND login to a character already online is REFUSED");
+    assert(load64(second + SS_PHASE) != PHASE_CMD,
+           "...and never reaches the command prompt");
+    assert_eq(load64(first + SS_QUIT), 0,
+              "...while the session that got there first is untouched");
+    assert_eq(_contains(load64(second + SS_TX_BUF), load64(second + SS_TX_LEN),
+                        "already connected"), 1,
+              "...and the second session is told why");
+
+    g_session_head = gh;
+    _player_unlink("Twinned", 7);
+    return 0;
+}
+
 # === 1.7.2 — player records are sharded, and the old layout still works. ===
 #
 # Records move from `data/players/<name>.cyml` to `data/players/<c>/<name>.cyml`
@@ -4351,6 +4514,67 @@ fn test_carry_cap_container(): i64 {
               "a session whose bag is over the cap is FULL — acquisition is refused");
     _drain_ilist(full + SS_INV);
     session_free(full);
+
+    # --- `give` must count what is INSIDE the gift.
+    #
+    # It tested `>= MAX_INV` and then transferred the item AND its contents, so
+    # handing a full bag to someone under the cap left them well past it — the
+    # same shape as the acquisition hole 1.7.2 closed: the check counted one
+    # collection, the transfer moved another.
+    #
+    # Driven through the REAL verb and parser. An earlier draft of this assertion
+    # recomputed the cap arithmetic in the test instead, which is the shape that
+    # let three mutations survive in 1.6.12 — a test that reimplements the rule it
+    # is checking cannot fail when the rule changes.
+    var pa = parser_new();
+    var ggh = g_session_head;
+    var bgiver = _mk_sess("Bagman1", 7);
+    store64(bgiver + SS_ROOM, 0); store64(bgiver + SS_PHASE, PHASE_CMD); store64(bgiver + SS_FD, 0 - 1);
+    var btaker = _mk_sess("Bagman2", 7);
+    store64(btaker + SS_ROOM, 0); store64(btaker + SS_PHASE, PHASE_CMD); store64(btaker + SS_FD, 0 - 1);
+    store64(bgiver + SS_NEXT, btaker); store64(btaker + SS_NEXT, 0);
+    g_session_head = bgiver;
+
+    # Recipient sits 10 under the cap: a bare item would fit, a 51-item bag must not.
+    var bk = 0;
+    while (bk < MAX_INV - 10) { ilist_push(btaker + SS_INV, item_new(ot_at(0))); bk = bk + 1; }
+    var fullbag = item_new(ot_at(0));
+    ilist_push(bgiver + SS_INV, fullbag);
+    bk = 0;
+    while (bk < 50) { ilist_push(fullbag + OI_CONTENTS, item_new(ot_at(0))); bk = bk + 1; }
+
+    var taker_before = inv_count(btaker);
+    assert(taker_before < MAX_INV, "the recipient starts UNDER the cap");
+    assert(taker_before + 51 > MAX_INV, "...but the gift plus its contents would exceed it");
+
+    var bcmd = alloc(160);
+    var bco = _str_into(bcmd, 0, "give ");
+    bco = _str_into(bcmd, bco, _kw1(oi_kw_ptr(fullbag), alloc(64)));
+    bco = _str_into(bcmd, bco, " to Bagman2");
+    _tx_reset(bgiver);
+    parser_parse(pa, bcmd, bco);
+    cmd_give(bgiver, pa);
+
+    assert_eq(inv_count(btaker), taker_before,
+              "a gift whose CONTENTS would breach the cap is refused whole");
+    assert_eq(_on_ilist(bgiver + SS_INV, fullbag), 1, "...and the bag stays with the giver");
+    assert(inv_count(btaker) <= MAX_INV, "the recipient is never pushed past MAX_INV");
+
+    # A bare item still goes through, so the check bounds rather than blocks.
+    var bare = item_new(ot_at(0));
+    ilist_push(bgiver + SS_INV, bare);
+    bco = _str_into(bcmd, 0, "give ");
+    bco = _str_into(bcmd, bco, _kw1(oi_kw_ptr(bare), alloc(64)));
+    bco = _str_into(bcmd, bco, " to Bagman2");
+    _tx_reset(bgiver);
+    parser_parse(pa, bcmd, bco);
+    cmd_give(bgiver, pa);
+    assert_eq(inv_count(btaker), taker_before + 1,
+              "a single item under the cap is still handed over");
+
+    g_session_head = ggh;
+    _drain_ilist(bgiver + SS_INV);
+    _drain_ilist(btaker + SS_INV);
 
     # --- THE DATA-LOSS HALF, and the one that matters most.
     #
@@ -5441,6 +5665,8 @@ fn main() {
     test_carry_cap_container();
     test_account_cap();
     test_player_sharding();
+    test_legacy_guards();
+    test_save_backoff();
 
     return assert_summary();
 }

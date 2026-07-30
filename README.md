@@ -17,7 +17,7 @@ Full design: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
 ## Status
 
-**v1.7.2 — feature-complete, maintained.** The full game loop is implemented and
+**v1.7.3 — feature-complete, maintained.** The full game loop is implemented and
 playable: the Telnet wire (RFC 854 / 1143), the verb-noun parser, a hand-authored
 21-room Hub zone, the 2.5 s combat tick with THAC0 hit/damage math, four playable
 classes with abilities, crash-safe player persistence (reconnect restores your
@@ -40,7 +40,7 @@ live snapshot.
 ```sh
 cyrius deps                                               # resolve deps into lib/
 cyrius build src/main.cyr build/cyrius-yeomans-descent    # compile
-cyrius test                                               # 946 unit + integration assertions
+cyrius test                                               # 971 unit + integration assertions
 ./build/cyrius-yeomans-descent serve 4000                 # start the server on port 4000
 ```
 

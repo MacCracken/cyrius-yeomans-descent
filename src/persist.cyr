@@ -137,6 +137,7 @@ fn persist_init(): i64 {
     # before — each records its predecessor's hash — but only the head hash is
     # kept, so the in-memory cost is O(1) instead of O(events). The durable
     # chain in data/audit.libro is unchanged and verifies the same.
+    if (g_audit_head == 0) { g_audit_head = alloc(AUDIT_HEAD_CAP); }
     g_audit_chain = chain_new_streaming();
     g_audit_store = filestore_open(str_from(DP_AUDIT));
     _audit_resume_head();
@@ -185,7 +186,29 @@ fn _audit_resume_head(): i64 {
     if (n <= 0) { return 0; }
     var h = _audit_last_hash(g_persist_slurp, n);
     if (h == 0) { return 0; }
-    chain_set_prev_hash(g_audit_chain, h);
+    # 1.7.3 — COPY the hash rather than handing the chain a borrow.
+    #
+    # WHAT IS ESTABLISHED. `str_new` STORES THE POINTER; it does not copy
+    # (lib/str.cyr:43). So this used to leave the chain's prev-link pointing into
+    # `g_persist_slurp` — the same buffer `player_auth_load` reads a player record
+    # into. A stored reference to a buffer that other code overwrites is a hazard
+    # on its own terms, and removing it costs one memcpy of at most 64 bytes at
+    # boot.
+    #
+    # WHAT IS NOT ESTABLISHED, stated plainly so nobody inherits an assumption:
+    # I have NOT demonstrated this producing a broken link. A probe that resumes
+    # the head and then authenticates reports zero broken links both with and
+    # without this copy, because a successful `player_auth_load` also appends
+    # `login.ok`, and the ordering that would expose a stale link did not
+    # reproduce. The working log does contain exactly one broken link (record 554
+    # of 39,245) and I do not know its cause — attributing it to this would be a
+    # guess dressed as a finding.
+    #
+    # So: a latent hazard removed cheaply, not a diagnosed outage.
+    var hl = str_len(h);
+    if (hl > AUDIT_HEAD_CAP) { hl = AUDIT_HEAD_CAP; }
+    memcpy(g_audit_head, str_data(h), hl);
+    chain_set_prev_hash(g_audit_chain, str_new(g_audit_head, hl));
     return 0;
 }
 
@@ -233,6 +256,11 @@ fn _audit_last_hash(buf, n): i64 {
 # without a test that could see it. A counter at the call site cannot be wrong
 # about how many entries were written.
 var g_audit_emitted = 0;
+
+# Owned storage for the chain's resumed prev-link (1.7.3). A SHA-256 hex digest
+# is 64 bytes; 128 is headroom for a longer digest without another edit here.
+enum AuditHead { AUDIT_HEAD_CAP = 128; }
+var g_audit_head = 0;
 
 # Append a security event to the libro audit chain (+ flush to the
 # filestore). `action` is a literal; `who` / `wholen` the player name.
@@ -1242,6 +1270,11 @@ fn _build_record(s): i64 {
 fn player_save(s): i64 {
     if (load64(s + SS_AUTHED) == 0) { return 0; }
     persist_init();
+    # 1.7.3 — stamp the ATTEMPT before anything can fail, so a save that fails at
+    # any point below still backs off (see save_sweep_due). Stamping only on the
+    # success path would leave every failure mode retrying every tick, which is
+    # the defect this fixes.
+    store64(s + SS_LAST_SAVE_TRY_MS, clock_now_ms());
     var total = _build_record(s);
     if (total < 0) { return 0 - 1; }
     _shard_mkdir(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));   # 1.7.2

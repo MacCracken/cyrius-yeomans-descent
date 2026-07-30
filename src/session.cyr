@@ -93,7 +93,14 @@ enum SS {
     # session_new's memset(s, 0, SS_SIZE) covering it, which matters because
     # fl_alloc hands back blocks WITHOUT zeroing them.
     SS_LAST_CHPASS_MS = 376;
-    SS_SIZE         = 384;
+    # 1.7.3 — monotonic ms of the last save ATTEMPT, success or failure.
+    #
+    # Distinct from SS_LAST_SAVE_MS, which records the last SUCCESS and must keep
+    # meaning that: it is what `save` verb rate-limiting and the autosave cadence
+    # are written against, and stamping it on a failure would claim a record was
+    # written when it was not.
+    SS_LAST_SAVE_TRY_MS = 384;
+    SS_SIZE         = 392;
 }
 
 # The published epoll fd, used by room broadcasts (M3-C) and combat
@@ -145,6 +152,21 @@ enum SessConst {
     # gate on the `save` verb, a different rule doing a different job, and
     # collapsing the two would turn the autosave into a per-second storm.
     SAVE_SWEEP_MIN_MS = 300000;
+    # 1.7.3 — minimum gap between two autosave ATTEMPTS on one session.
+    #
+    # `player_save` clears SS_SAVE_DIRTY only after a successful rename, so once
+    # saves start failing the session stays dirty and stays due — on EVERY tick,
+    # not every 300 s, because the "last success" stamp never advances either. At
+    # SAVE_BATCH_MAX = 4 that is four signed saves every 2.5 s, unbounded in time,
+    # from sessions merely sitting there. Under ENOSPC the audit log then grows
+    # fastest exactly when it can least afford to.
+    #
+    # 30 s rather than a full SAVE_SWEEP_MIN_MS: a transient failure (a full disk
+    # that gets cleared) should recover in seconds, not in five minutes, and 30 s
+    # is already a 12x cut in attempt rate. This bounds the RETRY, not the
+    # cadence — a healthy session's autosave is still governed by
+    # SAVE_SWEEP_MIN_MS.
+    SAVE_RETRY_MIN_MS = 30000;
     # Consecutive failed passphrase attempts before the session is closed.
     MAX_LOGIN_FAILS = 5;
     # 1.7.1 — minimum gap between two `passwd` re-key STARTS on one session.
@@ -251,6 +273,15 @@ fn chpass_rate_limited(s, now_ms): i64 {
 # opposite, and was wrong.)
 fn save_sweep_due(s, now): i64 {
     if (load64(s + SS_SAVE_DIRTY) == 0) { return 0; }
+    # 1.7.3 — back off after a recent ATTEMPT, whether or not it worked. Without
+    # this a failing save re-attempts every tick forever; see SAVE_RETRY_MIN_MS.
+    # A zero stamp means "never attempted", which must not be read as "attempted
+    # at time 0" — clock_now_ms is ms since BOOT, so on a young host that would
+    # suppress the first autosave of every session.
+    var tried = load64(s + SS_LAST_SAVE_TRY_MS);
+    if (tried != 0) {
+        if (now - tried < SAVE_RETRY_MIN_MS) { return 0; }
+    }
     var last = load64(s + SS_LAST_SAVE_MS);
     if (last == 0) { return 1; }
     if (now - last < SAVE_SWEEP_MIN_MS) { return 0; }

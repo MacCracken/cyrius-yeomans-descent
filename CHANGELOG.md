@@ -4,6 +4,65 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.3] — 2026-07-29
+
+971 assertions (was 946). Four of 1.7.2's six items; **audit-log rotation did not
+land** — see below, and it is not a silent omission.
+
+### Fixed
+
+- **`give` did not count what was inside the gift.** It tested `>= MAX_INV` and
+  then transferred the item *and its contents*, so handing a full bag to someone
+  under the cap pushed them well past it — measured **141 against a cap of 100**,
+  from one 51-item bag. Same shape as the carry-cap hole 1.7.2 closed on the
+  acquisition path: the check counted one collection, the transfer moved another.
+  Now asks "would this transfer exceed the cap", because the answer depends on
+  what is being handed over.
+
+- **A failing save retried on every tick.** `player_save` clears `SS_SAVE_DIRTY`
+  only after a successful rename, and stamps "last saved" only on success — so a
+  session whose save failed stayed dirty *and* stayed due, forever. Four signed
+  saves every 2.5 s from sessions merely sitting there, and under ENOSPC the audit
+  log grows fastest exactly when it can least afford to. A new attempt stamp backs
+  the retry off to `SAVE_RETRY_MIN_MS` (30 s) — deliberately shorter than the
+  autosave interval, so a transient failure recovers in seconds rather than
+  minutes.
+
+- **The resumed audit chain-link held a borrow into a reused buffer.** `str_new`
+  stores the pointer rather than copying, so `_audit_resume_head` left the chain's
+  prev-link pointing into `g_persist_slurp` — the same buffer `player_auth_load`
+  reads player records into. Now copied into owned storage.
+
+  **Stated precisely, because I could not prove the consequence:** this removes a
+  real hazard (a stored reference to a buffer other code overwrites) but I did
+  **not** demonstrate it producing a broken link — a probe reports zero breaks
+  both with and without the copy. The working log does contain exactly one broken
+  link, at record 554 of 39,245, and **its cause is unknown**; attributing it to
+  this would be a guess. A latent hazard removed cheaply, not a diagnosed outage.
+
+### Added
+
+- **Two guards that had never had a test**, both found by coverage checks rather
+  than by failure — reverting either changed nothing:
+  - the `passwd` candidate block's **secret-key wipe** before it returns to the
+    freelist. `fl_free` reuses blocks without zeroing, so an unwiped candidate
+    hands the next allocation someone's private key.
+  - the **double-login refusal at its call site**. The predicate had a test; the
+    refusal did not, so replacing it with a constant false broke nothing. Two
+    sessions on one character means two writers to one record — the inventory
+    duplication 1.6.6 fixed.
+
+### Not done, and why
+
+- **Audit-log rotation (the ADR 0009 mechanism) did not land.** The decision and
+  the seam shipped in 1.7.1; the rename/reopen, segment prune, markers and the
+  rename-then-die crash window did not. Deferred rather than rushed: the crash
+  window is the load-bearing part (a crash between rename and first append
+  restarts the chain at genesis — the H11 bug reintroduced as a feature), and it
+  belongs in a release where it is the main subject. **1.7.4.**
+- **The uncapped room floor** and **restoring 1.6.12's audit granularity** also
+  remain. The floor is the larger of the two and is object-lifetime work.
+
 ## [1.7.2] — 2026-07-29
 
 **The carry cap becomes a bound, and the operator gets a say.** 946 assertions (was 921). The class sweep this release was named for found the defect **inside

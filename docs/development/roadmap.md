@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-29 (v1.7.2 — 1.7.0/1.7.1/1.7.2 shipped; 1.7.3 next)
+> **Last Updated**: 2026-07-29 (v1.7.3 — 1.7.0–1.7.3 shipped; 1.7.4 next, and it is where rotation lands)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -24,8 +24,8 @@ ownership and fix size.
 | — | ~~1.7.0~~ | ~~2~~ | ✅ **Shipped.** The tick budget becomes a budget — the auth reorder, the charge window, the drain re-arm, the teardown charge, and the bench that should have caught it | — |
 | — | ~~1.7.1~~ | ~~3~~ | ✅ **Shipped.** Bound what the reconnect rate sets — the audit rollup window, `passwd`'s rate limit, ADR 0009, and a live audit-log integrity bug found on the way | — |
 | — | ~~1.7.2~~ | ~~5~~ | ✅ **Shipped.** The carry cap becomes a bound (both halves) · operator config + account cap · sharded player records · ADR 0007 amended. Found the defect class recurring inside 1.7.1's fix for it | — |
-| 1 | [**1.7.3**](#173--cover-the-guards-that-predate-the-mutation-habit) | 6 | Audit-log rotation (ADR 0009 mechanism) · the room floor has no cap · `cmd_give`'s overshoot · the per-tick save-failure retry · restore audit granularity · cover the pre-mutation guards | **yes** |
-| 2 | [**1.7.4**](#174--object-lifetime) | 1 | Object lifetime — nothing reclaims a dropped item, and `look` pays for it | no |
+| — | ~~1.7.3~~ | ~~4 of 6~~ | ✅ **Shipped.** `cmd_give`'s overshoot · the per-tick save-failure retry · the two uncovered guards · the borrowed audit chain-link | — |
+| 1 | [**1.7.4**](#174--object-lifetime) | 3 | **Audit-log rotation (ADR 0009 mechanism, incl. the crash window)** · the room floor has no cap · restore 1.6.12's audit granularity | **yes** |
 | 3 | [**gate re-run**](#the-gate--what-closes-the-1x-line) | — | Closes the 1.x line if it returns no critical or high findings | **yes** |
 | 4 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 5 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
@@ -378,7 +378,19 @@ because two of them are worse than the item this release is named after.
   `MAX_INV` items and logs the truncation; the class sweep's findings each get an
   assertion.
 
-### 1.7.3 — cover the guards that predate the mutation habit
+### ✅ 1.7.3 — the give overshoot, the retry storm, and two uncovered guards (SHIPPED)
+
+Items F and G are **closed**, plus `cmd_give`'s overshoot (measured 141 against a
+cap of 100) and the per-tick save-failure retry. A borrowed audit chain-link was
+also fixed — with the honest caveat that the hazard is real and its consequence
+was **not** demonstrated; the one broken link in the working log has an unknown
+cause and is not attributed to it.
+
+**Rotation deliberately did NOT land.** The crash window is the load-bearing part
+and belongs in a release where it is the subject, not bolted onto four unrelated
+fixes. It is item M, now first in 1.7.4.
+
+### 1.7.3 — cover the guards that predate the mutation habit (detail, retained)
 
 Mutation testing became routine at 1.6.7. The guards landed before it were never
 put through it. These three items are that gap.
