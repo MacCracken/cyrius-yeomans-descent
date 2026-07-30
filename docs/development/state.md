@@ -3,13 +3,42 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.7.1 — 5 of the gate sweep's 8 items closed; 1.7.2 is next)
+> **Last refresh**: 2026-07-29 (v1.7.2 — 6 of the gate sweep's 8 items closed; 1.7.3 is next)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.2** — 2026-07-29. **938 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build.
+
+**The carry cap becomes a bound, and the operator gets a say.** A carried
+container flattened past the cap and poisoned the save — player-armable data loss
+with an ordinary bag: `inv_count` counted the top level while `cmd_put` moved
+items out of it, and `_build_record` flattened them back in and then refused the
+whole record rather than truncating. Both halves fixed. Plus an optional
+`data/server.cyml` (`max_accounts`, default 0 = unlimited), records sharded into
+`data/players/<c>/`, and ADR 0007 amended to admit the config surface.
+
+**The sweep's real finding: the defect class recurred inside its own fix.**
+1.7.1's audit rollup re-stamped its window on every count-arm fire, so the clock
+arm stopped firing under sustained load — a counter that resets itself, which is
+G2's `SS_FAILS = 0` shape and the reason 1.7.1 existed. And the carry-cap fix
+introduced a regression in the same release (the cap over-applied to your own
+bag). Both caught by mutation testing, not by review.
+
+**Lessons carried, added this release:**
+
+- *Fixing the class is not the same as being immune to it.* A release whose whole
+  subject was "a cap that is not a bound" shipped a cap that reset its own counter.
+- *A test that passes because of leftover state is not a test.* Removing the shard
+  `mkdir` survived mutation until a test deleted the directory first — the
+  directories existed from earlier runs, so a first-boot outage looked covered.
+- *Assert the thing that distinguishes.* Two assertions this release could not tell
+  success from failure: a total unchanged whether an item moved or the move was
+  refused, and a config fixture whose value never reached the clamp under test.
 
 **1.7.1** — 2026-07-29. **873 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build (`x86_64` + `--agnos`).
@@ -28,7 +57,7 @@ Three corrections to numbers this project had published:
 - **48 bytes of it are ours, not 224.** The 224 was `chain_append`'s total, 176 of it
   inside libro's `entry_new`. Descent's share is 2.9%.
 - **Rotation needs no on-disk format change**, so it is 1.7.x work rather than 2.0.
-  [ADR 0009](../adr/0009-audit-log-rotation.md) is Accepted; the mechanism is 1.7.2.
+  [ADR 0009](../adr/0009-audit-log-rotation.md) is Accepted; the mechanism is 1.7.3.
 
 And a live data-integrity bug, found while measuring the above: **436 of the audit
 log's 37,902 records reported themselves as tampered with**, because libro
@@ -96,11 +125,15 @@ Both docs also picked up the two user-visible changes of the whole 1.6.x line,
 neither of which had reached them: the **100-item carry cap** and the **30 s
 pre-auth disconnect**.
 
-**Five of the gate sweep's eight items are now closed** (two highs in 1.7.0, three
-in 1.7.1). Three remain, plus eight more that 1.7.0's and 1.7.1's own
-investigations turned up — all in [`roadmap.md`](roadmap.md).
+**Six of the gate sweep's eight items are now closed** (two highs in 1.7.0, three
+in 1.7.1, one in 1.7.2). Two remain, plus ten more that these three releases'
+own investigations turned up — all in [`roadmap.md`](roadmap.md).
 
-**Next is 1.7.2**, and two of its items are worse than the one it is named after:
+**Next is 1.7.3**: the ADR 0009 rotation mechanism, the uncapped room floor
+(measured 40 cycles → floor 0→80 from ordinary play), `cmd_give`'s ~199 overshoot,
+the per-tick save-failure retry, and the pre-mutation coverage gaps.
+
+*Superseded — kept for the record.* Before 1.7.2 this paragraph read:
 a **carried container flattens past the carry cap and poisons the save**, which is
 player-armable data loss reachable with an ordinary bag and no malice; and
 **nothing caps the number of accounts**, which is why "authenticated" is not a rate

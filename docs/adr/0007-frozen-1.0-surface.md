@@ -84,6 +84,33 @@ created last_login inv sig
 
 `YD_TICK_MS`, `YD_IDLE_MS`, `YD_RESET_SECS`, `YD_ADMIN`. Names + semantics frozen.
 
+> **Amended in 1.7.2 — one added knob, and a config file.**
+>
+> This section froze the knob surface, and the Consequences below read that as
+> "new env knobs are blocked until after 1.0". 1.7.2 adds **`YD_MAX_ACCOUNTS`**
+> and an optional **`data/server.cyml`**, and the reasoning for allowing it is
+> narrow enough to state precisely so it is not read as the freeze being over:
+>
+> - **The freeze's stated purpose is compatibility** — "clients, operators, zone
+>   authors, and existing save files keep working across 1.x". An *additive* knob
+>   that defaults to today's behaviour breaks none of those. Nothing that runs
+>   now stops running, and no operator has to change anything.
+> - **The four frozen names are untouched.** Their names and semantics are
+>   exactly as above; this adds a fifth, it does not redefine any of the four.
+> - **The cap is off by default** (`0` = unlimited). A deployment that ignores
+>   this release entirely behaves as 1.7.1 did.
+> - **The config file is the preferred surface, and it is why this stays small.**
+>   Operator settings from here on go in `data/server.cyml`, parsed with the same
+>   CYML reader as zones and classes, so the *next* setting costs a key rather
+>   than another amendment to this record. `YD_MAX_ACCOUNTS` exists because
+>   container deployments configure through the environment, and it wins over the
+>   file for that reason.
+>
+> **Still frozen, and not softened by this:** verbs, the `@`-namespace, save
+> schema v1, wire behaviour, and the zone format. A new *verb* or a new *save
+> field* is still a 2.0 change. If a future release wants a sixth knob, it needs
+> its own argument — "1.7.2 did it" is not one.
+
 ## Consequences
 
 - **Positive** — 1.0.0 can be a pure stabilisation release; clients, operators,
@@ -92,7 +119,9 @@ created last_login inv sig
   break. The admin gate removes the last unguarded surface from the default
   build.
 - **Negative** — new verbs / save fields / zone fields / env knobs are now
-  blocked until after 1.0 (or behind a major bump), which slows feature work
+  blocked until after 1.0 (or behind a major bump) — see the 1.7.2 amendment
+  above, which admits one additive knob and a config file on a stated argument —
+  which slows feature work
   during the 0.9.1 → 1.0.0 window. The `@`-gate is a behaviour change: `@stats`,
   always-on since M1-H, now needs `YD_ADMIN=1`.
 - **Neutral** — this ADR is a living contract for the 1.x line; a 2.0 may

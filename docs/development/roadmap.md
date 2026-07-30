@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-29 (v1.6.15, gate sweep complete)
+> **Last Updated**: 2026-07-29 (v1.7.2 — 1.7.0/1.7.1/1.7.2 shipped; 1.7.3 next)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -23,12 +23,12 @@ ownership and fix size.
 |---|---|---|---|---|
 | — | ~~1.7.0~~ | ~~2~~ | ✅ **Shipped.** The tick budget becomes a budget — the auth reorder, the charge window, the drain re-arm, the teardown charge, and the bench that should have caught it | — |
 | — | ~~1.7.1~~ | ~~3~~ | ✅ **Shipped.** Bound what the reconnect rate sets — the audit rollup window, `passwd`'s rate limit, ADR 0009, and a live audit-log integrity bug found on the way | — |
-| 1 | [**1.7.2**](#172--the-carry-cap-becomes-a-bound) | 5 | The carry cap becomes a bound — **incl. the container-flatten save poison (player-armable data loss)** · audit-log rotation per ADR 0009 · the per-tick save-failure retry · an account-creation rate limit | **yes** |
-| 2 | [**1.7.3**](#173--cover-the-guards-that-predate-the-mutation-habit) | 3 | Cover the guards that predate the mutation habit | no |
-| 3 | [**1.7.4**](#174--object-lifetime) | 1 | Object lifetime — nothing reclaims a dropped item, and `look` pays for it | no |
-| 4 | [**gate re-run**](#the-gate--what-closes-the-1x-line) | — | Closes the 1.x line if it returns no critical or high findings | **yes** |
-| 5 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
-| 6 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
+| — | ~~1.7.2~~ | ~~5~~ | ✅ **Shipped.** The carry cap becomes a bound (both halves) · operator config + account cap · sharded player records · ADR 0007 amended. Found the defect class recurring inside 1.7.1's fix for it | — |
+| 1 | [**1.7.3**](#173--cover-the-guards-that-predate-the-mutation-habit) | 6 | Audit-log rotation (ADR 0009 mechanism) · the room floor has no cap · `cmd_give`'s overshoot · the per-tick save-failure retry · restore audit granularity · cover the pre-mutation guards | **yes** |
+| 2 | [**1.7.4**](#174--object-lifetime) | 1 | Object lifetime — nothing reclaims a dropped item, and `look` pays for it | no |
+| 3 | [**gate re-run**](#the-gate--what-closes-the-1x-line) | — | Closes the 1.x line if it returns no critical or high findings | **yes** |
+| 4 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
+| 5 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
 **Every issue the 1.6.0 sweep and its two re-runs produced is closed** — 1.6.0
 through 1.6.15. The **third (gate) sweep found 8 items, two of them high**;
@@ -49,7 +49,7 @@ the release.
 
 ---
 
-## Open issues — 8 raised by the sweep; 5 closed (1.7.0, 1.7.1); 3 open, +8 raised by 1.7.0's and 1.7.1's own work
+## Open issues — 8 raised by the gate sweep; 6 closed (1.7.0–1.7.2); 2 open, +10 raised by these three releases' own investigations
 
 From the third (gate) sweep, 2026-07-29, run against 1.6.15. Worst first. Every
 item says what breaks, whether it can happen to a running server today, whose
@@ -251,7 +251,28 @@ to prevent.
   same class: `zone_reset_objs`' `_obj_id_world_count` (24 µs → 1467 µs) and
   `get all.X` scanning past `MAX_INV`.
 
-### 1.7.2 — the carry cap becomes a bound
+### ✅ 1.7.2 — the carry cap becomes a bound (SHIPPED)
+
+Items L, L2, O and E are **closed**, plus three defects this release's own sweep
+found — two of them in code shipped days earlier.
+
+**The class sweep's headline: the sixth instance was inside the fix for the
+fifth.** 1.7.1's audit rollup re-stamped its window on every count-arm fire, so
+the clock arm stopped firing under sustained load — a counter that resets itself,
+which is exactly G2's `SS_FAILS = 0` shape and the reason 1.7.1 existed. Measured
+120 entries/hour to the crossover, 441/hour at 1000 ev/s, against a comment
+claiming no rate term. Fixed, and the arithmetic corrected to what is true.
+
+**And the carry-cap fix introduced a regression the sweep caught**: counting bag
+contents made `get <x> from <your own bag>` fail at the cap, because that move
+changes no total. The cap now applies to acquisition only.
+
+**Still open from the sweep, and moved to 1.7.3:** the room floor has no cap at
+all (measured 40 cycles → floor 0→80, monotonic, from ordinary play — item J), and
+`cmd_give` overshoots `MAX_INV` to ~199 because its check runs before a transfer
+that moves a container *and its contents*.
+
+### 1.7.2 — the carry cap becomes a bound (detail, retained)
 
 Four items were added here by 1.7.1's own investigation. They are listed first
 because two of them are worse than the item this release is named after.

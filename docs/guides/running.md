@@ -52,7 +52,29 @@ hardware needed), use the container harness in the **agnosticos** repo at
 ./run.sh              # or the automated assert-and-exit smoke
 ```
 
+## Configuration (file)
+
+Since **1.7.2**, operator settings live in an optional `data/server.cyml`. The
+file may not exist — absent, unreadable, or missing a key all mean "defaults",
+so a server that ignores this section behaves exactly as 1.7.1 did.
+
+```
+game = "yeomans-descent"
+max_accounts = 2500
+```
+
+| Key | Default | Effect |
+|---|---|---|
+| `max_accounts` | `0` | Maximum number of player accounts. **`0` means unlimited**, which is the default — how many characters a world should hold is your decision, not the server's. Once reached, character *creation* is refused with a message; existing players are unaffected. A negative or unparseable value is treated as unlimited, so a typo cannot lock you out of your own world. |
+
+The cap counts records on disk once at startup and tracks creations in memory, so
+it costs nothing per login. It bounds **accounts**, not connection attempts — it
+does not replace the login and `passwd` rate limits, and it is not a DoS control.
+What it bounds is permanent disk: every account leaves a file forever.
+
 ## Configuration (environment)
+
+Environment variables override the config file.
 
 | Env var | Default | Effect |
 |---|---|---|
@@ -60,6 +82,7 @@ hardware needed), use the container harness in the **agnosticos** repo at
 | `YD_IDLE_MS` | `300000` | Idle-disconnect threshold in ms, for **logged-in** players. A connection that has not authenticated is dropped after 30 s regardless of this (1.6.13) — that is the slowloris reap, and it is not tunable. |
 | `YD_RESET_SECS` | per-zone `reset_secs` | Override the zone-reset interval in seconds. |
 | `YD_ADMIN` | unset → off | `YD_ADMIN=1` enables the `@`-admin verbs (`@stats` / `@who` / `@reset`). |
+| `YD_MAX_ACCOUNTS` | unset → use `data/server.cyml` | Overrides `max_accounts` above, for container deployments that configure through the environment. `0` = unlimited. |
 
 ```sh
 YD_TICK_MS=200 YD_RESET_SECS=30 YD_ADMIN=1 ./build/cyrius-yeomans-descent serve 4000
@@ -82,9 +105,16 @@ real operator auth (the Joshua interface) is a post-1.0 milestone.
 
 State lives under `data/` (created on first run, git-ignored):
 
-- `data/players/<name>.cyml` — one signed record per player (attrs, class, room
-  by id, inventory, identity salt + pubkey, signature). Atomic `.tmp` + rename
-  writes ([ADR 0006](../adr/0006-persistence-shape.md)).
+- `data/players/<c>/<name>.cyml` — one signed record per player (attrs, class,
+  room by id, inventory, identity salt + pubkey, signature). Atomic `.tmp` +
+  rename writes ([ADR 0006](../adr/0006-persistence-shape.md)).
+
+  **Since 1.7.2 records are sharded** into a one-character subdirectory (`a`–`z`,
+  by the first letter of the name) so a world with thousands of accounts is not
+  one directory holding thousands of files. **No migration step is needed**: the
+  old flat `data/players/<name>.cyml` layout is still read, and each record moves
+  itself the next time that player saves. You can leave a pre-1.7.2 `data/` alone
+  and it will convert as people log in.
 - `data/audit.libro` — append-only SHA-256 hash-chain audit log of security
   events (logins, saves, character creation, auth failures, tamper rejections).
 
@@ -93,7 +123,7 @@ record intact. Each record is Ed25519-signed and version-stamped (`schema = 1`);
 a record tampered with, or stamped for a newer server, is rejected rather than
 loaded with bad state.
 
-> **Backups / migration.** Copy `data/players/` to back up characters. Records
+> **Backups / migration.** Copy `data/players/` to back up characters — recursively, since 1.7.2 puts records in per-letter subdirectories. Records
 > are forward-gated by `schema`: a future server version that changes the field
 > set will bump the schema and migrate; this server refuses records stamped
 > newer than it understands. Records from 0.7.0–0.9.x (no `schema` field) load

@@ -3130,8 +3130,7 @@ fn test_create_guards(): i64 {
     # suite finds the record already on disk, E4's player_exists re-test refuses
     # the very first creation, and five assertions fail. Passed once, failed
     # forever after — a test that is not idempotent is a landmine.
-    _path_for("Createling", 10, g_persist_path);
-    syscall(87, g_persist_path);   # unlink(2); absent is fine
+    _player_unlink("Createling", 10);   # unlink(2); absent is fine
 
     # A session parked mid-creation: identity forged by the newpass step, waiting
     # on the confirm line. login_on_confirm re-derives from what it is given and
@@ -3623,8 +3622,7 @@ fn test_tail_guards(): i64 {
             # through OI_CONTENTS. Put your scrip in a sack, log out, gone.
             ilist_remove(gs + SS_INV, gem);
             ilist_push(bag + OI_CONTENTS, gem);       # back inside the bag
-            _path_for("Bagman", 6, g_persist_path);
-            syscall(87, g_persist_path);              # unlink any prior run
+            _player_unlink("Bagman", 6);              # unlink any prior run
             var bsalt = alloc(SALT_LEN);
             var bq = 0;
             while (bq < SALT_LEN) { store8(bsalt + bq, 31 + bq); bq = bq + 1; }
@@ -3824,8 +3822,7 @@ fn test_passwd_meter(): i64 {
     # symmetric paths is precisely the mistake this release exists to correct —
     # 1.6.2 capped login and left creation, 1.6.10 capped creation and left
     # `passwd`. Both audit paths, or neither.
-    _path_for("Auditee2", 8, g_persist_path);
-    syscall(87, g_persist_path);
+    _player_unlink("Auditee2", 8);
     var ls = _mk_sess("Auditee2", 8);
     var lsalt = alloc(SALT_LEN);
     cq = 0;
@@ -3988,6 +3985,22 @@ fn test_carry_cap(): i64 {
     return 0;
 }
 
+# Remove a player's record from BOTH layouts (1.7.2).
+#
+# Since 1.7.2 records are written to `data/players/<c>/<name>.cyml` and the flat
+# `data/players/<name>.cyml` is still READ as a compatibility fallback. A test
+# that clears only the sharded path leaves the legacy file behind, player_exists
+# still finds it, and the name stays taken — so the test fails for a reason with
+# nothing to do with what it is testing. Clearing both is what "this name does not
+# exist" now means.
+fn _player_unlink(name, nl): i64 {
+    _path_for(name, nl, g_persist_path);
+    syscall(87, g_persist_path);
+    _path_for_flat(name, nl, g_persist_path);
+    syscall(87, g_persist_path);
+    return 0;
+}
+
 # Items hanging directly off SS_INV, ignoring container contents. Distinct from
 # inv_count (which counts the total) precisely so a test can tell a MOVE from a
 # refusal — both leave the total alone.
@@ -4053,8 +4066,7 @@ fn test_account_cap(): i64 {
     # --- THE ENFORCEMENT POINT. The predicate being right is not the same as it
     # being consulted; nothing above drives creation, and the first version of this
     # group let "the cap is never enforced" survive mutation because of it.
-    _path_for("Capped", 6, g_persist_path);
-    syscall(87, g_persist_path);            # unlink — the name must not exist
+    _player_unlink("Capped", 6);            # unlink — the name must not exist
     var cap_s = _mk_sess("Capped", 6);
     store64(cap_s + SS_LINE_BUF, fl_alloc(LINE_CAP));
     store64(cap_s + SS_FD, 0 - 1);
@@ -4094,10 +4106,127 @@ fn test_account_cap(): i64 {
 
     g_max_accounts = saved_max;
     g_account_count = saved_cnt;
-    _path_for("Capped", 6, g_persist_path);
-    syscall(87, g_persist_path);
+    _player_unlink("Capped", 6);
 
     g_max_accounts = 0;
+    return 0;
+}
+
+# === 1.7.2 — player records are sharded, and the old layout still works. ===
+#
+# Records move from `data/players/<name>.cyml` to `data/players/<c>/<name>.cyml`
+# so a world with thousands of accounts is not one directory with thousands of
+# files. The whole risk of the change is EXISTING deployments, so that is what
+# this group is about: a migration that locks out current players is not a
+# migration, it is an outage.
+fn test_player_sharding(): i64 {
+    test_group("player-sharding");
+
+    # --- The path itself.
+    _path_for("Shardy", 6, g_persist_path);
+    assert(_find_cstr(g_persist_path, 40, "/s/shardy.cyml") >= 0,
+           "a record's path carries a one-character shard directory");
+    _path_for_flat("Shardy", 6, g_persist_path);
+    assert(_find_cstr(g_persist_path, 40, "/shardy.cyml") >= 0,
+           "and the legacy builder still produces the flat path");
+    assert_eq(_find_cstr(g_persist_path, 40, "/s/shardy.cyml"), 0 - 1,
+              "...which is NOT the sharded one");
+
+    # The length bound at the primitive. PATH_CAP sized the buffers and was
+    # compared against nothing; an over-long name is now clamped rather than
+    # written past the end. Not reachable through login_name_ok — this is the
+    # 0.9.0 hex_decode_into lesson applied to a primitive that trusted its caller.
+    var longnm = alloc(4096);
+    var q = 0;
+    while (q < 4000) { store8(longnm + q, 97); q = q + 1; }
+    var wrote = _path_for(longnm, 4000, g_persist_path);
+    assert(wrote < PATH_CAP,
+           "an over-long name cannot write past the path buffer");
+    assert(wrote <= strlen(DP_PLAYERS_S) + 2 + NAME_MAX + 5,
+           "...because the name is clamped to NAME_MAX");
+
+    # --- THE MIGRATION. Write a record the OLD way, then prove it still loads.
+    _player_unlink("Legacyman", 9);
+    var old_s = _mk_sess("Legacyman", 9);
+    var lsalt = alloc(SALT_LEN);
+    var li = 0;
+    while (li < SALT_LEN) { store8(lsalt + li, 17 + li); li = li + 1; }
+    var lblk = sess_ident(old_s);
+    memcpy(lblk, lsalt, SALT_LEN);
+    ident_derive(lsalt, "legacyphrase", 12, lblk + IDENT_SK, lblk + IDENT_PK);
+    store64(lblk + IDENT_CREATED, 1000000);
+    store64(old_s + SS_ROOM, 0 - 1);
+    store64(old_s + SS_HP, 21); store64(old_s + SS_MAXHP, 21);
+    store64(old_s + SS_AUTHED, 1);
+    assert_eq(player_save(old_s), 1, "a record saves");
+
+    # Move it to where a pre-1.7.2 server would have put it.
+    _path_for("Legacyman", 9, g_persist_path);
+    var rec = alloc(SLURP_CAP);
+    var rn = file_read_all(g_persist_path, rec, SLURP_CAP - 1);
+    assert(rn > 0, "the sharded record is readable");
+    syscall(87, g_persist_path);                     # remove the sharded copy
+    _path_for_flat("Legacyman", 9, g_persist_path);
+    assert(file_write_all(g_persist_path, rec, rn) >= 0, "the legacy copy is written");
+
+    # This is the assertion that matters: a player who has not logged in since
+    # before 1.7.2 must still be found and must still authenticate.
+    assert_eq(player_exists("Legacyman", 9), 1,
+              "a LEGACY flat record is still found — the name is still taken");
+    var back = _mk_sess("Legacyman", 9);
+    assert_eq(player_auth_load(back, "legacyphrase", 12), 1,
+              "...and still authenticates, so nobody is locked out by the layout change");
+    assert_eq(load64(back + SS_HP), 21, "...with their state intact");
+
+    # And saving migrates them, lazily, with no operator action.
+    assert_eq(player_save(back), 1, "their next save succeeds");
+    _path_for("Legacyman", 9, g_persist_path);
+    assert(file_read_all(g_persist_path, rec, SLURP_CAP - 1) > 0,
+           "the record is now at the SHARDED path");
+    _path_for_flat("Legacyman", 9, g_persist_path);
+    # file_read_all returns a NEGATIVE error for a missing file, not 0 — assert
+    # "not readable" rather than pinning the exact errno.
+    assert(file_read_all(g_persist_path, rec, SLURP_CAP - 1) <= 0,
+           "...and the legacy copy is retired, so it cannot go stale");
+
+    _player_unlink("Legacyman", 9);
+
+    # --- A FRESH deployment, where the shard directory does not exist yet.
+    #
+    # This is the case the rest of this group cannot see: every other assertion
+    # here passes whether or not player_save creates the directory, because
+    # earlier runs left `data/players/a` … `d` lying around. Deleting the mkdir
+    # therefore SURVIVED mutation while being an outage on a first boot — every
+    # save failing because its directory is missing. So the directory is removed
+    # first, deliberately, and the save must still land.
+    #
+    # 'z' is chosen because no other fixture in this suite starts with it, so the
+    # rmdir cannot race another group's records.
+    _player_unlink("Zephyr", 6);
+    var zdir = alloc(64);
+    memcpy(zdir, DP_PLAYERS_S, strlen(DP_PLAYERS_S));
+    store8(zdir + strlen(DP_PLAYERS_S), 122);          # 'z'
+    store8(zdir + strlen(DP_PLAYERS_S) + 1, 0);
+    syscall(84, zdir);                                  # rmdir(2); ENOENT is fine
+
+    var zs = _mk_sess("Zephyr", 6);
+    var zsalt = alloc(SALT_LEN);
+    var zi = 0;
+    while (zi < SALT_LEN) { store8(zsalt + zi, 71 + zi); zi = zi + 1; }
+    var zblk = sess_ident(zs);
+    memcpy(zblk, zsalt, SALT_LEN);
+    ident_derive(zsalt, "zephyrphrase", 12, zblk + IDENT_SK, zblk + IDENT_PK);
+    store64(zblk + IDENT_CREATED, 1000000);
+    store64(zs + SS_ROOM, 0 - 1);
+    store64(zs + SS_HP, 13); store64(zs + SS_MAXHP, 13);
+    store64(zs + SS_AUTHED, 1);
+    assert_eq(player_save(zs), 1,
+              "a save into a shard directory that does not exist yet CREATES it and succeeds");
+    assert_eq(player_exists("Zephyr", 6), 1, "...and the record is findable afterwards");
+    var zback = _mk_sess("Zephyr", 6);
+    assert_eq(player_auth_load(zback, "zephyrphrase", 12), 1, "...and loads back");
+    _player_unlink("Zephyr", 6);
+
     return 0;
 }
 
@@ -5291,6 +5420,7 @@ fn main() {
     test_audit_coalesce();
     test_carry_cap_container();
     test_account_cap();
+    test_player_sharding();
 
     return assert_summary();
 }

@@ -4,6 +4,102 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.2] — 2026-07-29
+
+**The carry cap becomes a bound, and the operator gets a say.** 938 assertions
+(was 921). The class sweep this release was named for found the defect **inside
+1.7.1's fix for it**, which is the most useful thing in these notes.
+
+### Fixed
+
+- **A carried container flattened past the carry cap and poisoned the save —
+  player-armable data loss, no malice required.** Two halves of one defect:
+  - `inv_count` walked only the top-level chain while `cmd_put` moved items into
+    a container *without counting them*, so the item left `SS_INV` and the count
+    **dropped**. Fill your hands to 100, put 99 in a sack, acquire 99 more, repeat
+    without bound. Nothing on the acquisition path could see it, because the
+    collection it counted was not the collection the cap is about.
+  - `_build_record` **flattens** one level back into the same `inv` field (F11),
+    so the bytes a save must write are the *total*. When it ran out of budget the
+    inner contents loop set `SAVE_ERR` — which M11-D turns into "refuse the whole
+    record" — **ten lines below a comment saying, in those words, to truncate and
+    not poison the record.** G1's 1.6.13 fix was real for the outer walk and undone
+    for the inner one, so a player silently stopped persisting (room, HP, class,
+    everything) until they happened to drop something. Verified: with the fix
+    reverted, `player_save` returns `-1`.
+
+- **The sixth instance of the defect class was inside 1.7.1's fix for the fifth.**
+  The audit rollup's count arm **re-stamped `AKE_WOPEN`**, pushing the window's
+  start forward on every fire, so above 136 events/sec the 60 s clock arm never
+  came due again and the freshness guarantee vanished — while the comment beside
+  it asserted the ceiling *"carries NO rate term in it"*. Measured flat at 120
+  entries/hour to the crossover, then 441/hour at 1000 ev/s. The re-stamp is gone
+  and the arithmetic is corrected to `2040/hour + events/8192`. **The bound held;
+  the description was the defect.** Same shape as G2's `SS_FAILS = 0` reset — a
+  cap that resets its own counter — which is why 1.7.1 existed at all.
+
+- **The carry cap then over-applied.** Counting bag contents (above) made
+  `get <x> from <your own bag>` fail at the cap: the total is unchanged by that
+  move, but `inv_full` refused it, so a player at 100 could never retrieve their
+  own belongings. A regression introduced by the fix, caught by the sweep. The cap
+  now asks whether the *source* is already yours.
+
+- `AUDIT_VERBATIM_MAX` was **read by no code at all** — it appeared in exactly two
+  places, both prose, including the arithmetic that multiplies by it. Now compared.
+  Noted honestly in-source: at its current value of 1 this is behaviourally
+  identical to the old test, so the mutation back survives and no runtime test can
+  distinguish them.
+
+- `_path_for` **bounded at the primitive**. `PATH_CAP` sized the two destination
+  buffers and was compared against nothing. Not reachable — `login_name_ok` gates
+  the only write to `SS_NAME_LEN` and the only `player_exists` call on the login
+  path — but it is the 0.9.0 `hex_decode_into` shape (a primitive trusting its
+  caller), and this release makes the output longer, so the bound goes in first.
+
+### Added
+
+- **Operator configuration — `data/server.cyml`.** Optional; absent means
+  defaults. `max_accounts` bounds how many player accounts may exist, and
+  **defaults to `0` = unlimited**, because that is an operator's decision and not
+  this server's. A negative or unparseable value is treated as unlimited, so a
+  typo cannot lock an operator out of their own world. Overridable with
+  `YD_MAX_ACCOUNTS` for container deployments.
+
+  The count is taken once at boot and tracked in memory — `dir_list` allocates
+  from the bump arena, so counting per creation would have been a permanent
+  allocation per creation, which is the defect class 1.7.1 spent a release
+  bounding.
+
+- **Player records are sharded** into `data/players/<c>/<name>.cyml`, so a world
+  with thousands of accounts is not one directory holding thousands of files.
+  **No migration step:** the flat layout is still read and each record moves
+  itself on its next save. A pre-1.7.2 `data/` converts as people log in.
+
+### Changed
+
+- [**ADR 0007 amended**](docs/adr/0007-frozen-1.0-surface.md) to admit one
+  additive env knob and the config file, on a stated argument: the freeze's
+  purpose is compatibility, and a knob defaulting to today's behaviour preserves
+  it. The four frozen names are untouched; verbs, save schema, wire behaviour and
+  the zone format stay frozen. A sixth knob would need its own argument —
+  "1.7.2 did it" is explicitly not one.
+
+### Known-unbounded (tracked, not fixed here)
+
+- **The room floor has no cap at all** — no constant to grep for, which is why
+  five passes missed it. `corpse_of` mints loot with no max-exist check (unlike
+  `zone_reset_room_objs`), and `obj_free` is reachable from three sites, none of
+  which frees a non-corpse object on a floor. Ordinary play — kill, loot, drop,
+  quit — measured **40 cycles → floor 0→80, monotonic**. It makes `look` cost
+  801 µs at 10,000 objects while the 1.7.0 charge meter charges it **zero**, and
+  >99% of that work emits nothing because tx truncates at TX_CAP after ~46 items.
+  This is roadmap item J; only object lifetime fixes it.
+- `cmd_give` can overshoot `MAX_INV` to ~199: the `>= MAX_INV` test runs before a
+  transfer that moves the gift *and* its contents, and it never inspects
+  `oi_contents`.
+- Audit-log rotation (ADR 0009) remains 1.7.3 — the decision and seam shipped in
+  1.7.1; the mechanism, its prune, and the rename-then-die crash window did not.
+
 ## [1.7.1] — 2026-07-29
 
 **Bound what the reconnect rate sets.** Three items, one of them a live

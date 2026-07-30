@@ -838,18 +838,84 @@ fn _bytes_eq(a, b, n): i64 {
 
 # Build data/players/<lower(name)>.cyml (NUL-terminated) into `out`.
 # Returns the path length (excluding the NUL).
-fn _path_for(name, len, out): i64 {
+# The shard directory character for a name: its lowercased first byte, or '_'
+# for anything without one. Names are validated 2-16 alnum starting with a
+# letter (login_name_ok), so in practice this is 'a'..'z'; the fallback exists
+# so a caller that reaches here with an odd name still produces a legal path
+# rather than a stray '/' or a NUL.
+fn _shard_char(name, len): i64 {
+    if (len <= 0) { return 95; }                 # '_'
+    var c = ascii_lower(load8(name) & 0xFF);
+    if (is_alnum(c) == 0) { return 95; }
+    return c;
+}
+
+# Build the LEGACY flat path — `data/players/<name>.cyml`, the only layout before
+# 1.7.2. Still read, never written: see _path_for.
+fn _path_for_flat(name, len, out): i64 {
+    var n = len;
+    if (n > NAME_MAX) { n = NAME_MAX; }
+    if (n < 0) { n = 0; }
     var pre = DP_PLAYERS_S;
     var off = 0;
     var i = 0;
     while ((load8(pre + i) & 0xFF) != 0) { store8(out + off, load8(pre + i)); off = off + 1; i = i + 1; }
     i = 0;
-    while (i < len) { store8(out + off, ascii_lower(load8(name + i) & 0xFF)); off = off + 1; i = i + 1; }
+    while (i < n) { store8(out + off, ascii_lower(load8(name + i) & 0xFF)); off = off + 1; i = i + 1; }
     var suf = ".cyml";
     i = 0;
     while ((load8(suf + i) & 0xFF) != 0) { store8(out + off, load8(suf + i)); off = off + 1; i = i + 1; }
     store8(out + off, 0);
     return off;
+}
+
+# Build the SHARDED path — `data/players/<c>/<name>.cyml` (1.7.2).
+#
+# WHY. The flat directory held one file per account forever, and an operator who
+# sets `max_accounts = 2500` (or leaves it unlimited, which is the default) ends
+# up with thousands of entries in one directory: slow to list, slow to complete,
+# and on some filesystems slow to open. One level of 36 buckets keeps it to tens
+# of files per directory at the scales this server is now explicitly sized for.
+#
+# `n` IS BOUNDED HERE, at the primitive, and that is deliberate. PATH_CAP sized
+# the two destination buffers and was compared against nothing — `_path_for` wrote
+# prefix + len + suffix unconditionally, so a caller passing an unvalidated length
+# would have overrun a 320-byte buffer. Not reachable today: login_name_ok gates
+# the only write to SS_NAME_LEN and the only player_exists call on the login path,
+# both rejecting len > NAME_MAX. But this is the same shape as the 0.9.0
+# hex_decode_into finding — a primitive that trusts its caller — and this release
+# makes the output LONGER, so the bound goes in first rather than afterwards.
+fn _path_for(name, len, out): i64 {
+    var n = len;
+    if (n > NAME_MAX) { n = NAME_MAX; }
+    if (n < 0) { n = 0; }
+    var pre = DP_PLAYERS_S;
+    var off = 0;
+    var i = 0;
+    while ((load8(pre + i) & 0xFF) != 0) { store8(out + off, load8(pre + i)); off = off + 1; i = i + 1; }
+    store8(out + off, _shard_char(name, n)); off = off + 1;
+    store8(out + off, 47); off = off + 1;        # '/'
+    i = 0;
+    while (i < n) { store8(out + off, ascii_lower(load8(name + i) & 0xFF)); off = off + 1; i = i + 1; }
+    var suf = ".cyml";
+    i = 0;
+    while ((load8(suf + i) & 0xFF) != 0) { store8(out + off, load8(suf + i)); off = off + 1; i = i + 1; }
+    store8(out + off, 0);
+    return off;
+}
+
+# Ensure a name's shard directory exists. Cheap and unconditional: sys_mkdir on an
+# existing directory returns EEXIST, which is ignored exactly as persist_init
+# already does for data/ and data/players/.
+fn _shard_mkdir(name, len): i64 {
+    var pre = DP_PLAYERS_S;
+    var off = 0;
+    var i = 0;
+    while ((load8(pre + i) & 0xFF) != 0) { store8(g_persist_tmp + off, load8(pre + i)); off = off + 1; i = i + 1; }
+    store8(g_persist_tmp + off, _shard_char(name, len)); off = off + 1;
+    store8(g_persist_tmp + off, 0);
+    sys_mkdir(g_persist_tmp, 0x1ED);             # 0755 — EEXIST ignored
+    return 0;
 }
 
 # === identity ==============================================================
@@ -903,13 +969,23 @@ fn sess_ident(s): i64 {
 # whether a connecting name is a RETURNING player (passphrase prompt) or a NEW
 # one (character creation). `cyrius build --agnos` warned; the host build
 # could not see it. `_path_for` already returns the length we need.
+# 1.7.2 — a record may live at EITHER the sharded path (written since 1.7.2) or
+# the legacy flat one (everything before it). Both are checked, sharded first,
+# so an existing deployment keeps working with no operator action and no
+# migration step. A name is "taken" if a record exists in either place —
+# answering otherwise would let a second character claim a name whose record is
+# still on disk.
 fn player_exists(name, len): i64 {
     persist_init();
     var plen = _path_for(name, len, g_persist_path);
     #ifdef CYRIUS_TARGET_AGNOS
     if (sys_stat(g_persist_path, plen, g_persist_stat) == 0) { return 1; }
+    var flen = _path_for_flat(name, len, g_persist_path);
+    if (sys_stat(g_persist_path, flen, g_persist_stat) == 0) { return 1; }
     return 0;
     #else
+    if (sys_stat(g_persist_path, g_persist_stat) == 0) { return 1; }
+    _path_for_flat(name, len, g_persist_path);
     if (sys_stat(g_persist_path, g_persist_stat) == 0) { return 1; }
     return 0;
     #endif
@@ -1168,6 +1244,7 @@ fn player_save(s): i64 {
     persist_init();
     var total = _build_record(s);
     if (total < 0) { return 0 - 1; }
+    _shard_mkdir(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));   # 1.7.2
     var plen = _path_for(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), g_persist_path);
     # tmp = path + ".tmp"
     memcpy(g_persist_tmp, g_persist_path, plen);
@@ -1180,6 +1257,16 @@ fn player_save(s): i64 {
     # torn file. A stale <name>.cyml.tmp from a crashed write is simply
     # overwritten on the next save.
     if (syscall(SYS_RENAME_NR, g_persist_tmp, g_persist_path) != 0) { return 0 - 1; }
+    # 1.7.2 — the record is now durably at the sharded path, so retire any legacy
+    # flat copy. Lazy per-player migration: nothing to run, nothing to schedule,
+    # and a deployment converts itself as players save.
+    #
+    # STRICTLY AFTER the rename returned 0, never before. Unlinking first would
+    # mean a failed write leaves no record at all — trading a layout change for
+    # data loss. The flat file is only ever read as a fallback, so a crash between
+    # the two leaves a harmless duplicate that the next save clears.
+    _path_for_flat(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), g_persist_tmp);
+    syscall(87, g_persist_tmp);                  # unlink; ENOENT is the normal case
     store64(s + SS_LAST_SAVE_MS, clock_now_ms());
     store64(s + SS_SAVE_DIRTY, 0);
     audit_keyed(AK_SAVE, SEV_INFO, "save", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
@@ -1247,8 +1334,17 @@ fn player_auth_load(s, pass, passlen): i64 {
     if (passlen > PASS_MAX) { return 0; }
     var nm = load64(s + SS_NAME_BUF);
     var nl = load64(s + SS_NAME_LEN);
+    # 1.7.2 — sharded path first, then the legacy flat one. Without this fallback
+    # every character created before 1.7.2 becomes unloadable the moment the
+    # layout changes: player_exists would still find the flat record and route
+    # them to the passphrase prompt, and this read would come back empty. A
+    # migration that locks out existing players is not a migration.
     _path_for(nm, nl, g_persist_path);
     var n = file_read_all(g_persist_path, g_persist_slurp, SLURP_CAP - 1);
+    if (n <= 0) {
+        _path_for_flat(nm, nl, g_persist_path);
+        n = file_read_all(g_persist_path, g_persist_slurp, SLURP_CAP - 1);
+    }
     if (n <= 0) { return 0 - 1; }
     store8(g_persist_slurp + n, 0);
 
