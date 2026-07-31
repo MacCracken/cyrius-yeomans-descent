@@ -3,13 +3,47 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.16 — **every high from gate re-run #3 is closed**; 2 medium + 7 low remain. Next is 1.7.17)
+> **Last refresh**: 2026-07-31 (v1.7.17 — **every finding from gate re-run #3 is closed (AJ-AY)**. Next is gate re-run #4)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.17** — 2026-07-31. **1387 assertions**; `cyrius audit` exits 0; 6/6 benches;
+**2/2 fuzz targets**; both targets build; **9/9 mutations killed**.
+
+**Mechanics and instruments** — the tail of gate re-run #3, and with it **every
+finding from that run (AJ-AY) is closed**.
+
+**A mob could not kill an unengaged player.** Combat is two-sided and the sides
+are stored separately; `classes_upkeep` only looked at the player's half, so
+anyone who never typed `kill` regenerated every tick while being hit — 70 swings,
+24 hits, HP never below 36/40. Also: `parse_uint` wrapped so a 20-digit ordinal
+resolved to a real object; death did not mark the record dirty; and the
+hidden-roll RNG was seeded from **uptime**, so a server started at a repeatable
+point in an init sequence replayed every combat roll identically.
+
+**The instrument findings are the ones to remember.** The M2-F fuzz gate fed a
+NEGATIVE length on 49,585 of 100,000 iterations and had **never executed** the
+`pa_emit_byte` cap branch it exists to defend, while reporting PASS for eleven
+releases. And two of the six benches in the audit gate **could not fail**.
+
+**Lessons carried, added this release:**
+
+- *Fixing the generator is not the same as reaching the guard.* Correcting the
+  fuzzer's sign raised the max input to 5999 bytes and `PA_NORM_LEN` still peaked
+  at 747 of 4096, because random bytes trip the TOKEN cap first. Coverage had to
+  be engineered deliberately — and is now **asserted by the harness**, so it fails
+  if the inputs stop reaching the guards rather than going quietly green.
+- *A guard's observable is not always its return code.* Removing the `sig`
+  hex-length bound still returns -2, because the signature fails to verify anyway
+  — which is exactly why it had no test. What it prevents is a 2500-byte write
+  through a 256-byte buffer, so the assertion is on a memory sentinel.
+- *Some findings are content rules, not code bugs.* A noun spelled like a
+  preposition cannot be a direct object, and every fix considered broke inputs
+  that do occur. ADR 0005 states the rule; the suite pins the behaviour.
 
 **1.7.16** — 2026-07-31. **1362 assertions**; `cyrius audit` exits 0; 6/6 benches;
 fuzz clean; both targets build; **10/10 mutations killed**.
@@ -918,7 +952,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (1362 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (1387 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -961,7 +995,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **1362** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **1387** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -1038,9 +1072,17 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
   truncation, partial-drain compaction, the metered autosave, and hex output
   byte-identical to `lib/sigil_hex.cyr`
 
-Fuzz: `cyrius fuzz` → `fuzz/parser_fuzz.fcyr`, 100k random inputs +
-directed adversarial cases, all invariants hold (token/buffer bounds,
-index ranges, no `resolve_all` overrun), no crash / hang / leak.
+Fuzz: `cyrius fuzz` → **two targets**, both 100k iterations, invariants holding
+and **coverage asserted by the harness itself** (1.7.17 — the parser gate had fed
+a negative length on half its iterations and never reached the guard it defends):
+
+- `fuzz/parser_fuzz.fcyr` — the M2 parser. Token/buffer bounds, index ranges, no
+  `resolve_all` overrun. Reaches `NORM_CAP` ~7,988 times per run.
+- `fuzz/record_fuzz.fcyr` — the **pre-auth record scanner** (`_scan_kv`), reachable
+  by anyone who can open a socket and name a character that exists. ~12k matches /
+  ~88k rejections, so both paths run.
+
+**Still uncovered:** the CYML zone/class loaders. Stated rather than implied away.
 
 End-to-end smokes validated locally on Linux x86_64 at the 0.6.0 cut:
 
@@ -1161,10 +1203,12 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
-**Next: 1.7.17** — mechanics and instruments (roadmap **AP** a mob cannot kill an
-unengaged player; **AQ** the fuzz gate is a no-op on half its iterations; and the
-low tail **AR-AY**, which includes **two benches in the audit gate that cannot
-fail**). Then gate re-run #4 — which should first build the
+**Next: gate re-run #4.** Every finding from re-run #3 is closed (AJ-AY); the only
+carried items are **AA** (16 B/connection at accept, needs a `lib/net.cyr`
+decision) and **AB** (the stateless-refusal amplifier). Run it against a TAGGED
+commit and let it BUILD AND RUN — that is what made #3 find three highs no
+read-only pass could have. Note that 1.7.16 already built much of the
+offline-population machinery #3 named as its biggest gap — which should first build the
 offline-population conservation harness and the phase x tick matrix — which must be allowed to **run the suite and
 the benches**, because AF survived only because a bench fixture could not reach
 the code path it measures.
@@ -1205,7 +1249,7 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is 1.7.17** (roadmap items AP, AQ and the AR-AY tail), not a milestone: see
+**Your next work is gate re-run #4**, not a milestone: see
 [`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
 is batched into. 2.0.0 (starting with M14) is gated behind a clean gate re-run. Joshua is post-1.0 backlog, not next.
 

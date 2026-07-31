@@ -69,6 +69,99 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 allowed to run the suite and the benches.**
 
 
+## [1.7.17] — 2026-07-31
+
+**Mechanics and instruments.** 1387 assertions (was 1362); `cyrius audit` exits 0;
+6/6 benches; **2/2 fuzz targets**; both targets build; **9/9 mutations killed**.
+
+The tail of gate re-run #3 — items **AP** and **AQ** plus **AR–AY**. With this,
+**every finding from that run is closed.**
+
+### Fixed
+
+- **A mob could not kill an unengaged player (AP).** `classes_upkeep` treated
+  `SS_TARGET == 0` as "out of combat", but combat is two-sided and the sides are
+  recorded separately: `SS_TARGET` is what the PLAYER attacked, `MI_TARGET` is
+  what the MOB attacked, and `_mob_assist` and the leash set only the latter. A
+  player who never typed `kill` therefore regenerated every tick while being hit.
+  Measured: **70 incoming swings in 60 s, 24 of them hits, HP never below 36/40.**
+  `session_in_combat` now asks the question the comment always meant.
+
+- **`parse_uint` wrapped silently (AR).** `v * 10 + d` overflows i64 with no
+  check, so a 20-digit ordinal landed on some small positive number and `N.X`
+  resolved to a **real object**. Refused at a documented domain bound instead —
+  an ordinal above a million is not a number that lost precision, it is not an
+  ordinal.
+
+- **Death did not mark the record dirty (AT).** `player_died` drops the whole
+  inventory to the floor and moves the body, and nothing flagged the record —
+  `cmd_on_line` only flags the session that typed a command, and dying is
+  something the tick does to you. A player who died and then sat still was skipped
+  by the debounced sweep, so a `kill -9` restored them holding everything they had
+  just dropped.
+
+- **The hidden-roll RNG was seeded from uptime (AU).** `combat_seed(clock_now_ms())`
+  — and `clock_now_ms` is milliseconds since **boot**, a distinction this project
+  already learned the hard way in 1.6.8. A server started at a repeatable point in
+  an init sequence replayed every combat roll identically, and ADR 0001 makes
+  those rolls the game's only uncertainty. Now seeded from `random_bytes`, with
+  the clock and epoch mixed in so a degraded entropy source cannot silently take
+  the seed to a constant.
+
+### Changed — the instruments
+
+- **The M2-F fuzz gate was a no-op on half its iterations, and has been fixed and
+  made self-checking (AQ).** `rng_next` returns a signed i64, so `r % 320` was
+  negative on **49,585 of 100,000 iterations** — those fed a negative length and
+  parsed nothing. The longest input it ever produced was **319 bytes against a
+  4096-byte norm buffer**, so `pa_emit_byte`'s cap branch — the guard F3 (1.6.11)
+  exists for — **had never once executed** while the gate reported PASS.
+
+  Fixing the sign was not enough: uniform random bytes produce a delimiter every
+  few bytes, so the *token* cap trips first and `PA_NORM_LEN` still peaked at 747.
+  A quarter of iterations now generate long delimiter-free runs. **Result:
+  `NORM_CAP` reached 7,988 times per run**, and the parser survives it.
+
+  The harness now **asserts its own coverage** and fails if the inputs stop
+  reaching the guards — the only way a fuzz gate can notice it has been defanged.
+
+- **A second fuzz target: the pre-auth record scanner (AX).** `cyrius fuzz`
+  covered exactly one project file while this project's docs name two untrusted
+  inputs. `fuzz/record_fuzz.fcyr` fuzzes 1.7.8's `_scan_kv` — reachable by anyone
+  who can open a socket and name a character that exists. 100k iterations,
+  measured at 12,383 matches and 87,617 rejections, so both paths run. **The CYML
+  zone loaders remain uncovered and are recorded as such**, rather than implied by
+  a target that does not cover them.
+
+- **Two of the six benches in the audit gate could not fail (AW).**
+  `bench_telnet` had no budget constant and returned 0 unconditionally;
+  `tests/*.bcyr` is an explicit scaffold no-op. `cyrius audit` has reported "6
+  passed" throughout for a five-bench gate. `bench_telnet` now gates at 30 ns/byte
+  against a measured 5–6 ns — 5× headroom deliberately, because what it must catch
+  is a regression in KIND (a syscall, an allocation, an accidental O(n²)) and this
+  repo has been burned twice by nondeterministic gates. **Verified to exit 1 when
+  breached.** The placeholder now announces itself so the count is not misread.
+
+- **Two guards that had no test now have one (AV, AY).** The `sig` hex-length
+  bound and the `MAX_SESSIONS` accept cap. `MAX_SESSIONS` was also verified live:
+  **256 connections accepted, 44 refused.**
+
+### Notes
+
+- **The `sig` guard's observable is memory, not a return code.** Removing it still
+  yields `-2`, because the signature then fails to verify anyway — which is
+  exactly why it had no test and why the first version of this assertion could not
+  kill the mutation. What it prevents is `hex_decode_into` writing 2500 bytes
+  through a 256-byte buffer into the globals after it, so the assertion is now on
+  a sentinel past `g_persist_dec`.
+
+- **AS is a content constraint, not a parser bug, and is documented as one.** A
+  noun spelled like a preposition can never be a direct object. Every candidate
+  fix changed the meaning of inputs that *do* occur — treating a trailing
+  preposition as a noun turns `put a in` from "put a into what?" into "put in" —
+  so [ADR 0005](docs/adr/0005-zone-file-format.md) now states the authoring rule
+  and the suite pins the behaviour so it cannot drift silently.
+
 ## [1.7.16] — 2026-07-31
 
 **The peer-reachable highs.** 1362 assertions (was 1340); `cyrius audit` exits 0;

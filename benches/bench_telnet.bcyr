@@ -37,8 +37,27 @@ fn build_wire_data(buf, cap): i64 {
     return n;
 }
 
+# === 1.7.17 (AW) — this bench now GATES. ===
+#
+# It measured, printed, and returned 0 unconditionally: no budget constant, no
+# comparison, no way to fail. `cyrius audit` has reported "6 passed" throughout
+# while two of those six could not fail — this one and the scaffold placeholder
+# at tests/*.bcyr — so the gate has been a five-bench gate wearing a six.
+#
+# That is the 1.7.12 lesson (*a bench that cannot reach the path reports a budget
+# that is met and tells you nothing*) one level up, in the gate itself.
+#
+# The budget is 30 ns/byte against a measured 5-6 ns on this host, stable since
+# 0.2.0. Deliberately 5x headroom rather than a tight gate: this is the per-byte
+# hot path of every connection, and what it must catch is a REGRESSION IN KIND —
+# a syscall, an allocation, or an accidental O(n^2) in the IAC state machine —
+# not a slower CI runner. This repo has been burned twice by nondeterministic
+# gates, and a tight number on a shared host is a coin flip.
+enum TelnetBudget { TELNET_NS_PER_BYTE_MAX = 30; }
+
 fn main(): i64 {
     alloc_init();
+    var bad = 0;
 
     var cap = 4096;
     var wire = alloc(cap);
@@ -56,8 +75,13 @@ fn main(): i64 {
         telnet_tx_consume(ts);   # drop negotiation replies; not the measured path
         r = r + 1;
     }
-    bench_batch_stop(bm, rounds * mlen);
+    var mixed_ns = bench_batch_stop(bm, rounds * mlen);
     bench_report(bm);
+    print("    budget: ", 12); print_num(TELNET_NS_PER_BYTE_MAX); println(" ns/byte");
+    if (mixed_ns > TELNET_NS_PER_BYTE_MAX) {
+        println("    RESULT: FAIL — mixed traffic is over the per-byte budget");
+        bad = 1;
+    } else { println("    RESULT: PASS"); }
 
     # --- Pure data (fast path) ---
     var dlen = build_wire_data(wire, cap);
@@ -69,10 +93,15 @@ fn main(): i64 {
         while (k2 < dlen) { telnet_feed(ts, load8(wire + k2)); k2 = k2 + 1; }
         r2 = r2 + 1;
     }
-    bench_batch_stop(bd, rounds * dlen);
+    var data_ns = bench_batch_stop(bd, rounds * dlen);
     bench_report(bd);
+    print("    budget: ", 12); print_num(TELNET_NS_PER_BYTE_MAX); println(" ns/byte");
+    if (data_ns > TELNET_NS_PER_BYTE_MAX) {
+        println("    RESULT: FAIL — the pure-data fast path is over the per-byte budget");
+        bad = 1;
+    } else { println("    RESULT: PASS"); }
 
-    return 0;
+    return bad;
 }
 
 var r = main();

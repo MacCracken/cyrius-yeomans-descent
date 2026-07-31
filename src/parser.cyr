@@ -62,6 +62,10 @@ enum PA {
 enum PaCap {
     NORM_CAP   = 4096;
     PA_MAX_TOKENS = 64;
+    # 1.7.17 (AR) — the largest ordinal `N.X` will accept. Far above anything the
+    # game can present (MAX_INV is 100) and far below where i64 arithmetic wraps,
+    # so the check costs nothing real and closes the wrap.
+    PA_ORDINAL_MAX = 1000000;
 }
 
 # ASCII bytes the tokenizer treats as token delimiters.
@@ -651,6 +655,17 @@ fn parse_uint(buf, len): i64 {
         if (c < 48) { return 0 - 1; }
         if (c > 57) { return 0 - 1; }
         v = v * 10 + (c - 48);
+        # 1.7.17 (AR) — REFUSE rather than wrap. `v * 10` on an i64 overflows
+        # silently, so a 20-digit ordinal wrapped to some small positive number
+        # and `N.X` then resolved to a REAL object — a player typing
+        # `get 18446744073709551617.sword` got whichever sword the wrap landed on.
+        #
+        # Bailing at a domain bound rather than doing exact overflow arithmetic:
+        # this is an ORDINAL, "the Nth thing you can see", and nothing in this game
+        # can present a million of anything (MAX_INV is 100). Anything above the
+        # bound is not a number that lost precision, it is not an ordinal at all,
+        # and -1 is what the caller already understands as "not a qualifier".
+        if (v > PA_ORDINAL_MAX) { return 0 - 1; }
         i = i + 1;
     }
     return v;

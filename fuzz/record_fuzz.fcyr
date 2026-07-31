@@ -1,0 +1,144 @@
+# Fuzz: the RAW RECORD SCANNER — `_scan_kv` / `_kv_at` must never read outside
+# the buffer it is given, however hostile the bytes.
+#
+# 1.7.17 (AX). Gate re-run #3 found that `cyrius fuzz` included exactly ONE
+# project file — `src/parser.cyr` — while this project's own documentation names
+# two untrusted inputs: what a player types, and what a RECORD contains. The
+# record side had no fuzz coverage at all.
+#
+# This target covers the part of that surface that runs BEFORE authentication:
+# 1.7.8's raw scanner, which reads `salt` and `pubkey` straight out of the slurp
+# buffer so a wrong passphrase never pays for a parse. It is reached by anyone who
+# can open a socket and name a character that exists, which makes it the highest-
+# value byte-level target in the persistence path.
+#
+# Invariants, checked every iteration:
+#   - a hit's value pointer lies inside the buffer
+#   - a hit's [ptr, ptr+len) lies inside the buffer
+#   - a miss returns exactly 0
+#   - the scanner never reports a length longer than the buffer
+# A non-zero exit flags the first violation; a clean run prints "record_fuzz: ok".
+#
+# The CYML zone loaders remain uncovered — noted in the roadmap rather than
+# claimed here, because a fuzz target that does not exist should not be implied
+# by one that does.
+
+# The persistence fold needs the same include prefix main.cyr uses — persist.cyr
+# reads enums from session / item / world / classes, and session.cyr needs the
+# telnet option constants. Mirrors benches/bench_persist.bcyr exactly.
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "lib/sakshi.cyr"
+include "lib/libro.cyr"
+
+include "src/telnet.cyr"
+include "src/parser.cyr"
+include "src/world.cyr"
+include "src/mob.cyr"
+include "src/session.cyr"
+include "src/item.cyr"
+include "src/combat.cyr"
+include "src/classes.cyr"
+include "src/persist.cyr"
+include "src/server.cyr"
+
+alloc_init();
+
+var rng_state = 0x243F6A8885A308D3;
+fn rng_next(): i64 {
+    var x = rng_state;
+    x = x ^ (x << 13);
+    x = x ^ ((x >> 7) & 0x01FFFFFFFFFFFFFF);
+    x = x ^ (x << 17);
+    rng_state = x;
+    return x;
+}
+
+# A byte alphabet weighted toward the characters that MEAN something to the
+# scanner — quote, equals, space, newline, NUL, and hex digits — because uniform
+# random bytes almost never produce the shapes the parser actually branches on.
+fn rec_byte(r): i64 {
+    var k = (r & 0x7FFFFFFFFFFFFFFF) % 16;
+    if (k == 0) { return 34; }                     # "
+    if (k == 1) { return 61; }                     # =
+    if (k == 2) { return 32; }                     # space
+    if (k == 3) { return 10; }                     # \n
+    if (k == 4) { return 0; }                      # NUL
+    if (k == 5) { return 115; }                    # 's'
+    if (k == 6) { return 97; }                     # 'a'
+    if (k == 7) { return 108; }                    # 'l'
+    if (k == 8) { return 116; }                    # 't'
+    if (k == 9) { return 255; }
+    return 48 + ((r >> 8) & 0x0F);                 # hex-ish digits
+}
+
+var CAP = 4096;
+var buf = alloc(CAP);
+var vlen[8];
+
+var hits = 0;
+var misses = 0;
+var max_hit_len = 0;
+
+var iter = 0;
+while (iter < 100000) {
+    var r = rng_next();
+    var len = (r & 0x7FFFFFFFFFFFFFFF) % CAP;
+
+    var i = 0;
+    # A quarter of iterations are seeded with a well-formed prefix, so the scanner
+    # is actually driven down its match path rather than only its reject path —
+    # the lesson AQ cost: a generator that never reaches the branch proves nothing.
+    var mode = (r >> 32) & 3;
+    if (mode == 0) {
+        if (len > 24) {
+            store8(buf + 0, 10);
+            store8(buf + 1, 115); store8(buf + 2, 97); store8(buf + 3, 108); store8(buf + 4, 116);
+            store8(buf + 5, 32); store8(buf + 6, 61); store8(buf + 7, 32); store8(buf + 8, 34);
+            i = 9;
+        }
+    }
+    while (i < len) {
+        store8(buf + i, rec_byte(rng_next()) & 0xFF);
+        i = i + 1;
+    }
+
+    var got = _scan_kv(buf, len, "salt", &vlen);
+    if (got != 0) {
+        hits = hits + 1;
+        var vl = load64(&vlen);
+        if (vl < 0)            { syscall(60, 40); }
+        if (vl > len)          { syscall(60, 41); }
+        if (got < buf)         { syscall(60, 42); }
+        if (got > buf + len)   { syscall(60, 43); }
+        if (got + vl > buf + len) { syscall(60, 44); }
+        if (vl > max_hit_len) { max_hit_len = vl; }
+    } else {
+        misses = misses + 1;
+    }
+
+    # The same buffer through the other key the pre-auth path reads.
+    var got2 = _scan_kv(buf, len, "pubkey", &vlen);
+    if (got2 != 0) {
+        var vl2 = load64(&vlen);
+        if (vl2 < 0)               { syscall(60, 45); }
+        if (got2 + vl2 > buf + len) { syscall(60, 46); }
+    }
+
+    iter = iter + 1;
+}
+
+print("  hits: ", 8); print_num(hits);
+print("  misses: ", 10); print_num(misses);
+print("  longest value found: ", 23); print_num(max_hit_len); println("");
+# Coverage, asserted rather than assumed — see the AQ note in parser_fuzz.
+if (hits == 0) {
+    println("record_fuzz: FAIL — the scanner never matched, so only its reject path ran.");
+    syscall(60, 47);
+}
+if (misses == 0) {
+    println("record_fuzz: FAIL — the scanner always matched; the reject path never ran.");
+    syscall(60, 48);
+}
+syscall(1, 1, "record_fuzz: ok\n", 16);
+syscall(60, 0);

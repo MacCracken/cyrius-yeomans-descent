@@ -381,6 +381,29 @@ fn login_on_class(s, buf, len): i64 {
 
 enum AbilityConst { ENERGY_REGEN = 3; }
 
+# 1.7.17 (AP) — is anything swinging at this session, from either direction?
+#
+# Combat in this tree is TWO-SIDED and the two sides are recorded separately:
+# `SS_TARGET` is what the player chose to attack, `MI_TARGET` is what a mob chose
+# to attack. `_mob_assist` and the leash set the latter without ever touching the
+# former, so "the player has no target" was never the same statement as "the
+# player is not in a fight" — it just read like one.
+#
+# Only the player's own room is walked: a mob can only swing at someone standing
+# in front of it (`mob_tick_all` clears a latch whose target has left the room),
+# so a mob elsewhere cannot be attacking this session. That keeps this to a short
+# list walk per player per tick rather than a scan of the whole zone.
+fn session_in_combat(s): i64 {
+    if (load64(s + SS_TARGET) != 0) { return 1; }
+    if (session_room_ok(s) == 0) { return 0; }
+    var m = room_mob_head(room_at(load64(s + SS_ROOM)));
+    while (m != 0) {
+        if (mi_target(m) == s) { return 1; }
+        m = mi_next(m);
+    }
+    return 0;
+}
+
 # Does the session's class have id `cstr`?
 fn cl_id_eq(idx, cstr): i64 {
     if (idx < 0) { return 0; }
@@ -411,8 +434,20 @@ fn classes_upkeep(s): i64 {
     if (load64(s + SS_STIM) > 0)  { store64(s + SS_STIM, load64(s + SS_STIM) - 1); }
 
     # Recover HP while out of combat — CON-scaled, so tankier classes mend
-    # faster. In combat (SS_TARGET set) you heal only via abilities.
-    if (load64(s + SS_TARGET) == 0) {
+    # faster. In combat you heal only via abilities.
+    #
+    # === 1.7.17 (AP) — "out of combat" is not "I have no target". ===
+    #
+    # This tested `SS_TARGET == 0`, which is only the HALF of combat the player
+    # initiated. A mob that assists or leashes onto you sets ITS target (MI_TARGET)
+    # and never touches yours — so a player who never typed `kill` regenerated
+    # every single tick while being hit. Measured by gate re-run #3 against a live
+    # server: **70 incoming swings in 60 s, 24 of them hits, HP never below 36/40**
+    # and back to full every tick. A mob cannot kill an unengaged player at all.
+    #
+    # `session_in_combat` asks the question the comment always meant: is anything
+    # swinging at me, from either direction?
+    if (session_in_combat(s) == 0) {
         var hp = load64(s + SS_HP);
         var max = load64(s + SS_MAXHP);
         if (hp < max) {

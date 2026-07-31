@@ -299,6 +299,15 @@ fn player_died(s): i64 {
     combat_disengage(s);
     # Respawn at the start room with full HP.
     store64(s + SS_HP, load64(s + SS_MAXHP));
+    # 1.7.17 (AT) — death is a PERSISTENT change and must be flagged as one.
+    # `cmd_on_line` sets SS_SAVE_DIRTY for the session that typed a command, and
+    # dying is something the TICK does to you: the whole inventory goes to the
+    # floor and the body moves to the respawn room, with nothing marking the
+    # record. The debounced sweep then skipped a player who died and then sat
+    # still, so a `kill -9` before their next command restored them holding
+    # everything they had just dropped — a duplication across a crash, which is
+    # the class 1.7.16's census exists to keep honest.
+    store64(s + SS_SAVE_DIRTY, 1);
     store64(s + SS_ROOM, world_start_room());
     session_appendtx_cstr(s, "\r\nYou wake at the gate, breath ragged, the Grid unwilling to keep you.\r\n");
     room_broadcast(world_start_room(), s, s, " staggers in from the dark.", "", "\r\n");

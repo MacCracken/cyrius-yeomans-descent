@@ -11,6 +11,12 @@
 
 fn main(): i64 {
     alloc_init();
+    # 1.7.17 (AW) — SAY SO. This file cannot fail and never could, but `cyrius
+    # bench` counts it in its pass total, so the audit has been reporting "6
+    # passed" for a five-bench gate. It stays (the scaffold family is a toolchain
+    # convention) and now announces itself, so nobody reads the count as six
+    # things that were checked.
+    println("  (scaffold placeholder — asserts nothing; the real benches are in benches/)");
     return 0;
 }
 

@@ -96,6 +96,17 @@ mobs; `keywords`, `type`, slot for objects) — fleshed out as M4/M5 give
 them mechanics. The **`keywords` field is the noun scope** the M2 resolver
 matches against (ADR 0005 closes the M2-C "scope supplied at M3" loop).
 
+**Authoring constraint (1.7.17): do not give a mob or object a keyword that is
+also a preposition** — `in`, `on`, `at`, `to`, `from`, `with`, `under`. The M2
+parser scans for the first preposition after the verb and uses it to split the
+direct object from the indirect one, so a noun spelled like one can never be a
+direct object: `get in` parses `in` as the split, leaving nothing to the left of
+it. Gate re-run #3 raised this; every candidate fix changed the meaning of inputs
+that DO occur (treating a trailing preposition as a noun turns `put a in` from
+"put a into what?" into "put in"), so it is recorded here as a content rule rather
+than papered over in the parser. No shipped content violates it, and the suite
+pins the behaviour so it cannot drift silently.
+
 Out of scope for this ADR: doors/locks, weather, zone-to-zone portals,
 procedural generation. Additive later; none break the entry contract.
 

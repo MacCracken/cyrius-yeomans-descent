@@ -1778,7 +1778,22 @@ fn cmd_serve(port): i64 {
         println("  writes that to disk. Fix data/classes.cyml and restart.");
         return 1;
     }
-    combat_seed(clock_now_ms());   # seed the hidden-roll RNG (M4)
+    # 1.7.17 (AU) — seed from ENTROPY, not from uptime.
+    #
+    # This was `combat_seed(clock_now_ms())`, and `clock_now_ms` is milliseconds
+    # since BOOT, not since the epoch (a distinction this project already learned
+    # the hard way in 1.6.8, when a 5-minute cadence was tested against it). A
+    # server started by an init system at a repeatable point in the boot sequence
+    # therefore gets a repeatable seed — and every hidden roll in the game, which
+    # is the one thing ADR 0001 says players must not be able to predict, replays
+    # identically. Combat rolls are the game's only source of uncertainty.
+    #
+    # Mixed rather than replaced: `random_bytes` is the real entropy, and the
+    # clock and epoch are folded in so a `random_bytes` that ever degraded on some
+    # target cannot silently take the seed to a constant.
+    var seed_buf[8];
+    random_bytes(&seed_buf, 8);
+    combat_seed(load64(&seed_buf) ^ clock_now_ms() ^ (get_epoch_secs() << 20));
     # M6: persistence engine — buffers, data/ dirs, libro audit chain — and
     # the debounced save cadence (~5 min of ticks, never below one).
     persist_init();

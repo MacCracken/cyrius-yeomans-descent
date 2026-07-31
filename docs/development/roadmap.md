@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.16 — **every high from gate re-run #3 is closed**; 2 medium + 7 low remain. Next is 1.7.17)
+> **Last Updated**: 2026-07-31 (v1.7.17 — **every finding from gate re-run #3 is closed (AJ-AY)**. Next is gate re-run #4)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -40,8 +40,8 @@ ownership and fix size.
 | — | ~~gate re-run #3~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **4 high**, 5 medium, 7 low. Finders could BUILD AND RUN this time; three of the four highs were demonstrated against a live server | — |
 | — | ~~1.7.15~~ | ~~3~~ | ✅ **Shipped.** **AJ** a rejected objects table is now fatal (exit 1), and a dropped id is counted, audited and reported · **AN** `class` by stable id, both forms read · **AO** a healed character keeps its room | — |
 | — | ~~1.7.16~~ | ~~3~~ | ✅ **Shipped.** **AK** the two tick consumers now agree what a phase means · **AM** an offline census, seeded once and moved by login/disconnect · **AL** the account is counted where the record is written | — |
-| 3 | [**1.7.17**](#1717--mechanics-and-instruments) | 10 | **AP** mobs cannot kill an unengaged player · **AQ** the fuzz gate is a no-op on half its iterations · plus the low tail (AR-AY), including **two benches that cannot fail** | **yes** |
-| 4 | [**gate re-run #4**](#the-gate--what-closes-the-1x-line) | — | Build the **offline-population conservation harness** and the **phase × tick matrix** first — see "no instrument for" above | **yes** |
+| — | ~~1.7.17~~ | ~~10~~ | ✅ **Shipped.** **AP** combat is two-sided · **AQ** the fuzz gate reached `NORM_CAP` for the first time (7,988x/run) and now asserts its own coverage · **AW** two benches that could not fail · plus AR, AT, AU, AV, AX, AY; **AS** documented as a content rule | — |
+| 1 | [**gate re-run #4**](#the-gate--what-closes-the-1x-line) | — | **Next, and everything from re-run #3 is closed.** Run it against a **tagged commit**, let it **build and run** (that is what made #3 work), and note that 1.7.16 already built much of the offline-population machinery #3 asked for | **yes** |
 | 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
@@ -207,22 +207,50 @@ fighting.** *(high — CLOSED in 1.7.16)*
 - Off by default, which is the only thing keeping it below critical.
   `docs/guides/running.md:94-97` documents behaviour the code does not have.
 
-### 1.7.17 — mechanics and instruments
+### ✅ 1.7.17 — mechanics and instruments (SHIPPED)
 
-**AP. A mob cannot kill you unless you have engaged it.** *(medium)* —
+Items **AP, AQ, AR, AT, AU, AV, AW, AX, AY** are closed and **AS is documented as
+a content rule** — so **every finding from gate re-run #3 (AJ-AY) is now closed**.
+1387 assertions (was 1362), 9/9 mutations killed, 2/2 fuzz targets.
+
+**The instrument work is the part worth remembering.** The M2-F fuzz gate fed a
+NEGATIVE length on 49,585 of 100,000 iterations and had never once executed
+`pa_emit_byte`'s cap branch — the guard F3 (1.6.11) exists for — while reporting
+PASS for eleven releases. Fixing the sign was not enough: random bytes produce
+delimiters, so the TOKEN cap tripped first and `PA_NORM_LEN` still peaked at 747
+of 4096. A quarter of iterations now generate delimiter-free runs, `NORM_CAP` is
+reached **7,988 times per run**, and **the harness asserts its own coverage** so
+it fails if the inputs ever stop reaching the guards.
+
+**Two of the six benches in the audit gate could not fail.** `bench_telnet` now
+gates at 30 ns/byte (measured 5-6), verified to exit 1 when breached; the scaffold
+placeholder announces itself so "6 passed" is not misread as six checks.
+
+**A second fuzz target** covers the pre-auth record scanner (`_scan_kv`), measured
+at 12,383 matches / 87,617 rejections so both paths run. **The CYML zone loaders
+remain uncovered**, and that is stated rather than implied away.
+
+**AS is a content constraint, not a parser bug.** A noun spelled like a
+preposition can never be a direct object; every candidate fix changed the meaning
+of inputs that DO occur (`put a in` would become "put in"). ADR 0005 now states
+the authoring rule and the suite pins the behaviour.
+
+### 1.7.17 — the items (detail, retained)
+
+**AP. A mob cannot kill you unless you have engaged it.** *(medium — CLOSED in 1.7.17)* —
 `classes_upkeep` treats `SS_TARGET == 0` as "out of combat" and regenerates
 ([`classes.cyr:381`](../../src/classes.cyr:381)), but a mob that assists or leashes
 onto you sets **its** target, not yours. Measured live: **70 incoming swings in
 60 s, 24 of them hits, HP never below 36/40** and back to full every tick.
 
-**AQ. The M2-F fuzz gate is a no-op on half its iterations.** *(medium)* —
+**AQ. The M2-F fuzz gate is a no-op on half its iterations.** *(medium — CLOSED in 1.7.17)* —
 `fuzz/parser_fuzz.fcyr:74` feeds a **negative length on 49,585 of 100,000
 iterations**; the longest input ever fed is **319 bytes**, `PA_NORM_LEN` never
 exceeds **289 of NORM_CAP 4096**, and the `pa_emit_byte` cap branch — where F3
 (1.6.11) lived — **has never executed**. Reproduced by replicating the shipped
 seed and generator byte-for-byte.
 
-**Low, as filed:** **AR** `parse_uint` wraps silently so a 20-digit `N.X` ordinal
+**Low — ALL CLOSED in 1.7.17** (AS as documentation): **AR** `parse_uint` wraps silently so a 20-digit `N.X` ordinal
 resolves to a real object; **AS** the preposition split starts at token 1, so a
 noun spelled like a preposition can never be a direct object; **AT** `player_died`
 changes persistent state without setting `SS_SAVE_DIRTY`; **AU** the hidden-roll

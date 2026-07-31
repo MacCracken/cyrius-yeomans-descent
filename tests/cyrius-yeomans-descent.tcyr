@@ -6345,6 +6345,7 @@ fn main() {
     test_key_scratch_wiped();
     test_operator_edit_blast();
     test_peer_reachable_highs();
+    test_mechanics_and_instruments();
 
 
     return assert_summary();
@@ -8451,6 +8452,176 @@ fn _obj_id_count_rooms(idptr, idlen): i64 {
         ri = ri + 1;
     }
     return n;
+}
+
+# === 1.7.17 — mechanics and instruments (gate re-run #3's tail). ===
+fn test_mechanics_and_instruments(): i64 {
+    test_group("mechanics-instruments");
+    persist_init();
+    if (g_mob_tpl_count == 0) { assert(0, "mechanics: needs mob templates"); return 0; }
+    if (world_room_count() == 0) { assert(0, "mechanics: needs a zone"); return 0; }
+
+    # --- AP. "Out of combat" is not "I have no target".
+    #
+    # Combat is two-sided and the sides are recorded separately: SS_TARGET is what
+    # the PLAYER attacked, MI_TARGET is what the MOB attacked. `_mob_assist` and
+    # the leash set only the latter, so a player who never typed `kill` counted as
+    # out of combat and regenerated every tick while being hit. Measured by the
+    # sweep: 70 incoming swings in 60 s, 24 of them hits, HP never below 36/40.
+    var p = _freeable_sess();
+    store64(p + SS_ROOM, 0);
+    store64(p + SS_FD, 0 - 1);
+    store64(p + SS_AUTHED, 1);
+    store64(p + SS_PHASE, PHASE_CMD);
+    store64(p + SS_CLASS, 0);
+    store64(p + SS_MAXHP, 40); store64(p + SS_HP, 10);
+    store64(p + SS_CON, 10);
+    store64(p + SS_TARGET, 0);                    # the player has NOT engaged
+
+    var m = mob_spawn(mt_at(0), 0);
+    assert_eq(session_in_combat(p), 0, "with nothing attacking, the player is out of combat");
+    classes_upkeep(p);
+    assert(load64(p + SS_HP) > 10, "...and regenerates, which is the intended behaviour");
+
+    mi_set_target(m, p);                          # the MOB engages; the player did not
+    assert_eq(session_in_combat(p), 1,
+              "THE ASSERTION AP EXISTS FOR: a mob attacking you IS combat, even unengaged");
+    var hp_before = load64(p + SS_HP);
+    classes_upkeep(p);
+    assert_eq(load64(p + SS_HP), hp_before,
+              "...so there is no free regeneration while something is swinging at you");
+
+    # A mob in ANOTHER room does not count — it cannot reach you, and walking the
+    # whole zone per player per tick would be the wrong price for this answer.
+    mi_set_target(m, 0);
+    mob_remove(m);
+    var far = 0;
+    if (world_room_count() > 1) { far = 1; }
+    var m2 = mob_spawn(mt_at(0), far);
+    mi_set_target(m2, p);
+    if (far != 0) {
+        assert_eq(session_in_combat(p), 0, "a mob in another room is not attacking you");
+    }
+    mi_set_target(m2, 0);
+    mob_remove(m2);
+    session_free(p);
+
+    # --- AR. `parse_uint` refuses rather than wrapping.
+    assert_eq(parse_uint("3", 1), 3, "an ordinary ordinal parses");
+    assert_eq(parse_uint("1000000", 7), PA_ORDINAL_MAX, "...up to the documented bound");
+    assert_eq(parse_uint("1000001", 7), 0 - 1, "...and one past it is refused");
+    # The wrap itself: 20 digits overflows i64 and used to land on a small
+    # positive number, so `get 18446744073709551617.sword` resolved to a REAL
+    # object — whichever one the wrap happened to select.
+    assert_eq(parse_uint("18446744073709551617", 20), 0 - 1,
+              "THE ASSERTION AR EXISTS FOR: a 20-digit ordinal is refused, not wrapped");
+    assert_eq(parse_uint("99999999999999999999", 20), 0 - 1, "...as is any other overflow");
+    assert_eq(parse_uint("12x", 3), 0 - 1, "a non-digit is still refused");
+    assert_eq(parse_uint("", 0), 0 - 1, "...and so is an empty token");
+
+    # --- AS. A KNOWN, DOCUMENTED LIMITATION, pinned rather than fixed.
+    #
+    # The preposition scan starts at token 1, so a noun spelled like a preposition
+    # can never be a direct object: `get in` parses "in" as a preposition and ends
+    # up with no dobj. Every fix considered changed the meaning of inputs that DO
+    # occur — treating a trailing preposition as a noun turns `put a in` from "put
+    # a into what?" into "put in" — so this is a CONTENT CONSTRAINT (do not name an
+    # object after a preposition), recorded in the zone guide, and pinned here so
+    # the behaviour cannot drift unnoticed.
+    var pa = parser_new();
+    parser_parse(pa, "get in", 6);
+    assert_eq(parsed_has_dobj(pa), 0,
+              "a bare trailing preposition yields no direct object (known limitation)");
+    parser_parse(pa, "put a in b", 10);
+    assert_eq(parsed_has_dobj(pa), 1, "...while a real prepositional phrase still splits");
+    assert(parsed_iobj(pa) > 0, "...with an indirect object");
+    parser_free(pa);
+
+    # --- AT. Dying is a persistent change and must flag the record.
+    var d = _freeable_sess();
+    store64(d + SS_ROOM, 0);
+    store64(d + SS_FD, 0 - 1);
+    store64(d + SS_AUTHED, 1);
+    store64(d + SS_CLASS, 0);
+    store64(d + SS_MAXHP, 20); store64(d + SS_HP, 1);
+    store64(d + SS_INV, 0);
+    store64(d + SS_SAVE_DIRTY, 0);
+    var dhead = g_session_head;
+    store64(d + SS_NEXT, 0);
+    g_session_head = d;
+    player_died(d);
+    g_session_head = dhead;
+    assert_eq(load64(d + SS_SAVE_DIRTY), 1,
+              "THE ASSERTION AT EXISTS FOR: death marks the record dirty");
+    assert_eq(load64(d + SS_HP), 20, "...and the player comes back at full health");
+    _drain_ilist(d + SS_INV); store64(d + SS_INV, 0);
+    session_free(d);
+
+    # --- AV. The `sig` hex-length guard, the one member of its trio with no test.
+    # Neutering it is a DEMONSTRATED record-content-driven arbitrary file write:
+    # hex_decode_into writes len/2 bytes with no destination bound into the
+    # 256-byte g_persist_dec, straight through the audit globals allocated after it.
+    _player_unlink("Bigsig", 6);
+    var sblk = alloc(IDENT_LEN);
+    memset(sblk, 0, IDENT_LEN);
+    var ssalt = alloc(SALT_LEN);
+    var sq = 0;
+    while (sq < SALT_LEN) { store8(ssalt + sq, 71 + sq); sq = sq + 1; }
+    memcpy(sblk, ssalt, SALT_LEN);
+    ident_derive(ssalt, "bigsigphrase", 12, sblk + IDENT_SK, sblk + IDENT_PK);
+    var brec = alloc(SLURP_CAP);
+    var bo = _str_into(brec, 0, "[player]\nschema = 1\nname = \"Bigsig\"\nsalt = \"");
+    bo = _str_into(brec, bo, hex_encode(sblk, SALT_LEN));
+    bo = _str_into(brec, bo, "\"\npubkey = \"");
+    bo = _str_into(brec, bo, hex_encode(sblk + IDENT_PK, PK_LEN));
+    bo = _str_into(brec, bo, "\"\nsig = \"");
+    var bz = 0;
+    while (bz < 5000) { store8(brec + bo, 97); bo = bo + 1; bz = bz + 1; }   # 5000-char sig
+    bo = _str_into(brec, bo, "\"\n");
+    _write_record_raw("Bigsig", 6, brec, bo);
+    # THE RETURN CODE IS NOT THE OBSERVABLE. Removing this guard still yields -2,
+    # because the signature then fails to verify anyway — which is exactly why the
+    # guard had no test and why the first version of this assertion could not kill
+    # the mutation. What the guard actually prevents is `hex_decode_into` writing
+    # 2500 bytes from `g_persist_dec + 48` through the 256-byte buffer and into the
+    # globals allocated after it. So the assertion is on the MEMORY.
+    #
+    # `g_fmt_scratch` is allocated two slots after `g_persist_dec` in persist_init
+    # and is untouched by the load path, which makes it a clean sentinel.
+    memset(g_fmt_scratch, 90, 32);                # 'Z' x32
+    var bs = _mk_sess("Bigsig", 6);
+    assert_eq(player_auth_load(bs, "bigsigphrase", 12), 0 - 2,
+              "an over-long SIG hex is rejected");
+    var intact = 0;
+    var bi = 0;
+    while (bi < 32) {
+        if ((load8(g_fmt_scratch + bi) & 0xFF) == 90) { intact = intact + 1; }
+        bi = bi + 1;
+    }
+    assert_eq(intact, 32,
+              "THE ASSERTION AV EXISTS FOR: it is rejected BEFORE decode — nothing past g_persist_dec is touched");
+    _player_unlink("Bigsig", 6);
+
+    # --- AU + AY. Two guards the suite cannot exercise, asserted from the source.
+    #
+    # AU: the hidden-roll RNG was seeded from `clock_now_ms()`, which is uptime
+    # since BOOT — so a server started at a repeatable point in an init sequence
+    # replayed every combat roll identically. ADR 0001 makes those rolls the
+    # game's only uncertainty. Nothing a unit test can observe: the seeding
+    # happens in `cmd_serve`, which parks in epoll_wait.
+    var seed_at = _src_offset_of("src/server.cyr", "combat_seed(");
+    var rand_at = _src_offset_of("src/server.cyr", "random_bytes(&seed_buf, 8);");
+    assert(seed_at > 0, "cmd_serve seeds the combat RNG");
+    assert(rand_at > 0, "...from random_bytes");
+    assert(rand_at < seed_at, "...drawn BEFORE the seed is mixed and applied");
+    assert_eq(_src_count("src/server.cyr", "combat_seed(clock_now_ms())"), 0,
+              "...and no longer from uptime alone");
+
+    # AY: the MAX_SESSIONS accept cap. `handle_accept` needs a real listener, so
+    # the guard's presence is asserted here and its behaviour is exercised live.
+    assert(_src_count("src/server.cyr", "g_session_count >= MAX_SESSIONS") >= 1,
+           "the accept path still compares the live count against MAX_SESSIONS");
+    return 0;
 }
 
 var exit_code = main();

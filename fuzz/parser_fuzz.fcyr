@@ -58,7 +58,12 @@ store64(&names + 24, "ration pack");
 var scope_n = 4;
 
 var pa = parser_new();
-var inbuf = alloc(512);
+# 1.7.17 (AQ) — 8192, not 512. The old buffer bounded the generator to inputs so
+# short that PA_NORM_LEN could never approach NORM_CAP (4096), so `pa_emit_byte`'s
+# cap branch — the one F3 (1.6.11) was written for — had NEVER EXECUTED in 100k
+# iterations. A fuzz gate that cannot reach the guard it exists to defend is a
+# gate that passes and tells you nothing.
+var inbuf = alloc(8192);
 var out = alloc(PA_MAX_TOKENS * 8);
 
 # --- Directed adversarial cases first (each must survive) ---
@@ -83,16 +88,53 @@ parser_parse(pa, inbuf, 500);
 if (parser_count(pa) > PA_MAX_TOKENS) { syscall(60, 10); }
 
 # --- 100k random iterations ---
+# 1.7.17 (AQ) — COVERAGE IS ASSERTED, not assumed. The whole reason this gate was
+# worthless is that nobody checked whether its inputs reached the code it guards.
+# These counters make the harness prove its own reach, so the next time someone
+# changes the generator the gate says so instead of quietly going green.
+var max_norm = 0;
+var max_len_fed = 0;
+var hit_norm_cap = 0;
+var hit_token_cap = 0;
 var iter = 0;
 while (iter < 100000) {
     var r = rng_next();
-    var len = r % 320;                           # 0..319 bytes
+    # 1.7.17 (AQ) — MASK THE SIGN. `rng_next` is an xorshift over a signed i64 and
+    # returns negative roughly half the time, so `r % 320` was negative on
+    # **49,585 of 100,000 iterations** — measured by replicating the shipped seed
+    # and generator byte for byte. Those iterations fed a negative length, wrote
+    # no bytes, and parsed nothing: the headline "100k random inputs" was really
+    # about fifty thousand, and the longest input ever fed was 319 bytes.
+    #
+    # The ceiling now runs past LINE_CAP so the over-long path is exercised too.
+    # Production never hands the parser more than LINE_CAP (session_push_line_byte
+    # caps it), which is exactly why the parser's own bound needs fuzzing rather
+    # than trusting: it is the last line of defence if that cap ever moves.
+    var len = (r & 0x7FFFFFFFFFFFFFFF) % 6000;   # 0..5999 bytes
     var i = 0;
-    while (i < len) {
-        store8(inbuf + i, fuzz_byte(rng_next()) & 0xFF);
-        i = i + 1;
+    # 1.7.17 (AQ) — TWO GENERATOR MODES, because one could not reach the guard.
+    #
+    # Uniform random bytes produce a delimiter every few bytes, so the token cap
+    # (PA_MAX_TOKENS = 64) trips long before the norm buffer fills: measured at a
+    # max PA_NORM_LEN of 747 against NORM_CAP = 4096 even with 5999-byte inputs,
+    # with the cap branch still never executed. Reaching it needs the opposite
+    # shape — long runs with NO delimiters — which random bytes essentially never
+    # produce. So a quarter of iterations generate exactly that.
+    var mode = (r >> 32) & 3;
+    if (mode == 0) {
+        # One enormous token: drives PA_NORM_LEN straight at NORM_CAP.
+        while (i < len) {
+            store8(inbuf + i, 97 + (rng_next() & 0x0F));   # 'a'..'p', no delimiters
+            i = i + 1;
+        }
+    } else {
+        while (i < len) {
+            store8(inbuf + i, fuzz_byte(rng_next()) & 0xFF);
+            i = i + 1;
+        }
     }
     parser_parse(pa, inbuf, len);
+    if (len > max_len_fed) { max_len_fed = len; }
 
     # Invariant 1: token count bounded.
     var count = parser_count(pa);
@@ -103,6 +145,9 @@ while (iter < 100000) {
     var norm_len = load64(pa + PA_NORM_LEN);
     if (norm_len < 0)        { syscall(60, 22); }
     if (norm_len > NORM_CAP) { syscall(60, 23); }
+    if (norm_len > max_norm)  { max_norm = norm_len; }
+    if (norm_len == NORM_CAP) { hit_norm_cap = hit_norm_cap + 1; }
+    if (count == PA_MAX_TOKENS) { hit_token_cap = hit_token_cap + 1; }
 
     # Invariant 3: every token lies inside the norm buffer.
     var t = 0;
@@ -152,5 +197,35 @@ while (iter < 100000) {
 }
 
 parser_free(pa);
+
+# === 1.7.17 (AQ) — the gate now gates its own COVERAGE. ===
+#
+# Every invariant above is a "must not happen" check, and a generator that feeds
+# nothing satisfies all of them. That is precisely the state this harness shipped
+# in: half its iterations fed a negative length and the longest input it ever
+# produced was 319 bytes against a 4096-byte norm buffer, so `pa_emit_byte`'s cap
+# branch — the guard F3 (1.6.11) exists for — had never once executed while the
+# gate reported PASS for eleven releases.
+#
+# These are "must happen" checks. They fail the run if the inputs stop reaching
+# the guards, which is the only way a fuzz gate can notice it has been defanged.
+print("  max input fed   : ", 20); print_num(max_len_fed); println("");
+print("  max norm reached: ", 20); print_num(max_norm);
+print(" of ", 4); print_num(NORM_CAP); println("");
+print("  hit NORM_CAP    : ", 20); print_num(hit_norm_cap); println("");
+print("  hit token cap   : ", 20); print_num(hit_token_cap); println("");
+if (max_len_fed <= 320) {
+    println("parser_fuzz: FAIL — the generator never fed a line longer than the old ceiling.");
+    syscall(60, 30);
+}
+if (hit_norm_cap == 0) {
+    println("parser_fuzz: FAIL — NORM_CAP was never reached, so pa_emit_byte's cap");
+    println("            branch was never executed. The gate is not testing its guard.");
+    syscall(60, 31);
+}
+if (hit_token_cap == 0) {
+    println("parser_fuzz: FAIL — PA_MAX_TOKENS was never reached.");
+    syscall(60, 32);
+}
 syscall(1, 1, "parser_fuzz: ok\n", 16);
 syscall(60, 0);
