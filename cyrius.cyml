@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Yeoman's Descent — a Cyrius-native text MUD server set in a techno-feudal arcology"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.4.86"
+cyrius = "6.5.4"
 
 [build]
 entry = "src/main.cyr"

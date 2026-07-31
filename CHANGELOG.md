@@ -4,6 +4,99 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Gate re-run #2 — DO-NOT-CLOSE (2026-07-31)
+
+Run against 1.7.10. Five independent finders over distinct surfaces; every
+candidate faced three skeptics with separate lenses (correctness / reachability /
+novelty) and had to survive a majority; the judge reproduced each survivor against
+the shipped tree. **Nothing was dropped.** Ten reports collapsed to **eight
+distinct defects** — roadmap items **AC-AI**.
+
+**Critical 0 · high 2 · medium 3 · low 3.** No code changed in this entry; the
+findings are recorded in [`roadmap.md`](docs/development/roadmap.md) and scheduled
+across 1.7.11-1.7.14.
+
+Both highs are operator-facing data loss and neither needs an attacker:
+
+- **A clean shutdown saves nobody.** `cmd_serve`'s exit never walks
+  `g_session_head`, so SIGINT/SIGTERM loses up to five minutes of progress for
+  every connected player, on every restart — while `docs/guides/running.md`
+  promises the opposite.
+- **A character can be persisted with no class, permanently.** `SS_AUTHED` is set
+  before class selection and `PHASE_CLASS` is stored in exactly one place in the
+  tree, so there is no route back to the menu. Worse: a failed `classes.cyml` load
+  is non-fatal, the load path clamps every character to `class = -1`, and the next
+  disconnect writes that demotion to disk. One operator typo plus a restart is
+  playerbase-wide and irreversible, because records are signed with a key derived
+  from the player's passphrase.
+
+**For the fourth consecutive sweep, most findings are a rule applied at some sites
+and not the others.** The unmetered epoll teardown is *verbatim* the 1.7.0 finding
+— fixed in `drain_pending_rx`, never carried to the batch loop, in the release
+whose own comment says "ONE constant for BOTH dispatch sites, on purpose".
+
+**The sweep executed nothing** — no build, no suite, no bench, no running server —
+so every figure in it is derived from source. That is not incidental: item AF
+survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
+`SS_AUTHED = 0` so the arm it would measure cannot fire. **Gate re-run #3 must be
+allowed to run the suite and the benches.**
+
+
+## [1.7.10] — 2026-07-30
+
+**Toolchain 6.4.86 → 6.5.4, and the dependency snapshot with it.** A release of
+its own, per the 1.2.0 precedent: that upgrade repaired a `main` and a bench that
+had both silently stopped compiling, which is not something to discover folded
+into a feature change. 1229 assertions; `cyrius audit` exits 0; 6/6 benches; both
+targets build. **No source change was required.**
+
+### Changed
+
+- **`cyrius.cyml` pins `6.5.4`** (was `6.4.86`). The installed toolchain had been
+  ahead for three releases and `cyrius audit` emitted a drift warning on every
+  run; that warning is now gone.
+
+- **`cyrius lib sync --full` refreshed the vendored snapshot** — 9 files moved:
+  `bayan`, `sigil`, `sigil-mldsa`, `sakshi`, `sandhi`, `yukti`, `io`, `regex`,
+  `vec`. `cyrius deps` re-resolved and rewrote `cyrius.lock`.
+
+- **The sakshi shadow gap is CLOSED.** `sakshi 2.4.3 → 2.4.7`. This had been
+  carried in `state.md` as a known upstream gap since 1.2.0 — sigil pinned 2.4.3
+  in its own manifest while the toolchain bundled a newer one, so `cyrius deps`
+  wrote the older copy over the synced one on every resolve. It resolves cleanly
+  at 6.5.4 and needs no sigil-side change after all.
+
+### Verified rather than assumed
+
+The two things a dependency bump could plausibly have broken here, both checked
+explicitly because the code that depends on them shipped in the last two releases:
+
+- **`lib/io.cyr` still carries the AGNOS branches.** `file_rename` and `xunlink`
+  both keep their `#ifdef CYRIUS_TARGET_AGNOS` forms with the length-carrying
+  arities 1.7.8's persistence fix routes through. `io.cyr` was one of the nine
+  files the sync moved, so this was a real risk, not a formality.
+- **`lib/bayan.cyr` moved (1.2.1 → 1.3.0) and the TOML behaviour 1.7.8 reasons
+  about still holds.** The parser-differential guard depends on bayan taking the
+  FIRST match on a duplicate key and accepting shapes the strict scanner skips;
+  the `preauth-alloc` group asserts both through crafted, validly-signed records,
+  and it passes unchanged.
+
+### Notes
+
+- **Measurably faster, for free.** `bench_combat` p99 fell **530 µs → 444 µs**
+  (32 players × 64 mobs) and the gated pre-tick total **4 ms → 3 ms**. Recorded
+  because the numbers in `state.md` are quoted elsewhere and would otherwise
+  drift; nothing in this tree changed to earn them.
+
+- **Two shadow warnings remain, and they are the toolchain's, not ours.**
+  `mabda 4.0.7` and `yantra 1.0.2` are left untouched by `cyrius lib sync --full`
+  even though it reports a full 99-file snapshot — the same quirk `state.md` has
+  recorded since 6.4.83, now affecting `mabda` as well as `yantra`. Neither is
+  referenced anywhere in `src/`, `tests/` or `benches/`, so the practical impact
+  is a warning and two stale vendored files.
+
+- **Binary grew 895,592 → 899,760 bytes** (+4,168).
+
 ## [1.7.9] — 2026-07-30
 
 **The wire stops being cut in half.** 1229 assertions (was 1180); `cyrius audit`

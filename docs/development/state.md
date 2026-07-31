@@ -3,13 +3,43 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-30 (v1.7.9 — the RX-side class closed; **gate re-run #2 is next**, and it is what decides whether the 1.x line closes)
+> **Last refresh**: 2026-07-31 (v1.7.10 — **gate re-run #2 returned DO-NOT-CLOSE**: 2 high, 3 medium, 3 low. See roadmap items AC-AI; next is 1.7.11)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.10** — 2026-07-30. **1229 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build. **No source change.**
+
+**Toolchain 6.4.86 → 6.5.4, and the dependency snapshot with it.** Taken as a
+release of its own per the 1.2.0 precedent — that upgrade repaired a `main` and a
+bench which had both silently stopped compiling, and that is not something to
+discover folded into a feature change. `cyrius lib sync --full` moved 9 vendored
+files (`bayan`, `sigil`, `sigil-mldsa`, `sakshi`, `sandhi`, `yukti`, `io`,
+`regex`, `vec`) and `cyrius deps` rewrote the lock.
+
+**Two long-carried entries in this file closed with it.** The toolchain-drift
+warning is gone, and the **sakshi shadow gap** — open since 1.2.0, and recorded
+here as needing a sigil-side bump — resolves cleanly to **2.4.7** at 6.5.4 with no
+upstream change required.
+
+**Two things were verified rather than assumed**, because the code that depends on
+them shipped in the previous two releases and `io.cyr` / `bayan.cyr` were both
+among the files that moved:
+
+- `lib/io.cyr` still carries the `#ifdef CYRIUS_TARGET_AGNOS` branches in
+  `file_rename` / `xunlink`, with the length-carrying arities 1.7.8's persistence
+  fix routes through.
+- `lib/bayan.cyr` went 1.2.1 → 1.3.0, and the TOML behaviour 1.7.8's
+  parser-differential guard reasons about still holds — the `preauth-alloc`
+  group's crafted, validly-signed records pass unchanged.
+
+**Faster for free:** `bench_combat` p99 **530 µs → 444 µs**, gated pre-tick total
+**4 ms → 3 ms**. Recorded because those numbers are quoted elsewhere in this file
+and nothing in the tree changed to earn them.
 
 **1.7.9** — 2026-07-30. **1229 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build; **13/13 mutations killed**.
@@ -149,7 +179,44 @@ one is a lie the player can see.
   **both** of this server's input bounds are structurally blind to it. Roadmap
   items W–Z.
 
-## Gate re-run — DO-NOT-CLOSE (2026-07-29)
+## Gate re-run #2 — DO-NOT-CLOSE (2026-07-31)
+
+**The 1.x line does not close.** Five independent finders swept distinct surfaces;
+every candidate faced three skeptics with separate lenses and had to survive a
+majority; the judge reproduced each survivor against the shipped tree. **Nothing
+was dropped.** Ten reports collapsed to **eight distinct defects** — roadmap items
+**AC-AI**. Critical 0, **high 2**, medium 3, low 3.
+
+**The two highs are both operator-facing data loss, and neither needs an attacker:**
+a clean SIGINT/SIGTERM shutdown **saves nobody** (up to 5 minutes of progress for
+every connected player, on every restart — while `running.md` promises the
+opposite), and a character can be persisted with **no class**, permanently, because
+`SS_AUTHED` is set before class selection and `PHASE_CLASS` is stored in exactly one
+place in the tree, so there is no route back to the menu. That second one has a far
+worse trigger: a failed `classes.cyml` load is non-fatal, the load path then clamps
+every character to `class = -1`, and the next disconnect writes the demotion to
+disk. **One operator typo plus a restart is playerbase-wide, irreversible loss** —
+irreversible because records are signed with a key derived from the player's
+passphrase, which the server never holds.
+
+**The pattern, for the fourth consecutive sweep:** four of the eight are a rule this
+tree already applies somewhere else and did not apply here. The unmetered epoll
+teardown is *verbatim* the 1.7.0 finding — fixed in `drain_pending_rx`, never
+carried to the batch loop, in the release whose own comment reads "ONE constant for
+BOTH dispatch sites, on purpose".
+
+**What the sweep could not see, recorded so the next one starts here:** it executed
+nothing — no build, no suite, no bench, no running server — so every figure is
+derived from source. That gap is not incidental: **item AF survived precisely
+because `bench_tick_budget.bcyr` memsets its fixture, leaving `SS_AUTHED = 0` so the
+arm it would measure cannot fire.** Only a run reveals that. Also unowned:
+`parser.cyr` (the primary untrusted-input surface) and `combat.cyr`; the AGNOS build,
+still judged by reading two arms of a preprocessor; persisted state evolving over
+time rather than per transaction; and cross-session consistency — `cmd_give` mutates
+the recipient's inventory while setting only the giver's dirty flag, so any save
+boundary can leave two records disagreeing about who owns an object.
+
+## Gate re-run #1 — DO-NOT-CLOSE (2026-07-29)
 
 **The 1.x line does not close.** Four high findings survived adversarial
 refutation and were reproduced by the sweep's judge on the shipped tree; a fifth
@@ -532,16 +599,20 @@ written myself two releases earlier.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.4.86` (`cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.5.4` (`cyrius.cyml [package].cyrius`) — bumped in 1.7.10
 
-Two toolchain quirks (first hit at 6.4.83, still present at 6.4.86), worked
+Two toolchain quirks (first hit at 6.4.83, still present at 6.5.4), worked
 around rather than fixed here:
 
 - `cyrius fmt -w <file>` does **not** write. Capture `cyrius fmt <file>` on stdout
   instead. Flag order also differs per tool: `cyrius fmt <file> --check`, but
   `cyrius doc --check <file>` — and `doc` writes its findings to **stderr**.
-- `cyrius lib sync --full` reports a full 99-file snapshot while leaving
-  `niyama.cyr` / `yantra.cyr` untouched. Moot here (both pruned as unused).
+- `cyrius lib sync --full` reports a full 99-file snapshot while leaving some
+  bundled libs untouched. At 6.5.4 that is `mabda` (4.0.7 vs 4.0.8) and `yantra`
+  (1.0.1 vs 1.0.2), which is why two shadow warnings survive a full sync. Neither
+  is referenced anywhere in `src/` / `tests/` / `benches/`. **Correction:** this
+  entry used to say both were "pruned as unused" — `yantra.cyr` is present in
+  `lib/`, so they were vendored, just never called.
 
 `cyrius audit` at 6.4.x is the **project sweep** (fmt / lint / docs / tests /
 bench over `src` + `programs`). `cyrius audit --internal` is the different,
@@ -744,8 +815,9 @@ exits non-zero on breach; a bench that only prints is a bench nobody reads).
 - `bench_telnet` — telnet_feed ≈ 6 ns/byte (mixed), ≈ 5 ns/byte (pure
   data), 16 M iterations, stable since 0.2.0
 - `bench_combat` (M4-H) — 32 players × 64 mobs through 120 real ticks,
-  including per-tick `classes_upkeep`; **p99 ≈ 525 µs** against the 50 ms drift
-  budget. Was ≈1427 µs before 1.6.8 coalesced the tick's writes.
+  including per-tick `classes_upkeep`; **p99 ≈ 444 µs** at the 6.5.4 toolchain
+  (was ≈ 530 µs at 6.4.86 — the 1.7.10 bump alone, no source change) against the
+  50 ms drift budget. Was ≈1427 µs before 1.6.8 coalesced the tick's writes.
   This bench had **stopped compiling** before 1.2.0 (it included `server.cyr`
   without the persist prelude → `undefined variable 'DP_ROOMS'`), so the older
   ≈57 µs figure in the 1.0.x notes is not comparable — it predates both the
@@ -807,10 +879,10 @@ the leaves descent actually resolves. 1.2.0 pruned 12 dead ones — `cyml`, `tom
 `json`, `bigint`, `base64`, `csv`, `u128`, `linalg`, `matrix`, `agnosys` (carved out
 of 6.4.83) plus `niyama`, `yantra` (never referenced).
 
-**Known upstream gap**: `cyrius build` warns that `./lib/` shadows the pinned
-toolchain lib for **sakshi 2.4.3 (pinned 2.4.6)** — sigil 3.12.1 pins 2.4.3 in its
-own manifest, so `cyrius deps` writes it over the synced 2.4.6. Needs a sigil-side
-bump; no functional impact observed.
+**The sakshi shadow gap is CLOSED (1.7.10).** It read: *sigil 3.12.1 pins sakshi
+2.4.3 in its own manifest, so `cyrius deps` writes it over the synced 2.4.6; needs
+a sigil-side bump.* At 6.5.4 it resolves to **sakshi 2.4.7** cleanly and no
+sigil-side change was needed after all. Carried as open for five releases.
 
 **M6 complete (0.7.0, 2026-06-09).** Full persistence shipped — see the Version
 section above and `src/persist.cyr`. The dep-landing (M6-A) lesson is preserved
@@ -845,12 +917,11 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
-**Next: gate re-run #2.** Every item from the first re-run and from 1.7.7-1.7.9's
-own sweeps is closed or deliberately carried (item **AA**, 16 B/connection at
-accept, needs a `lib/net.cyr` decision; and the stateless-refusal amplifier).
-The 1.x line closes when a re-run comes back with no critical or high findings —
-a checklist reaching zero has never been the bar, and three sweeps running have
-each found something the previous pass had no instrument for.
+**Next: 1.7.11** — the two highs from gate re-run #2 (roadmap **AC** and **AD**),
+which are independent of each other and of everything below. Ship them alone and
+re-run the gate. Then 1.7.12-1.7.14 for the mediums and lows, then gate re-run #3
+— which must be allowed to **run the suite and the benches**, because item AF
+survived only because a bench fixture could not reach the code path it measures.
 
 **Next: 1.7.0** — re-derive both per-tick line budgets from the measured worst
 case and land the bench that gates a whole tick pass. Then 1.7.1–1.7.3, a gate
@@ -863,13 +934,12 @@ that makes the bump safe.
 
 **Carried, none blocking:**
 
-- **sakshi shadow warning** — sigil 3.12.1 pins sakshi 2.4.3 while the toolchain
-  bundles 2.4.6. A sigil-side bump; nothing to do here.
-- **Toolchain drift** — `cyrius.cyml` pins `6.4.86`; the installed `cycc` is now
-  **6.5.0**, so `cyrius audit` emits a drift warning. Not a failure and nothing is
-  broken, but the next toolchain bump is a release of its own (1.2.0 is the
-  precedent: an upgrade repaired a `main` and a bench that had both silently
-  stopped compiling), so it should not be folded into a feature change.
+- ~~**sakshi shadow warning**~~ — **closed in 1.7.10**; resolves to 2.4.7 at 6.5.4.
+- ~~**Toolchain drift**~~ — **closed in 1.7.10**; the pin is `6.5.4` and matches
+  the installed `cycc`. It was taken as a release of its own per the 1.2.0
+  precedent, and required no source change.
+- **mabda / yantra shadow** — two bundled libs `cyrius lib sync --full` does not
+  actually sync. Neither is referenced by descent; a warning, not a defect.
 - ~~**aarch64 epoll layout**~~ — **closed in 1.6.14.** `epoll_ev_size()` /
   `epoll_data_off()` (`src/server.cyr:111`/`:118`) now branch on the target, and
   `bench_loaders` asserts the writer and reader agree on whichever arch it runs.
@@ -889,7 +959,7 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is gate re-run #2**, not a milestone: see
+**Your next work is 1.7.11** (roadmap items AC and AD), not a milestone: see
 [`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
 is batched into. 2.0.0 (starting with M14) is gated behind a clean gate re-run. Joshua is post-1.0 backlog, not next.
 

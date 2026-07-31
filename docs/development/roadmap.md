@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-30 (v1.7.9 — the RX-side class closed; **next is gate re-run #2**, which is what decides whether 1.x can close)
+> **Last Updated**: 2026-07-31 (v1.7.10 — **gate re-run #2 returned DO-NOT-CLOSE**: 2 high, 3 medium, 3 low. Next is 1.7.11)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -31,8 +31,14 @@ ownership and fix size.
 | — | ~~1.7.7~~ | ~~2~~ | ✅ **Shipped.** Carried two existing fixes to the sites they were never applied to — `get` of a container (silent item loss at 199 against a cap of 100) · five listing verbs that truncated mid-line with no prompt | — |
 | — | ~~1.7.8~~ | ~~2~~ | ✅ **Shipped.** AGNOS saves never published (syscalls 82/87 are GPU calls there) · the pre-auth parse, 2,248 B/attempt → **0** · CI now builds `--agnos` | — |
 | — | ~~1.7.9~~ | ~~9~~ | ✅ **Shipped.** The RX-side class — a half-sent Telnet escape on a full queue, at the negotiation drain AND at the `WILL/WONT ECHO` sites every real client hits · the unguarded room-header prose · the class menu · `mob_swing` on the tick path. Item Y settled as **doc-only**, item AA carried | — |
-| 1 | [**gate re-run #2**](#the-gate--what-closes-the-1x-line) | — | **Next.** The first re-run returned **DO-NOT-CLOSE**; this is what decides whether the 1.x line closes | **yes** |
-| 2 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and the stateless-refusal amplifier — neither blocking | — |
+| — | ~~1.7.10~~ | — | ✅ **Shipped.** Toolchain `6.4.86 → 6.5.4` + a refreshed dependency snapshot. No source change; closed the **sakshi shadow gap** carried since 1.2.0 and the toolchain-drift warning | — |
+| — | ~~gate re-run #2~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **2 high**, 3 medium, 3 low. Nothing dropped; ten reports collapsed to eight distinct defects | — |
+| 1 | [**1.7.11**](#1711--the-two-highs) | 2 | **AC** a clean shutdown saves nobody (5 min of progress per player per restart) · **AD** a character can be persisted classless, and one `classes.cyml` typo does it to everyone, irreversibly | **yes** |
+| 2 | [**1.7.12**](#1712--persistence-integrity) | 2 | **AE** a refused duplicate login reverts the real session · **AF** the epoll batch teardown is unmetered — verbatim the 1.7.0 finding, never carried across | **yes** |
+| 3 | [**1.7.13**](#1713--the-tx-queue-class-as-one-edit) | 1 | **AG** the reserve is per-command, the queue is per-read — `examine`'s unbounded prose and cross-command accumulation, as one edit | **yes** |
+| 4 | [**1.7.14**](#1714--hygiene) | 2 | **AH** key material in never-wiped globals · **AI** the idle-reap budget | — |
+| 5 | [**gate re-run #3**](#the-gate--what-closes-the-1x-line) | — | And it must be allowed to **run the suite and the benches** — AF survived only because a bench fixture could not reach the code path | **yes** |
+| 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
@@ -52,6 +58,163 @@ behind the headline was loose in the same way as the comment it indicted.
 **The minimum credible 2.0 is M14 + M15 + M16** — the contract, the content
 ceiling, and progression. Everything from M17 on can slip without embarrassing
 the release.
+
+---
+
+## Open issues — gate re-run #2 returned DO-NOT-CLOSE (2026-07-31)
+
+**Ruling: DO-NOT-CLOSE. Critical 0, high 2, medium 3, low 3.** Five independent
+finders swept distinct surfaces; every candidate faced three skeptics with
+separate lenses (correctness / reachability / novelty) and had to survive a
+majority; the judge then reproduced each survivor against the shipped tree.
+**Nothing was dropped** — ten reports collapsed to **eight distinct defects**.
+
+**The pattern that matters more than any single item:** four of the eight are a
+rule this tree already applies somewhere else and did not apply here — the
+unmetered teardown is *verbatim* the 1.7.0 finding, fixed in `drain_pending_rx`
+and not carried to the epoll batch, in the release whose own comment says "ONE
+constant for BOTH dispatch sites, on purpose". That is the fourth consecutive
+sweep to report the same shape.
+
+### 1.7.11 — the two highs
+
+**AC. A clean shutdown saves nobody.** *(high)*
+
+- **What breaks.** `cmd_serve`'s exit is `println` → `audit_flush_all()` →
+  `sock_close(lfd)` → `return 0` ([`server.cyr:1834`](../../src/server.cyr:1834)).
+  It never walks `g_session_head`, and `handle_signal`
+  ([`:1474`](../../src/server.cyr:1474)) only sets `stop = 1`. Every `player_save`
+  call site in the tree — creation, the `save` verb, `save_sweep`, `drop_session`,
+  chpass — is on some other path. So **every connected player loses up to
+  `SAVE_SWEEP_MIN_MS` (5 minutes) of progress on every clean restart.**
+- **Can it happen today? Yes**, on every operator restart. Not peer-triggered,
+  which is why it is high and not critical.
+- **The docs promise the opposite.** [`running.md`](../guides/running.md) says
+  *"Shut down cleanly with SIGINT/SIGTERM; a `kill -9` is safe too"*, and
+  [ADR 0006](../adr/0006-persistence-shape.md)'s save-trigger list does not
+  include a signalled shutdown. The code draws no distinction the prose implies.
+- **Whose code.** Ours. **Fix size.** ~10 lines: one bounded walk of
+  `g_session_head` before `audit_flush_all()`, and the same on the AGNOS exit.
+
+**AD. A character can be persisted with no class, permanently, and one operator
+typo does it to everyone.** *(high — raised medium, re-graded up on reproduction)*
+
+- **What breaks.** `login_on_confirm` sets `SS_AUTHED = 1`
+  ([`persist.cyr:2343`](../../src/persist.cyr:2343)) **before** `PHASE_CLASS`
+  ([`:2348`](../../src/persist.cyr:2348)), and `drop_session`'s only gate is
+  `SS_AUTHED == 1` ([`server.cyr:833`](../../src/server.cyr:833)) followed by an
+  unconditional save. Disconnect at the class menu and a `class = -1` record is
+  written. **`PHASE_CLASS` is stored in exactly one place in the whole tree** —
+  that creation path — so there is no route back to the menu, ever. The record is
+  validly signed, so it loads forever, and the operator cannot repair it because
+  the signing key is derived from the player's passphrase (ADR 0004).
+- **The second trigger is the serious one.** `world_load_classes` unpublishes the
+  whole table on any failure (F6) and `cmd_serve` treats that as non-fatal —
+  *"no classes loaded — players spawn classless"*
+  ([`server.cyr:1659`](../../src/server.cyr:1659)). With the table empty, the load
+  path's `cls >= g_class_count → cls = -1` clamp demotes **every** character, and
+  the next `drop_session` writes that demotion to disk. **One typo in
+  `data/classes.cyml` plus a restart is playerbase-wide, irreversible loss.**
+- **Can it happen today? Yes**, both ways, with no malice.
+- **Whose code.** Ours. **Fix size.** Small but two-sided: refuse to persist a
+  `class < 0` record (or route such a login back to `PHASE_CLASS`), **and** make a
+  failed class-table load fatal, or suppress saves while `g_class_count == 0`.
+
+### 1.7.12 — persistence integrity
+
+**AE. A refused duplicate login reverts the real session's state.** *(medium)*
+
+- `player_auth_load` sets `SS_AUTHED = 1`
+  ([`persist.cyr:2051`](../../src/persist.cyr:2051)); the double-login refusal
+  ([`:2114`](../../src/persist.cyr:2114)) sets `SS_QUIT` and **never clears
+  `SS_AUTHED`**, so `drop_session` saves the duplicate's stale snapshot over the
+  live one.
+- **The window is wider than a single batch.** On the retained-line path
+  (`take == 0` once `EVENT_LINES_MAX` is spent), `drain_pending_rx` dispatches the
+  passphrase in its *else* arm — which sets `SS_QUIT` but does not drop — and
+  because that consume empties `SS_RX_LEN`, `g_rx_backlog` is not incremented and
+  the loop parks in `epoll_wait` for a full tick. The stale snapshot is held **up
+  to 2500 ms**, spanning a later batch, so a victim's `passwd` or `save` inside
+  that window is reverted.
+- **Item duplication was chased and REFUTED**: `session_drop_inv`
+  ([`item.cyr:115`](../../src/item.cyr:115)) frees the refused session's minted
+  copies rather than dropping them to the room.
+- Attacker must already hold the passphrase, so the impact is "a compromised
+  credential cannot be rotated away from", not takeover. **Fix size.** One line.
+
+**AF. The epoll batch's teardown is unmetered — verbatim the 1.7.0 finding, not
+carried across.** *(medium)*
+
+- `src/server.cyr:1768` drops on `keep == 0` with no `charge_spent()` consultation,
+  and the teardown consumes no line budget. The signature *is* counted
+  ([`persist.cyr:1573`](../../src/persist.cyr:1573)) but nothing reads it here;
+  `CHG_SIGN = 10` against `PASS_CHARGE_MAX = 20` means **64 batched drops spend 640
+  units inside a 20-unit window**. The AGNOS twin
+  ([`:1813`](../../src/server.cyr:1813)) walks every session with no
+  `MAX_EPOLL_EVENTS` analog.
+- **Why no instrument saw it:** `bench_tick_budget.bcyr` memsets its fixture, so
+  `SS_AUTHED` is 0 and the arm it would measure cannot fire. Fix the fixture with
+  the code.
+- Impact is drift, not loss. **Fix size.** Small; hoist the check, both loops.
+
+### 1.7.13 — the tx-queue class, as ONE edit
+
+**AG. The reserve is per-command; the queue is per-read.** *(medium / low)*
+
+- Two altitudes of one accounting error, and fixing either alone leaves the
+  mechanism intact:
+  - **`examine`'s authored prose is unbounded** —
+    [`session.cyr:1390`](../../src/session.cyr:1390) (mob) and
+    [`:1417`](../../src/session.cyr:1417) (object) are raw appends of a borrowed
+    `(ptr, len)`; `mob.cyr:310` and `item.cyr:236` store `cyml_entry_body()`
+    straight from the parse buffer with no `copy_str_capped`. This is the room
+    header 1.7.9 fixed, at the two siblings it did not reach.
+  - **Nothing flushes between the lines of one read**, so up to `RX_MAX_LINES = 8`
+    commands share one 4 kB queue while `room_line_fits` re-measures the 512-byte
+    reserve against the whole buffer each time. A malformed SGR and a lost prompt
+    per burst; recovers on the next read.
+- **Fix size.** Clamp both `examine` arms, cap `MT_DESC`/`OT_DESC` at the loader,
+  and either flush between lines or re-arm the reserve per dispatch.
+
+### 1.7.14 — hygiene
+
+**AH. Key material sits in never-wiped globals.** *(low)* — `ident_derive`
+([`persist.cyr:1265`](../../src/persist.cyr:1265)) leaves the passphrase at
+`g_ident_scratch + 16` and the Ed25519 seed at `+200`; `login_on_confirm` leaves a
+full 64-byte secret key at `g_persist_dec + 160`. Bump memory, never freed. No
+wire-reachable disclosure primitive, so low — but the tree already applies this
+rule at `sess_cand_clear` and `session_free`. **Three `memset`s.**
+
+**AI. `sweep_idle` charges unauthenticated reaps against a signature budget.**
+*(low)* — the decrement at [`server.cyr:894`](../../src/server.cyr:894) is
+unconditional while `IDLE_REAP_MAX`'s derivation says "every reap is a signature",
+which is untrue for exactly the pre-auth reaps `PREAUTH_TIMEOUT_MS` exists to
+serve. **One `if`.** Note this does *not* close slot exhaustion: a peer sending one
+byte every 29 s holds a slot regardless.
+
+### What this sweep had no instrument for
+
+Recorded so the next pass starts here rather than rediscovering it:
+
+1. **Nothing was executed.** Read-only meant no build, no suite, no bench, no
+   running server; every arithmetic claim is derived from source. **A pass allowed
+   to run the suite and the benches is the highest-value next step** — AF survived
+   precisely because a bench fixture could not reach the code path, which only a
+   run reveals.
+2. **`parser.cyr` (788 lines) and `combat.cyr` (409) had no owner.** The parser is
+   the tree's primary untrusted-input surface and got a spot check, not a sweep.
+3. **The AGNOS build is reasoned about, never exercised.** 1.7.8's finding came
+   from that gap and it is still open — AC and AF both have AGNOS twins judged by
+   reading two arms of a preprocessor.
+4. **Persisted state over TIME.** Everyone audited single load/save transactions;
+   nobody modelled create → play → crash → reload → rotate → shard-migrate. AD is
+   exactly that shape and was found by accident.
+5. **Cross-session consistency.** `cmd_give` mutates the recipient's `SS_INV` but
+   sets only the giver's `SS_SAVE_DIRTY`, so any save-boundary event — including
+   AC's shutdown — can leave two records disagreeing about who owns an object.
+   Item duplication across a restart is a whole class nobody instrumented.
+6. **The tree moved under the audit.** One area saw README/roadmap change mid-run
+   (legitimate 1.7.10 prose). **Tag the commit before the next gate.**
 
 ---
 

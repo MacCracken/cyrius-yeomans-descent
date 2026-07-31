@@ -17,23 +17,33 @@ Full design: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
 ## Status
 
-**v1.7.6 — feature-complete, maintained.** The full game loop is implemented and
+**v1.7.10 — feature-complete, maintained.** The full game loop is implemented and
 playable: the Telnet wire (RFC 854 / 1143), the verb-noun parser, a hand-authored
 21-room Hub zone, the 2.5 s combat tick with THAC0 hit/damage math, four playable
 classes with abilities, crash-safe player persistence (reconnect restores your
 attrs / room / inventory; survives a `kill -9`), and presence-gated zone resets.
 
 0.9.0 was a security sweep and 0.9.1 froze the public surface
-([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)). The **1.6.x line is an audit
-sweep** — 1.6.0 audited the tree and the fixes ran through 1.6.15, with two
-re-run sweeps along the way. A third sweep has since run and found **8 more
-items, two of them high**; **1.7.0 closed both highs** — the per-tick budgets are
-now bounded by counted crypto rather than a line count, and a wrong passphrase
-costs 7.5x less. The sweep line closes once a re-run comes back with nothing
-critical or high; see the
-[roadmap](docs/development/roadmap.md#open-issues--8) for every open finding with
-its impact and fix size, and [current state](docs/development/state.md) for the
-live snapshot.
+([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)). **Everything since 1.6.0 has
+been audit work** — 1.6.0 audited the tree and its fixes ran through 1.6.15, with
+two re-run sweeps along the way; a third (gate) sweep produced the 1.7.x line.
+
+**The first gate re-run returned DO-NOT-CLOSE** with five high findings, all now
+closed: a `get` of a container ignored its contents and could destroy items on the
+next save (1.7.7); five listing verbs ended mid-line with no prompt (1.7.6, 1.7.7);
+**the AGNOS build never published a player record at all**, because syscalls 82/87
+are GPU calls on that target (1.7.8); every login against an existing name
+permanently consumed 2.2 kB before the passphrase was checked (1.7.8); and the
+account cap stopped enforcing after records were sharded (1.7.6). 1.7.9 then closed
+the RX-side class those releases' own sweeps turned up — a full queue could put a
+half-sent Telnet escape on the wire — and 1.7.10 moved the toolchain to 6.5.4.
+
+**The line closes when a re-run comes back with nothing critical or high, not when
+a checklist reaches zero.** Three sweeps have run and every one found real defects
+the previous pass had no instrument for. See the
+[roadmap](docs/development/roadmap.md#what-is-left) for every open finding with its
+impact and fix size, and [current state](docs/development/state.md) for the live
+snapshot.
 
 ## Quick Start
 
