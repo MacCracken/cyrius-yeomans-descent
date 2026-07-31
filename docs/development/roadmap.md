@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.12 — AE and AF closed; **AG + AH/AI remain**, then gate re-run #3)
+> **Last Updated**: 2026-07-31 (v1.7.13 — AG closed; **only AH/AI (low) remain**, then gate re-run #3)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -35,7 +35,7 @@ ownership and fix size.
 | — | ~~gate re-run #2~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **2 high**, 3 medium, 3 low. Nothing dropped; ten reports collapsed to eight distinct defects | — |
 | — | ~~1.7.11~~ | ~~2~~ | ✅ **Shipped.** **AC** shutdown now saves every live session (verified against a running server) · **AD** closed at all three points — the disconnect gate, the login heal for records already on disk, and a fatal boot on an empty class table | — |
 | — | ~~1.7.12~~ | ~~2~~ | ✅ **Shipped.** **AE** the refused duplicate now disowns the record · **AF** both batch loops charge the teardown — and `bench_tick_budget` gained the arm that could not fire, which now FAILS at 118% of the drift allowance when reverted | — |
-| 3 | [**1.7.13**](#1713--the-tx-queue-class-as-one-edit) | 1 | **AG** the reserve is per-command, the queue is per-read — `examine`'s unbounded prose and cross-command accumulation, as one edit | **yes** |
+| — | ~~1.7.13~~ | ~~1~~ | ✅ **Shipped.** **AG** both altitudes — `examine`'s borrowed bodies now share one clamp with the room header, and the header/exits decline whole so accumulation across a read cannot run the queue dry | — |
 | 4 | [**1.7.14**](#1714--hygiene) | 2 | **AH** key material in never-wiped globals · **AI** the idle-reap budget | — |
 | 5 | [**gate re-run #3**](#the-gate--what-closes-the-1x-line) | — | And it must be allowed to **run the suite and the benches** — AF survived only because a bench fixture could not reach the code path | **yes** |
 | 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
@@ -200,9 +200,29 @@ carried across.** *(medium — CLOSED in 1.7.12)*
   the code.
 - Impact is drift, not loss. **Fix size.** Small; hoist the check, both loops.
 
-### 1.7.13 — the tx-queue class, as ONE edit
+### ✅ 1.7.13 — the tx-queue class, as ONE edit (SHIPPED)
 
-**AG. The reserve is per-command; the queue is per-read.** *(medium / low)*
+Item AG is **closed**, both altitudes. 1295 assertions (was 1270), 7/7 mutations
+killed.
+
+**Measured before and after:** a 6000-byte authored mob body took the queue from
+**4096 (run dry, no prompt) to 3606**; eight `look`s in a busy room from **4096
+(last reply cut mid-number) to 3646**. Both keep their prompt.
+
+**The clamp is a function now.** 1.7.9 fixed the room header *inline*, which is
+exactly why the two `examine` arms were missed — `session_append_bounded` is the
+one implementation, and the room header uses it too.
+
+**Two alternatives were rejected, both on 1.7.9's lesson:** flushing between
+dispatched lines undoes 1.6.8's coalescing (81 ms → 27 ms on the 256-player
+broadcast), and refusing to dispatch while the queue is full couples input to
+output and deadlocks. Bounding what is WRITTEN has neither problem. The
+roadmap's suggested loader cap was also declined: the descriptions are zero-copy
+borrows, so a loader cap saves no memory and only adds a second place to be wrong.
+
+### 1.7.13 — the item (detail, retained)
+
+**AG. The reserve is per-command; the queue is per-read.** *(medium / low — CLOSED in 1.7.13)*
 
 - Two altitudes of one accounting error, and fixing either alone leaves the
   mechanism intact:

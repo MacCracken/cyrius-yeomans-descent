@@ -3,13 +3,46 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.12 — AE and AF closed; **AG + AH/AI remain**, then gate re-run #3)
+> **Last refresh**: 2026-07-31 (v1.7.13 — AG closed; **only AH/AI (low) remain**, then gate re-run #3)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.13** — 2026-07-31. **1295 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build; **7/7 mutations killed**.
+
+**The reserve is per-command; the queue is per-read.** One accounting error at two
+altitudes, fixed as one edit because either alone leaves the mechanism.
+
+**`examine` rendered authored bodies unbounded** — mob and object descriptions are
+raw `(ptr, len)` borrowed from the parsed CYML buffer with no `copy_str_capped` on
+the path, and `item_new` propagates the object pointer into every instance. A
+6000-byte body ran the queue dry and the prompt never arrived. 1.7.9 had fixed the
+same thing for the room header and clamped it INLINE, which is why the two
+`examine` arms were missed; the clamp is now `session_append_bounded`, shared.
+
+**Output accumulated across a whole read.** Nothing flushes between the lines of
+one read — 1.6.8 coalesced writes on purpose — so eight commands share one 4 kB
+queue while `room_line_fits` re-measures its reserve against the whole buffer each
+time. Eight `look`s in a busy room ran it dry, the last reply cut mid-number
+inside its own truncation notice. The header and exits line now decline whole.
+
+**Lessons carried, added this release:**
+
+- *Clamp once, in a function.* Three call sites needed the same bound and the
+  fourth was missed because the third was written inline. An inline fix is a fix
+  that cannot be reused, and this tree keeps finding the sites that reuse would
+  have covered.
+- *A guard with two callers, tested through one, is a guard tested through none.*
+  The exits guard survived mutation because `session_show_room` returns before
+  reaching it — but the `exits` VERB calls it directly, and that is the path where
+  it earns its place.
+- *A fixture that cannot distinguish the guard from its absence proves nothing.*
+  That assertion first filled the queue to one byte past the reserve line, where
+  the line still fits, and so passed with the guard deleted.
 
 **1.7.12** — 2026-07-31. **1270 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build; **5/5 mutations killed**.
@@ -747,7 +780,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (1270 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (1295 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -790,7 +823,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **1270** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **1295** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -990,10 +1023,9 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
-**Next: 1.7.13** — the tx-queue class as ONE edit (roadmap **AG**): `examine`'s
-unbounded authored prose and the per-read queue accumulation are two altitudes of
-one accounting error, and fixing either alone leaves the mechanism. Then 1.7.14
-(hygiene, **AH** and **AI**), then gate re-run #3 — which must be allowed to **run the suite and
+**Next: 1.7.14** — hygiene, the last two items from gate re-run #2 (roadmap **AH**
+key material in never-wiped globals, three `memset`s; **AI** the idle-reap budget,
+one `if`). Then gate re-run #3 — which must be allowed to **run the suite and
 the benches**, because AF survived only because a bench fixture could not reach
 the code path it measures.
 
@@ -1033,7 +1065,7 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is 1.7.13** (roadmap item AG), not a milestone: see
+**Your next work is 1.7.14** (roadmap items AH and AI), not a milestone: see
 [`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
 is batched into. 2.0.0 (starting with M14) is gated behind a clean gate re-run. Joshua is post-1.0 backlog, not next.
 

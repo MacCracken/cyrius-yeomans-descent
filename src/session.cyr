@@ -1230,6 +1230,10 @@ fn session_append_mobs(s, room): i64 {
 # Append the exits line for room `r` (cyan label, dir words). Shared by
 # session_show_room and the `exits` verb.
 fn session_append_exits(s, r): i64 {
+    # 1.7.13 — bounded by NDIR and short, but "short" is not "free": across the
+    # RX_MAX_LINES commands that share one queue between flushes, the unguarded
+    # bytes are what actually consume the tail reserve. Whole line or none.
+    if (room_line_fits(s, 16 + NDIR * 12) == 0) { return 0; }
     session_appendtx_cstr(s, ansi_exits());
     session_appendtx_cstr(s, "Exits:");
     var any = 0;
@@ -1260,6 +1264,23 @@ fn session_show_room(s): i64 {
     if (world_room_count() == 0) { return 0; }
     var r = room_at(room);
 
+    # === 1.7.13 — THE RESERVE IS PER-COMMAND; THE QUEUE IS PER-READ. ===
+    #
+    # Nothing flushes between the lines of a single read — 1.6.8 coalesced writes
+    # to one per session per tick on purpose, and that is worth keeping — so up to
+    # RX_MAX_LINES = 8 commands share one 4 kB queue, while `room_line_fits`
+    # re-measures the 512-byte reserve against the WHOLE buffer each time. Each
+    # look's guarded sections stop correctly at the reserve line; what accumulates
+    # is the ~260 bytes of header, exits and prompt that no check covered.
+    # Measured: eight `look`s in a busy room ran the queue dry at 4096, with the
+    # last reply cut mid-number inside its own "...and 120 more items" tail.
+    #
+    # Fixed on the OUTPUT side only, which is 1.7.9's lesson restated: refusing to
+    # READ while the queue is full couples input to output and deadlocks. So a
+    # room display that cannot fit declines WHOLE — a short reply, never a
+    # fragment — and the reserve it leaves untouched is what carries the prompt.
+    var head_need = 4 + strlen(ansi_title()) + room_title_len(r) + strlen(ansi_reset());
+    if (room_line_fits(s, head_need) == 0) { return 0; }
     session_appendtx_cstr(s, "\r\n");
     session_appendtx_cstr(s, ansi_title());
     session_appendtx(s, room_title_ptr(r), room_title_len(r));
@@ -1278,12 +1299,7 @@ fn session_show_room(s): i64 {
     # Operator-authored content rather than player input, so this is a robustness
     # bound, not an attack surface — which is why it truncates and says so rather
     # than refusing the room.
-    var plen = room_prose_len(r);
-    var avail = TX_CAP - ROOM_TAIL_RESERVE - load64(s + SS_TX_LEN) - 6;   # 6: " ...\r\n"
-    if (avail < 0) { avail = 0; }
-    if (plen > avail) { plen = avail; }
-    session_appendtx(s, room_prose_ptr(r), plen);
-    if (plen < room_prose_len(r)) { session_appendtx_cstr(s, " ..."); }
+    session_append_bounded(s, room_prose_ptr(r), room_prose_len(r));   # 1.7.13 — shared
     session_appendtx_cstr(s, "\r\n");
     session_append_exits(s, r);
     session_append_objs(s, room);   # forward ref → item.cyr
@@ -1387,7 +1403,13 @@ fn cmd_examine(s, pa): i64 {
         session_appendtx_cstr(s, ansi_reset());
         session_appendtx_cstr(s, "\r\n");
         if (mt_desc_len(tpl) > 0) {
-            session_appendtx(s, mt_desc_ptr(tpl), mt_desc_len(tpl));
+            # 1.7.13 — clamped, exactly as the room header was in 1.7.9 and for the
+            # same reason: MT_DESC is a raw (ptr, len) borrowed straight from the
+            # parsed CYML buffer (mob.cyr `MT_DESC_PTR`), with no `copy_str_capped`
+            # anywhere on the path. Measured before the fix: a 6000-byte authored
+            # mob body ran the queue dry at 4096 and the PROMPT never arrived.
+            # 1.7.9 fixed the room header and did not reach the two `examine` arms.
+            session_append_bounded(s, mt_desc_ptr(tpl), mt_desc_len(tpl));
             session_appendtx_cstr(s, "\r\n");
         }
         session_appendtx_cstr(s, "It looks ");
@@ -1414,7 +1436,11 @@ fn cmd_examine(s, pa): i64 {
         session_appendtx_cstr(s, ansi_reset());
         session_appendtx_cstr(s, "\r\n");
         if (oi_desc_len(o) > 0) {
-            session_appendtx(s, oi_desc_ptr(o), oi_desc_len(o));
+            # 1.7.13 — the object twin of the clamp above. OT_DESC is borrowed the
+            # same way (item.cyr `OT_DESC_PTR`) and `item_new` propagates the
+            # pointer verbatim into every instance, so one authored body reaches
+            # every copy of that object in the world.
+            session_append_bounded(s, oi_desc_ptr(o), oi_desc_len(o));
             session_appendtx_cstr(s, "\r\n");
         }
         return 0;
@@ -1770,6 +1796,29 @@ fn session_appendtx_atomic(s, buf, len): i64 {
 # The cstring form, for fixed server literals that must not arrive in pieces.
 fn session_appendtx_atomic_cstr(s, cstr): i64 {
     return session_appendtx_atomic(s, cstr, strlen(cstr));
+}
+
+# Append as much of `buf` as leaves the tail reserve intact, and say so if it cut.
+#
+# The complement to `session_appendtx_atomic`: that one is for INDIVISIBLE things
+# (a Telnet escape means nothing in halves), this one is for authored PROSE, where
+# a short read is merely short. Both exist so that no caller has to reach for the
+# raw truncating `session_appendtx` and hope.
+#
+# 1.7.13 — the borrowed-body class. Room prose, mob descriptions and object
+# descriptions are all raw (ptr, len) borrowed straight from the parsed CYML
+# buffer with no `copy_str_capped` on the path, so their length is whatever an
+# operator authored. 1.7.9 clamped the room header inline; doing the same thing a
+# third and fourth time by hand is how the two `examine` arms got missed, so the
+# clamp is a function now and the room header uses it too.
+fn session_append_bounded(s, buf, len): i64 {
+    var avail = TX_CAP - ROOM_TAIL_RESERVE - load64(s + SS_TX_LEN) - 4;   # 4: " ..."
+    if (avail < 0) { avail = 0; }
+    var take = len;
+    if (take > avail) { take = avail; }
+    if (take > 0) { session_appendtx(s, buf, take); }
+    if (take < len) { session_appendtx_atomic_cstr(s, " ..."); }
+    return take;
 }
 
 fn session_consume_rx_max(s, maxlines, out_fired): i64 {

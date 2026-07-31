@@ -6238,6 +6238,7 @@ fn main() {
     test_rx_bounds();
     test_tick_and_menu_bounds();
     test_shutdown_and_class_guard();
+    test_queue_per_read();
 
 
     return assert_summary();
@@ -7556,6 +7557,186 @@ fn test_shutdown_and_class_guard(): i64 {
     return 0;
 }
 
+
+# === 1.7.13 — the reserve is per-command; the queue is per-read. ===
+#
+# One accounting error at two altitudes, which is why the roadmap insisted this
+# be ONE edit: fixing either alone leaves the mechanism intact.
+#
+# **Altitude 1 — borrowed authored bodies.** Room prose, mob descriptions and
+# object descriptions are raw `(ptr, len)` borrowed straight from the parsed CYML
+# buffer, with no `copy_str_capped` anywhere on the path — so their length is
+# whatever an operator authored, and `item_new` propagates the object pointer
+# verbatim into every instance. 1.7.9 clamped the room header INLINE and did not
+# reach the two `examine` arms. MEASURED before this release: a 6000-byte mob body
+# ran the queue dry at 4096 and the prompt never arrived.
+#
+# **Altitude 2 — accumulation across one read.** Nothing flushes between the lines
+# of a single read (1.6.8 coalesced writes to one per session per tick, on
+# purpose), so up to RX_MAX_LINES = 8 commands share one 4 kB queue while
+# `room_line_fits` re-measures its 512-byte reserve against the whole buffer each
+# time. Every guarded section stops correctly; what accumulated was the ~260 bytes
+# of header, exits and prompt that no check covered. MEASURED: eight `look`s in a
+# busy room ran the queue dry at 4096, the last reply cut mid-number inside its
+# own "...and 120 more items" tail.
+#
+# Both fixed on the OUTPUT side only — 1.7.9's lesson restated, because refusing
+# to READ while the queue is full couples input to output and deadlocks.
+fn test_queue_per_read(): i64 {
+    test_group("queue-per-read");
+
+    if (g_obj_tpl_count == 0) { assert(0, "queue-per-read: needs object templates"); return 0; }
+    if (g_mob_tpl_count == 0) { assert(0, "queue-per-read: needs mob templates"); return 0; }
+    if (world_room_count() == 0) { assert(0, "queue-per-read: needs a zone"); return 0; }
+
+    # --- session_append_bounded over its domain. The complement to
+    # session_appendtx_atomic: that one is for indivisible sequences, this one for
+    # prose, where a short read is merely short.
+    var b = _freeable_sess();
+    _tx_reset(b);
+    var src = alloc(200);
+    memset(src, 65, 200);                       # 200 'A'
+    assert_eq(session_append_bounded(b, src, 10), 10, "a short body is written whole");
+    assert_eq(load64(b + SS_TX_LEN), 10, "...with no marker");
+    assert_eq(_contains(load64(b + SS_TX_BUF), load64(b + SS_TX_LEN), " ..."), 0,
+              "...and nothing claiming it was cut");
+    _tx_reset(b);
+    store64(b + SS_TX_LEN, TX_CAP - ROOM_TAIL_RESERVE - 4);
+    assert_eq(session_append_bounded(b, src, 200), 0,
+              "at the reserve line it writes NOTHING of the body");
+    assert(load64(b + SS_TX_LEN) < TX_CAP, "...and never runs the queue dry");
+    assert_eq(_contains(load64(b + SS_TX_BUF), load64(b + SS_TX_LEN), " ..."), 1,
+              "...but does say it was cut");
+    session_free(b);
+
+    # --- ALTITUDE 1. An authored body far larger than the whole queue.
+    var s = _freeable_sess();
+    store64(s + SS_ROOM, 0);
+    store64(s + SS_PHASE, PHASE_CMD);
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_AUTHED, 1);
+
+    var m = mob_spawn(mt_at(0), 0);
+    var tpl = mi_tpl(m);
+    var oldp = load64(tpl + MT_DESC_PTR);
+    var oldl = load64(tpl + MT_DESC_LEN);
+    var huge = alloc(6000);
+    memset(huge, 46, 6000);                     # 6000 '.'
+    store64(tpl + MT_DESC_PTR, huge);
+    store64(tpl + MT_DESC_LEN, 6000);
+    _tx_reset(s);
+    cmd_on_line(s, "examine scavver", 15);
+    var n = load64(s + SS_TX_LEN);
+    var tx = load64(s + SS_TX_BUF);
+    assert(n < TX_CAP, "an oversized MOB description never runs the queue dry");
+    assert_eq(_contains(tx, n, "> "), 1,
+              "...and the PROMPT reaches the client, which it did not before 1.7.13");
+    assert_eq(_contains(tx, n, " ..."), 1, "...and the body says it was cut");
+    store64(tpl + MT_DESC_PTR, oldp);
+    store64(tpl + MT_DESC_LEN, oldl);
+    mob_remove(m);
+
+    # The object arm is a separate call site and needs its own assertion — being
+    # the sibling that 1.7.9 missed is precisely how this defect survived.
+    var slot = room_at(0) + RM_OBJ_HEAD;
+    var pre = load64(slot);
+    store64(slot, 0);
+    var ob = item_new(ot_at(0));
+    var oldop = load64(ob + OI_DESC_PTR);
+    var oldol = load64(ob + OI_DESC_LEN);
+    store64(ob + OI_DESC_PTR, huge);
+    store64(ob + OI_DESC_LEN, 6000);
+    ilist_push(slot, ob);
+    _tx_reset(s);
+    cmd_on_line(s, "examine scrip", 13);
+    n = load64(s + SS_TX_LEN); tx = load64(s + SS_TX_BUF);
+    assert(n < TX_CAP, "an oversized OBJECT description never runs the queue dry either");
+    assert_eq(_contains(tx, n, "> "), 1, "...and it also keeps its prompt");
+    assert_eq(_contains(tx, n, " ..."), 1, "...and says it was cut");
+    store64(ob + OI_DESC_PTR, oldop); store64(ob + OI_DESC_LEN, oldol);
+    _drain_ilist(slot);
+
+    # An ordinary authored description is untouched.
+    store64(slot, 0);
+    ilist_push(slot, item_new(ot_at(0)));
+    _tx_reset(s);
+    cmd_on_line(s, "examine scrip", 13);
+    n = load64(s + SS_TX_LEN); tx = load64(s + SS_TX_BUF);
+    assert_eq(_contains(tx, n, " ..."), 0, "an authored description is not truncated");
+    assert_eq(_contains(tx, n, "> "), 1, "...and still prompts");
+    _drain_ilist(slot);
+
+    # --- ALTITUDE 2. Eight commands through ONE read, in a room whose own listing
+    # already reaches the reserve line. This is the case the per-command reserve
+    # cannot see, because it re-measures against the whole buffer every time.
+    store64(slot, 0);
+    var made = 0;
+    while (made < 120) { ilist_push(slot, item_new(ot_at(2))); made = made + 1; }
+
+    _tx_reset(s);
+    var rx = load64(s + SS_RX_BUF);
+    var o = 0;
+    var c = 0;
+    while (c < RX_MAX_LINES) {
+        store8(rx + o, 108); store8(rx + o + 1, 111);
+        store8(rx + o + 2, 111); store8(rx + o + 3, 107);      # "look"
+        store8(rx + o + 4, 13);                                 # CR
+        o = o + 5;
+        c = c + 1;
+    }
+    store64(s + SS_RX_LEN, o);
+    var fired[8];
+    session_consume_rx_max(s, RX_MAX_LINES, &fired);
+    n = load64(s + SS_TX_LEN); tx = load64(s + SS_TX_BUF);
+
+    assert_eq(load64(&fired), RX_MAX_LINES, "all eight commands really did dispatch");
+    assert(n < TX_CAP,
+           "THE ASSERTION THIS GROUP EXISTS FOR: eight commands in one read never run the queue dry");
+    assert_eq(_contains(tx, n, "> "), 1, "...and a prompt still reaches the client");
+    # The stream must not end mid-escape — the failure mode a run-dry queue
+    # produces, and the one 1.7.6 shipped a release to remove from `look`.
+    var t1 = load8(tx + n - 1) & 0xFF;
+    var t2 = load8(tx + n - 2) & 0xFF;
+    assert(t1 != 27, "the stream does not end ON an ESC");
+    assert(t2 != 27, "...nor one byte into an escape sequence");
+
+    # THE `exits` VERB REACHES session_append_exits WITHOUT the room header's
+    # guard in front of it (session.cyr, VERB_EXITS), so that guard is load-bearing
+    # on its own and needs its own case. The first version of this group had none,
+    # and the mutation that deletes it SURVIVED — a guard with two callers tested
+    # through only one is a guard tested through none.
+    _tx_reset(s);
+    var fill = 0;
+    # Filled to within 24 bytes of the cap — not an arbitrary number: this is the
+    # state accumulation across one read actually produces, and the only fill at
+    # which the guard is distinguishable from its absence. A gentler fixture (say,
+    # one byte past the reserve line) leaves the exits line still fitting, so it
+    # passes with the guard deleted — which is how the first attempt at this
+    # assertion let the mutation survive.
+    while (fill < TX_CAP - 24) { session_appendtx_cstr(s, "x"); fill = fill + 1; }
+    cmd_on_line(s, "exits", 5);
+    n = load64(s + SS_TX_LEN); tx = load64(s + SS_TX_BUF);
+    assert(n < TX_CAP, "the `exits` verb at the reserve line never runs the queue dry");
+    assert_eq(_contains(tx, n, "> "), 1, "...and its prompt still fits");
+    # With room, it answers in full.
+    _tx_reset(s);
+    cmd_on_line(s, "exits", 5);
+    n = load64(s + SS_TX_LEN); tx = load64(s + SS_TX_BUF);
+    assert_eq(_contains(tx, n, "Exits:"), 1, "...and with room it answers in full");
+
+    # A SINGLE look in the same busy room is still complete — the fix must ration
+    # the eighth reply, not the first, or it would have broken ordinary play.
+    _tx_reset(s);
+    cmd_on_line(s, "look", 4);
+    n = load64(s + SS_TX_LEN); tx = load64(s + SS_TX_BUF);
+    assert_eq(_contains(tx, n, "Exits:"), 1, "one look in a busy room still shows its exits");
+    assert_eq(_contains(tx, n, "more items lie here."), 1, "...and its truncation notice");
+    assert_eq(_contains(tx, n, "> "), 1, "...and its prompt");
+
+    _drain_ilist(slot); store64(slot, pre);
+    session_free(s);
+    return 0;
+}
 
 var exit_code = main();
 syscall(60, exit_code);

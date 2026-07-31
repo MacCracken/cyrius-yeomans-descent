@@ -42,6 +42,76 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 allowed to run the suite and the benches.**
 
 
+## [1.7.13] — 2026-07-31
+
+**The reserve is per-command; the queue is per-read.** 1295 assertions (was
+1270); `cyrius audit` exits 0; 6/6 benches; both targets build; **7/7 mutations
+killed**.
+
+One accounting error at two altitudes — which is why the roadmap insisted this be
+a single edit. Fixing either alone leaves the mechanism intact.
+
+### Fixed
+
+- **Altitude 1 — `examine` rendered authored bodies unbounded.** Room prose, mob
+  descriptions and object descriptions are all raw `(ptr, len)` borrowed straight
+  from the parsed CYML buffer, with no `copy_str_capped` anywhere on the path, so
+  their length is whatever an operator authored — and `item_new` propagates the
+  object pointer verbatim into every instance of that object. **Measured: a
+  6000-byte mob body ran the queue dry at 4096 and the prompt never arrived.**
+
+  1.7.9 fixed exactly this for the room header and clamped it **inline**, which is
+  why the two `examine` arms were missed. The clamp is now a function —
+  `session_append_bounded` — and the room header uses it too, so there is one
+  implementation rather than a fourth hand-written copy waiting to be forgotten.
+
+- **Altitude 2 — output accumulated across a whole read.** Nothing flushes between
+  the lines of one read (1.6.8 coalesced writes to one per session per tick, and
+  that is worth keeping), so up to `RX_MAX_LINES = 8` commands share one 4 kB
+  queue while `room_line_fits` re-measures its 512-byte reserve against the
+  **whole buffer** each time. Every guarded section stopped correctly; what
+  accumulated was the ~260 bytes of header, exits and prompt that no check
+  covered. **Measured: eight `look`s in a busy room ran the queue dry at 4096,
+  the last reply cut mid-number inside its own "...and 120 more items" tail.**
+
+  The room display and the exits line now decline **whole** rather than emit a
+  fragment, so the reserve they leave untouched is what carries the prompt.
+
+  | | before | after |
+  |---|---|---|
+  | `examine`, 6000 B authored body | 4096 — run dry, **no prompt** | 3606, prompt |
+  | 8 × `look` in a busy room | 4096 — run dry, reply cut mid-number | 3646, prompt |
+
+### Notes
+
+- **Fixed on the OUTPUT side only, which is 1.7.9's lesson restated.** The obvious
+  alternative — flush between dispatched lines, or stop dispatching when the queue
+  is full — was rejected twice over: flushing per line undoes 1.6.8's coalescing
+  (the change that took the 256-player broadcast from 81 ms to 27 ms), and
+  refusing to dispatch while the queue is full couples input to output and
+  deadlocks in precisely the way 1.7.9's first draft did. Bounding what is written
+  has neither problem.
+
+- **The loader cap was considered and deliberately not taken.** The roadmap
+  suggested capping `MT_DESC` / `OT_DESC` at load. The descriptions are
+  *zero-copy borrows* into a buffer that is already resident, so a loader cap
+  saves no memory and only adds a second place for the length to be wrong — while
+  silently discarding authored text that a future paginated reader could use.
+  Clamping at render is necessary and sufficient, and matches what 1.7.9 chose for
+  room prose.
+
+- **A guard with two callers, tested through one, is a guard tested through none.**
+  The exits-line guard survived its first mutation because `session_show_room`
+  returns before reaching it — but the `exits` VERB calls
+  `session_append_exits` directly, with no header check in front of it. That
+  second path is where the guard earns its place, and it had no test.
+
+- **A fixture that cannot distinguish the guard from its absence proves nothing.**
+  The first attempt at that assertion filled the queue to one byte past the
+  reserve line, where the exits line still fits — so it passed with the guard
+  deleted. It now fills to within 24 bytes of the cap, which is the state
+  accumulation across one read actually produces.
+
 ## [1.7.12] — 2026-07-31
 
 **Persistence integrity, and the bench that could not see the defect it was
