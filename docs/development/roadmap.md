@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.10 — **gate re-run #2 returned DO-NOT-CLOSE**: 2 high, 3 medium, 3 low. Next is 1.7.11)
+> **Last Updated**: 2026-07-31 (v1.7.11 — gate re-run #2's **two highs are closed**; 3 medium + 3 low remain, then gate re-run #3)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -33,7 +33,7 @@ ownership and fix size.
 | — | ~~1.7.9~~ | ~~9~~ | ✅ **Shipped.** The RX-side class — a half-sent Telnet escape on a full queue, at the negotiation drain AND at the `WILL/WONT ECHO` sites every real client hits · the unguarded room-header prose · the class menu · `mob_swing` on the tick path. Item Y settled as **doc-only**, item AA carried | — |
 | — | ~~1.7.10~~ | — | ✅ **Shipped.** Toolchain `6.4.86 → 6.5.4` + a refreshed dependency snapshot. No source change; closed the **sakshi shadow gap** carried since 1.2.0 and the toolchain-drift warning | — |
 | — | ~~gate re-run #2~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **2 high**, 3 medium, 3 low. Nothing dropped; ten reports collapsed to eight distinct defects | — |
-| 1 | [**1.7.11**](#1711--the-two-highs) | 2 | **AC** a clean shutdown saves nobody (5 min of progress per player per restart) · **AD** a character can be persisted classless, and one `classes.cyml` typo does it to everyone, irreversibly | **yes** |
+| — | ~~1.7.11~~ | ~~2~~ | ✅ **Shipped.** **AC** shutdown now saves every live session (verified against a running server) · **AD** closed at all three points — the disconnect gate, the login heal for records already on disk, and a fatal boot on an empty class table | — |
 | 2 | [**1.7.12**](#1712--persistence-integrity) | 2 | **AE** a refused duplicate login reverts the real session · **AF** the epoll batch teardown is unmetered — verbatim the 1.7.0 finding, never carried across | **yes** |
 | 3 | [**1.7.13**](#1713--the-tx-queue-class-as-one-edit) | 1 | **AG** the reserve is per-command, the queue is per-read — `examine`'s unbounded prose and cross-command accumulation, as one edit | **yes** |
 | 4 | [**1.7.14**](#1714--hygiene) | 2 | **AH** key material in never-wiped globals · **AI** the idle-reap budget | — |
@@ -76,9 +76,31 @@ and not carried to the epoll batch, in the release whose own comment says "ONE
 constant for BOTH dispatch sites, on purpose". That is the fourth consecutive
 sweep to report the same shape.
 
-### 1.7.11 — the two highs
+### ✅ 1.7.11 — the two highs (SHIPPED)
 
-**AC. A clean shutdown saves nobody.** *(high)*
+Items AC and AD are **closed**. 1259 assertions (was 1229), 10/10 mutations
+killed, `cyrius audit` 0, 6/6 benches, both targets build.
+
+**Both were verified against a running server, not only in the suite.** A player
+holding an item across a SIGTERM now produces `server: saved 1 session(s) on
+shutdown` with `inv = "notice"` on disk; a `kind = "clas"` typo in
+`data/classes.cyml` makes the server refuse to start with **exit code 1** instead
+of silently demoting every character on load.
+
+**AD needed all three fixes, and any one alone leaves a hole:** the disconnect
+gate stops new classless records, the **login heal** repairs the ones already on
+disk (nothing else can — records are signed with a key the server never holds),
+and the fatal boot stops the operator-typo path that demotes everyone at once.
+
+**The lesson this release paid for:** mutation testing showed that removing the
+`shutdown_save_all()` **call**, and removing the fatal boot check, each broke
+**no test** — because the suite cannot run `cmd_serve`. That is *exactly what AC
+was*: the function existed, and nothing called it. Both call sites are now
+asserted from the source, as 1.7.8 does for the raw-syscall class.
+
+### 1.7.11 — the two items (detail, retained)
+
+**AC. A clean shutdown saves nobody.** *(high — CLOSED in 1.7.11)*
 
 - **What breaks.** `cmd_serve`'s exit is `println` → `audit_flush_all()` →
   `sock_close(lfd)` → `return 0` ([`server.cyr:1834`](../../src/server.cyr:1834)).
@@ -97,7 +119,7 @@ sweep to report the same shape.
   `g_session_head` before `audit_flush_all()`, and the same on the AGNOS exit.
 
 **AD. A character can be persisted with no class, permanently, and one operator
-typo does it to everyone.** *(high — raised medium, re-graded up on reproduction)*
+typo does it to everyone.** *(high — CLOSED in 1.7.11)*
 
 - **What breaks.** `login_on_confirm` sets `SS_AUTHED = 1`
   ([`persist.cyr:2343`](../../src/persist.cyr:2343)) **before** `PHASE_CLASS`

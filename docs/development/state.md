@@ -3,13 +3,52 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.10 — **gate re-run #2 returned DO-NOT-CLOSE**: 2 high, 3 medium, 3 low. See roadmap items AC-AI; next is 1.7.11)
+> **Last refresh**: 2026-07-31 (v1.7.11 — gate re-run #2's **two highs are closed**; 3 medium + 3 low remain (AE-AI), then gate re-run #3)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.11** — 2026-07-31. **1259 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build; **10/10 mutations killed**.
+
+**The two highs from gate re-run #2**, both operator-facing data loss, neither
+needing an attacker.
+
+**A clean shutdown saved nobody.** `cmd_serve`'s exit never walked
+`g_session_head`, so SIGINT/SIGTERM discarded up to five minutes of progress for
+every connected player, on every restart — while `running.md` promised the
+opposite and ADR 0006's trigger list did not mention shutdown at all. Verified
+live: a player holding an item across SIGTERM now yields
+`server: saved 1 session(s) on shutdown` with the item on disk.
+
+**A character could be persisted with no class, permanently.** `SS_AUTHED` is set
+before the class menu and `drop_session` gated on it alone, so closing the window
+at the menu wrote `class = -1` — and `PHASE_CLASS` is stored in exactly one place
+in the tree, so nothing ever sent a player back. Worse, a failed `classes.cyml`
+load was non-fatal, which demoted **every** character on load and wrote it to disk
+on the next disconnect. Closed at three points: the disconnect gate, a **login
+heal** for records already on disk, and a fatal boot (exit 1) on an empty table.
+
+**Lessons carried, added this release:**
+
+- *A guard the suite cannot reach is a guard that is not there.* Mutation testing
+  showed that deleting the `shutdown_save_all()` **call site**, and deleting the
+  fatal boot check, each broke **no test** — the suite cannot run `cmd_serve`,
+  which parks in `epoll_wait`. That is precisely what AC was: every save path in
+  the tree existed and none was wired to shutdown. Both call sites are now
+  asserted by reading the source, as 1.7.8 does for raw syscalls. **When the
+  failure is invisible to every instrument you have, build the instrument.**
+- *Fix the record you already wrote, not just the code that wrote it.* A save-side
+  guard alone would have left every existing classless record unrepairable,
+  because the operator cannot re-sign a player's file. The load-path heal is the
+  half that reaches them.
+- *A group that asserts ABSENCE is the easiest place to leave a landmine.* This
+  release's own mutation passes — which run with the guards removed — wrote the
+  very records the tests assert are absent, poisoning every later run until the
+  group learned to unlink its fixtures first.
 
 **1.7.10** — 2026-07-30. **1229 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build. **No source change.**
@@ -674,7 +713,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (1229 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (1259 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -717,7 +756,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **1229** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **1259** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -917,11 +956,11 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
-**Next: 1.7.11** — the two highs from gate re-run #2 (roadmap **AC** and **AD**),
-which are independent of each other and of everything below. Ship them alone and
-re-run the gate. Then 1.7.12-1.7.14 for the mediums and lows, then gate re-run #3
-— which must be allowed to **run the suite and the benches**, because item AF
-survived only because a bench fixture could not reach the code path it measures.
+**Next: 1.7.12** — the persistence-integrity mediums (roadmap **AE** and **AF**).
+Then 1.7.13 (the tx-queue class as one edit, **AG**) and 1.7.14 (hygiene, **AH**
+and **AI**), then gate re-run #3 — which must be allowed to **run the suite and
+the benches**, because AF survived only because a bench fixture could not reach
+the code path it measures.
 
 **Next: 1.7.0** — re-derive both per-tick line budgets from the measured worst
 case and land the bench that gates a whole tick pass. Then 1.7.1–1.7.3, a gate
@@ -959,7 +998,7 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is 1.7.11** (roadmap items AC and AD), not a milestone: see
+**Your next work is 1.7.12** (roadmap items AE and AF), not a milestone: see
 [`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
 is batched into. 2.0.0 (starting with M14) is gated behind a clean gate re-run. Joshua is post-1.0 backlog, not next.
 

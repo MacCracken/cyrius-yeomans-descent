@@ -6146,6 +6146,7 @@ fn main() {
     test_preauth_alloc();
     test_rx_bounds();
     test_tick_and_menu_bounds();
+    test_shutdown_and_class_guard();
 
 
     return assert_summary();
@@ -7191,6 +7192,249 @@ fn test_tick_and_menu_bounds(): i64 {
     session_free(p);
     return 0;
 }
+
+# Byte offset of `needle` in `path`, ignoring comment text; -1 if absent.
+#
+# The wiring guard. 1.7.8 established that some defects are invisible to every
+# runtime instrument this suite has — there, a raw syscall number that means
+# something different on another target. AC is the same shape one step along:
+# `shutdown_save_all` can be perfectly correct and simply NEVER CALLED, which is
+# precisely the state `cmd_serve` was in (every save path in the tree existed;
+# none of them was on the shutdown path). The suite cannot run `cmd_serve` — it
+# parks in epoll_wait — so the call site is checked by reading the source.
+fn _src_offset_of(path, needle): i64 {
+    var buf = alloc(200000);
+    var n = file_read_all(path, buf, 200000 - 1);
+    if (n <= 0) { return 0 - 1; }
+    var nlen = strlen(needle);
+    var i = 0;
+    var in_comment = 0;
+    while (i < n) {
+        var c = load8(buf + i) & 0xFF;
+        if (c == 10) { in_comment = 0; i = i + 1; continue; }
+        if (c == 35) { in_comment = 1; }                       # '#'
+        if (in_comment == 0) {
+            if (i + nlen <= n) {
+                if (_bytes_eq(buf + i, needle, nlen) == 1) { return i; }
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# === 1.7.11 — the two highs from gate re-run #2. ===
+#
+# **AC — a clean shutdown saved nobody.** `cmd_serve`'s exit was `println` ->
+# `audit_flush_all` -> `sock_close` -> `return`; it never walked `g_session_head`.
+# Every `player_save` call site in the tree is on some other path, so SIGINT and
+# SIGTERM lost up to SAVE_SWEEP_MIN_MS — five minutes — of progress for EVERY
+# connected player, on EVERY restart. Nothing exercised it: the suite never runs
+# `cmd_serve`, no bench reaches the exit, and a manual smoke test looks fine
+# because the last autosave is usually recent.
+#
+# **AD — a character could be persisted with no class, permanently.** `SS_AUTHED`
+# is set in `login_on_confirm` BEFORE the class menu, and `drop_session` gated on
+# `SS_AUTHED` alone, so closing the window at the menu wrote `class = -1`. It was
+# PERMANENT because `PHASE_CLASS` is stored in exactly one place in this tree —
+# the creation path — so nothing ever sent a player back to the menu, and an
+# operator cannot repair the file (records are signed with a key derived from the
+# player's passphrase, ADR 0004).
+#
+# The worse trigger: a failed `data/classes.cyml` load left the table empty, the
+# load path's `cls >= g_class_count` clamp then demoted EVERY character, and the
+# next disconnect wrote that demotion to disk. One operator typo plus a restart
+# was playerbase-wide, irreversible loss.
+fn test_shutdown_and_class_guard(): i64 {
+    test_group("shutdown-class-guard");
+    persist_init();
+
+    # IDEMPOTENCE FIRST. This group asserts the ABSENCE of records, so any run
+    # that ever wrote one — an earlier failure, or a mutation-testing pass with
+    # the guard removed — poisons every run after it. "A test that is not
+    # idempotent is a landmine" is a lesson this tree has already paid for, and
+    # a group whose assertions are about absence is the easiest place to repeat it.
+    _player_unlink("ShutOne", 7);
+    _player_unlink("ShutThree", 9);
+    _player_unlink("MenuQuit", 8);
+    _player_unlink("Classless", 9);
+
+    # --- session_persistable over its domain. This is the predicate both the
+    # disconnect path and the shutdown walk now consult.
+    var t = _freeable_sess();
+    store64(t + SS_AUTHED, 0); store64(t + SS_CLASS, 0);
+    assert_eq(session_persistable(t), 0, "an UNAUTHENTICATED session is never persisted");
+    store64(t + SS_AUTHED, 1); store64(t + SS_CLASS, 0 - 1);
+    assert_eq(session_persistable(t), 0, "an authed session with NO CLASS is not persisted either");
+    store64(t + SS_CLASS, 0);
+    assert_eq(session_persistable(t), 1, "an authed session that has chosen a class is");
+    session_free(t);
+
+    # --- AC. Stand up a live session list and drive the real shutdown walk.
+    var saved_head = g_session_head;
+    g_session_head = 0;
+
+    var a = _mk_sess("ShutOne", 7);
+    var ablk = sess_ident(a);
+    random_bytes(ablk, SALT_LEN);
+    ident_derive(ablk, "shutpassone", 11, ablk + IDENT_SK, ablk + IDENT_PK);
+    store64(ablk + IDENT_CREATED, 1);
+    store64(a + SS_FD, 0 - 1);
+    store64(a + SS_AUTHED, 1); store64(a + SS_CLASS, 0);
+    store64(a + SS_ROOM, 0 - 1);
+    store64(a + SS_HP, 11); store64(a + SS_MAXHP, 40);
+    assert_eq(player_save(a), 1, "a baseline record exists on disk");
+
+    # Now the player earns something the autosave has not yet captured.
+    store64(a + SS_HP, 37);
+
+    # An UNAUTHENTICATED session on the same list must be skipped, not saved.
+    var u = _mk_sess("ShutTwo", 7);
+    store64(u + SS_FD, 0 - 1);
+    store64(u + SS_AUTHED, 0); store64(u + SS_CLASS, 0);
+
+    # ...and a CLASSLESS one, which is where AC and AD meet: the shutdown walk
+    # must not write `class = -1` over anything on its way out either.
+    var c = _mk_sess("ShutThree", 9);
+    var cblk = sess_ident(c);
+    random_bytes(cblk, SALT_LEN);
+    ident_derive(cblk, "shutpassthree", 13, cblk + IDENT_SK, cblk + IDENT_PK);
+    store64(cblk + IDENT_CREATED, 1);
+    store64(c + SS_FD, 0 - 1);
+    store64(c + SS_AUTHED, 1); store64(c + SS_CLASS, 0 - 1);
+    store64(c + SS_ROOM, 0 - 1);
+
+    store64(a + SS_NEXT, u); store64(u + SS_NEXT, c); store64(c + SS_NEXT, 0);
+    g_session_head = a;
+
+    assert_eq(shutdown_save_all(), 1,
+              "THE ASSERTION THIS EXISTS FOR: shutdown saves the one session that should be saved");
+    assert_eq(player_exists("ShutThree", 9), 0,
+              "...and writes NO record for the classless session");
+
+    # The saved record really carries the unsaved progress, not the old snapshot.
+    var back = _mk_sess("ShutOne", 7);
+    assert_eq(player_auth_load(back, "shutpassone", 11), 1, "the shutdown-saved record loads");
+    assert_eq(load64(back + SS_HP), 37,
+              "...and holds the progress that only the shutdown walk could have captured");
+
+    g_session_head = saved_head;
+    _player_unlink("ShutOne", 7);
+
+    # --- AD, the disconnect half. A session that never chose a class must not
+    # get a record written for it — this is the exact sequence a player produces
+    # by closing the window at the class menu.
+    var m = _mk_sess("MenuQuit", 8);
+    var mblk = sess_ident(m);
+    random_bytes(mblk, SALT_LEN);
+    ident_derive(mblk, "menuquitpass", 12, mblk + IDENT_SK, mblk + IDENT_PK);
+    store64(mblk + IDENT_CREATED, 1);
+    store64(m + SS_FD, 0 - 1);
+    store64(m + SS_AUTHED, 1);          # login_on_confirm sets this BEFORE the menu
+    store64(m + SS_CLASS, 0 - 1);       # ...and the menu is where they left
+    store64(m + SS_ROOM, 0 - 1);
+    store64(m + SS_TS, telnet_state_new());
+    store64(m + SS_RX_BUF, fl_alloc(RX_CAP));
+    store64(m + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    var head2 = g_session_head;
+    g_session_head = 0;
+    store64(m + SS_NEXT, 0);
+    g_session_head = m;
+    drop_session(0, m);
+    g_session_head = head2;
+    assert_eq(player_exists("MenuQuit", 8), 0,
+              "quitting at the class menu leaves NO half-made record behind");
+
+    # --- AD, the HEAL. Records in this state already exist on disk from before
+    # this release, and the operator cannot repair them — so the load path has to.
+    # `player_save` deliberately still writes whatever it is handed; the gate is
+    # on its CALLERS, which is what lets this fixture exist at all.
+    var h = _mk_sess("Classless", 9);
+    var hblk = sess_ident(h);
+    random_bytes(hblk, SALT_LEN);
+    ident_derive(hblk, "classlesspass", 13, hblk + IDENT_SK, hblk + IDENT_PK);
+    store64(hblk + IDENT_CREATED, 1);
+    store64(h + SS_FD, 0 - 1);
+    store64(h + SS_AUTHED, 1);
+    store64(h + SS_CLASS, 0 - 1);       # the damaged record
+    store64(h + SS_ROOM, 0 - 1);
+    store64(h + SS_HP, 25); store64(h + SS_MAXHP, 25);
+    assert_eq(player_save(h), 1, "a legacy classless record is on disk");
+
+    var heal = _mk_sess("Classless", 9);
+    store64(heal + SS_FD, 0 - 1);
+    store64(heal + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(heal + SS_PHASE, PHASE_PASS);
+    _tx_reset(heal);
+    login_on_pass(heal, "classlesspass", 13);
+    assert_eq(load64(heal + SS_PHASE), PHASE_CLASS,
+              "a classless record is sent BACK TO THE MENU, not resumed into the world");
+    assert_eq(load64(heal + SS_QUIT), 0, "...without disconnecting them");
+    assert_eq(_contains(load64(heal + SS_TX_BUF), load64(heal + SS_TX_LEN),
+                        "Choose your calling"), 1, "...and the menu is actually sent");
+    assert_eq(load64(heal + SS_HP), 25, "...with the rest of the character intact");
+
+    # A HEALTHY record still resumes straight into the world — otherwise this
+    # group would pass with the login path broken for everyone.
+    store64(h + SS_CLASS, 0);
+    assert_eq(player_save(h), 1, "the same character, now with a class");
+    var ok = _mk_sess("Classless", 9);
+    store64(ok + SS_FD, 0 - 1);
+    store64(ok + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(ok + SS_PHASE, PHASE_PASS);
+    _tx_reset(ok);
+    login_on_pass(ok, "classlesspass", 13);
+    assert_eq(load64(ok + SS_PHASE), PHASE_CMD, "a healthy record resumes into the world");
+    assert_eq(load64(ok + SS_CLASS), 0, "...with its class");
+
+    _player_unlink("Classless", 9);
+
+    # --- AD, the operator half. The fatal boot check keys on g_class_count, so
+    # what has to hold is that a REJECTED class file leaves the table empty
+    # rather than half-populated — the F6 unpublish invariant.
+    assert(g_class_count > 0, "the shipped class table is loaded for the rest of the suite");
+    var saved_count = g_class_count;
+    assert(world_load_classes("tests/fixtures/nosuchfile.cyml") < 0,
+           "a missing class file is a load FAILURE");
+    # An empty table is exactly the state cmd_serve now refuses to start in,
+    # because the load path's clamp demotes every character when it is empty.
+    assert_eq(g_class_count, 0,
+              "...and it UNPUBLISHES the table rather than leaving a partial one");
+    assert(world_load_classes(DP_CLASSES) > 0, "the real table reloads");
+    assert_eq(g_class_count, saved_count, "...to the same population");
+
+    # --- AC's WIRING, which no runtime instrument in this suite can see.
+    #
+    # Everything above proves `shutdown_save_all` does the right thing. None of it
+    # proves `cmd_serve` CALLS it — and "the function exists but nothing on the
+    # shutdown path calls it" is exactly the defect AC was. The suite cannot run
+    # `cmd_serve` (it parks in epoll_wait), so the call site is asserted from the
+    # source, the same way 1.7.8 guards the raw-syscall class.
+    var call_at = _src_offset_of("src/server.cyr", "shutdown_save_all();");
+    var banner_at = _src_offset_of("src/server.cyr", "println(\"server: shutdown signal received");
+    var flush_at = _src_offset_of("src/server.cyr", "audit_flush_all();");
+    assert(call_at > 0, "cmd_serve actually CALLS shutdown_save_all — not just defines it");
+    assert(banner_at > 0, "...the shutdown epilogue is where we think it is");
+    assert(call_at > banner_at, "...and the call is IN that epilogue");
+    assert(flush_at > call_at,
+           "...and runs BEFORE audit_flush_all, so a save failure still reaches the log");
+    # --- AD's OPERATOR HALF, wired the same way and for the same reason. The
+    # assertions above prove an empty class table unpublishes cleanly; they cannot
+    # prove `cmd_serve` REFUSES TO START on it, because the suite never runs
+    # `cmd_serve`. Without that refusal the empty table is not a boot error — it
+    # is a silent, playerbase-wide demotion written to disk on the next disconnect.
+    var load_at = _src_offset_of("src/server.cyr", "world_load_classes(DP_CLASSES)");
+    var fatal_at = _src_offset_of("src/server.cyr", "if (g_class_count == 0) {");
+    assert(load_at > 0, "cmd_serve loads the class table where we think it does");
+    assert(fatal_at > 0, "...and tests g_class_count afterwards");
+    assert(fatal_at > load_at, "...with the guard AFTER the load, not before it");
+
+    # Non-vacuous: the scanner finds nothing for a call that is not there.
+    assert_eq(_src_offset_of("src/server.cyr", "shutdown_save_nobody();"), 0 - 1,
+              "...and the scanner does not simply match anything");
+    return 0;
+}
+
 
 var exit_code = main();
 syscall(60, exit_code);

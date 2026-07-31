@@ -42,6 +42,83 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 allowed to run the suite and the benches.**
 
 
+## [1.7.11] — 2026-07-31
+
+**The two highs from gate re-run #2.** 1259 assertions (was 1229); `cyrius audit`
+exits 0; 6/6 benches; both targets build; **10/10 mutations killed**. Both are
+operator-facing data loss and neither needs an attacker.
+
+### Fixed
+
+- **A clean shutdown saved nobody (AC).** `cmd_serve`'s exit was `println` →
+  `audit_flush_all` → `sock_close` → `return`. It never walked `g_session_head`,
+  and `handle_signal` only sets `stop = 1`. Every `player_save` call site in the
+  tree — creation, the `save` verb, `save_sweep`, `drop_session`, chpass — is on
+  some other path, so **SIGINT/SIGTERM lost up to `SAVE_SWEEP_MIN_MS` (five
+  minutes) of progress for every connected player, on every restart.**
+
+  Verified against a live server, not only in the suite: a player picks up an item
+  and holds the socket open, the server takes SIGTERM, and it now logs
+  `server: saved 1 session(s) on shutdown` with `inv = "notice"` on disk. Before
+  the fix that item was simply gone.
+
+  The walk is deliberately **not** `drop_session` (the process is exiting; closing
+  fds and freeing memory buys nothing, and `drop_session` unlinks mid-walk) and
+  deliberately **unbudgeted** (every other save path is metered because it competes
+  with the tick; this one has no next tick to protect).
+
+- **A character could be persisted with no class, permanently (AD).** `SS_AUTHED`
+  is set in `login_on_confirm` *before* the class menu, and `drop_session` gated on
+  `SS_AUTHED` alone — so closing the window at the menu wrote a `class = -1`
+  record. It was **permanent**, because `PHASE_CLASS` is stored in exactly one
+  place in this tree (the creation path), so nothing ever returned a player to the
+  menu; and an operator cannot repair the file, because records are signed with a
+  key derived from the player's passphrase, which the server never holds
+  ([ADR 0004](docs/adr/0004-identity-and-authentication.md)).
+
+  **The worse trigger was the operator's.** A failed `data/classes.cyml` load left
+  the table empty and `cmd_serve` carried on — *"no classes loaded — players spawn
+  classless"*. With the table empty, the load path's `cls >= g_class_count` clamp
+  demoted **every** character to `-1`, and the next disconnect wrote that demotion
+  to disk. **One typo plus a restart was playerbase-wide, irreversible loss.**
+
+  Closed at all three points, because any one alone leaves a hole:
+  - `session_persistable` replaces the bare `SS_AUTHED` test at the disconnect and
+    shutdown paths, so no new classless record is written.
+  - **The login path HEALS one.** A loaded record with `class < 0` is sent back to
+    the class menu instead of resumed into the world. This is the half that
+    matters for records already on disk — a save-side guard alone would leave
+    those players stuck forever, with no one able to fix it.
+  - **An empty class table is now a FATAL boot error**, exit code 1. A server that
+    cannot make a character was never a working configuration; the affordance was
+    buying nothing and costing everything.
+
+### Notes
+
+- **Two guards that no runtime instrument in this suite can see.** The suite
+  cannot run `cmd_serve` — it parks in `epoll_wait` — so "the function is correct
+  but nothing calls it" is invisible, and *that is precisely what AC was*: every
+  save path existed and none was on the shutdown path. Mutation testing said so
+  out loud: removing the `shutdown_save_all()` call and removing the fatal boot
+  check each broke **no test**. Both are now asserted from the source, the same
+  way 1.7.8 guards the raw-syscall class — the call must exist, must sit inside
+  the shutdown epilogue, and must run before `audit_flush_all` so a save failure
+  still reaches the log.
+
+- **A landmine in this release's own test, caught by its own mutation run.** The
+  group asserts the ABSENCE of records, so the mutation passes — which
+  deliberately run with the guards removed — left `ShutThree` and `MenuQuit` on
+  disk and poisoned every subsequent run. The group now unlinks its fixtures
+  first. *"A test that is not idempotent is a landmine"* has been in this
+  project's lessons since 1.6.x, and a group whose assertions are about absence is
+  the easiest place to repeat it.
+
+- **The docs promised the opposite of what the code did.**
+  `docs/guides/running.md` said *"Shut down cleanly with SIGINT/SIGTERM; a
+  `kill -9` is safe too"*, which reads as "clean shutdown is at least as safe" —
+  and [ADR 0006](docs/adr/0006-persistence-shape.md)'s save-trigger list did not
+  include a signalled shutdown at all. Both corrected.
+
 ## [1.7.10] — 2026-07-30
 
 **Toolchain 6.4.86 → 6.5.4, and the dependency snapshot with it.** A release of

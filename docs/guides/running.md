@@ -17,7 +17,12 @@ At boot the server loads the Hub zone, object/mob/class templates, spawns the
 world, arms the persistence engine and the zone-reset timer, and starts the
 event loop. It runs single-threaded: one kernel thread multiplexes every
 connection via epoll and owns all world state ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)).
-Shut down cleanly with SIGINT/SIGTERM; a `kill -9` is safe too (see Persistence).
+Shut down cleanly with SIGINT/SIGTERM — **since 1.7.11 that saves every session
+still connected** before it exits, and logs how many. A `kill -9` remains safe in
+the sense that no record is ever left torn (writes are `.tmp`+rename), but it
+skips that save, so anything since each player's last autosave is lost. Prefer the
+signal. *Before 1.7.11 the signal path saved nobody either, and this guide said
+the opposite — see the CHANGELOG.*
 
 ## On AGNOS
 

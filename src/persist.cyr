@@ -1331,6 +1331,29 @@ fn player_exists(name, len): i64 {
     #endif
 }
 
+# === 1.7.11 (AD) — is this session in a state worth writing to disk? ===
+#
+# The save-side half of the classless-record defect. `SS_AUTHED` is set in
+# `login_on_confirm` BEFORE the class menu is shown, and `drop_session`'s only
+# gate is `SS_AUTHED == 1` followed by an unconditional save — so a player who
+# closed the window at the menu had `class = -1` written for them, and there was
+# no route back to the menu to fix it.
+#
+# A session that has never chosen a class has nothing worth persisting: no room,
+# no inventory, no progress. Refusing the write is strictly better than writing a
+# record that then has to be healed. The heal in `player_auth_load` still exists
+# because such records ARE already on disk from before this release.
+#
+# Deliberately a POSITIVE predicate on the session rather than a check inside
+# `_build_record`: the record builder's job is to serialise what it is given, and
+# the question "should this be saved at all" belongs to the caller. It also gives
+# the shutdown walk (1.7.11's other half) the same gate for free.
+fn session_persistable(s): i64 {
+    if (load64(s + SS_AUTHED) != 1) { return 0; }
+    if (load64(s + SS_CLASS) < 0)   { return 0; }
+    return 1;
+}
+
 # === serialization =========================================================
 # Appenders over g_persist_save at a running offset.
 
@@ -2127,6 +2150,31 @@ fn login_on_pass(s, buf, len): i64 {
             session_appendtx_cstr(s, "Last seen ");
             session_append_ago(s, get_epoch_secs() - g_loaded_last_login);
             session_appendtx_cstr(s, ".\r\n");
+        }
+        # === 1.7.11 (AD) — HEAL a classless record instead of resuming it. ===
+        #
+        # A record can carry `class = -1` two ways, and BOTH used to be permanent:
+        # a disconnect at the creation-time class menu (SS_AUTHED is set before
+        # PHASE_CLASS, so drop_session saved the half-made character), and a failed
+        # `data/classes.cyml` load, which empties the table so the clamp below
+        # demotes EVERY character and the next disconnect writes it to disk.
+        #
+        # It was permanent because `PHASE_CLASS` is stored in exactly ONE place in
+        # this tree — the creation path — so nothing ever returned a player to the
+        # menu. And an operator cannot repair the file: records are signed with a
+        # key derived from the player's passphrase, which the server never holds
+        # (ADR 0004). **The repair therefore has to happen here, at login.**
+        #
+        # That is also why this is the load-side half rather than only a save-side
+        # refusal: records in this state ALREADY EXIST on disk, and a guard that
+        # merely stops making new ones would leave those players stuck forever.
+        if (load64(s + SS_CLASS) < 0) {
+            audit_keyed(AK_CHAR_CREATE, SEV_WARNING, "class.reselect",
+            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+            session_appendtx_cstr(s, "\r\nYour calling did not survive the grid. Choose again.\r\n");
+            store64(s + SS_PHASE, PHASE_CLASS);
+            class_send_prompt(s);
+            return 1;
         }
         session_resume_world(s);
         session_send_cmd_prompt(s);

@@ -830,7 +830,11 @@ fn session_list_remove(s): i64 {
 fn drop_session(epfd, s): i64 {
     # M6-D: flush state on the way out — covers `quit`, idle reap, and
     # client-side disconnects alike. A no-op for unauthenticated sessions.
-    if (load64(s + SS_AUTHED) == 1) {
+    # 1.7.11 (AD) — `session_persistable`, not a bare SS_AUTHED test. SS_AUTHED
+    # is set in login_on_confirm BEFORE the class menu, so this arm used to write
+    # `class = -1` for anyone who closed the window at the menu — permanently,
+    # because nothing ever returned a player to that menu. See session_persistable.
+    if (session_persistable(s) == 1) {
         # H10 — the last save a character gets. Queueing a line would be dead
         # code (the socket is going away), so record it where an operator can
         # find it afterwards.
@@ -877,6 +881,60 @@ fn drop_session(epfd, s): i64 {
 # session that misses a reap is strictly more overdue next tick, and its
 # deadline has already passed, so a few seconds of extra grace costs nothing.
 enum IdleReapConst { IDLE_REAP_MAX = 4; }
+# === 1.7.11 — a clean shutdown must save the people who are still playing. ===
+#
+# THE DEFECT. `cmd_serve`'s exit was `println` -> `audit_flush_all` ->
+# `sock_close` -> `return`. It never walked `g_session_head`, and `handle_signal`
+# only sets `stop = 1`. Every `player_save` call site in the tree is on some other
+# path — character creation, the `save` verb, `save_sweep`, `drop_session`, chpass
+# — so **SIGINT/SIGTERM saved nobody**, and every connected player lost up to
+# `SAVE_SWEEP_MIN_MS` (five minutes) of progress on every restart.
+#
+# It was invisible because nothing exercises it: the suite never runs `cmd_serve`,
+# no bench reaches the exit path, and a manual smoke test that connects and then
+# stops the server looks fine because the LAST autosave is usually recent.
+#
+# The docs promised the opposite. `docs/guides/running.md` said *"Shut down
+# cleanly with SIGINT/SIGTERM; a `kill -9` is safe too"*, which reads as "clean
+# shutdown is at least as safe" — and ADR 0006's save-trigger list does not
+# include a signalled shutdown at all. Both are corrected alongside this.
+#
+# DELIBERATELY NOT `drop_session`. The process is exiting: closing fds and freeing
+# session memory buys nothing, and `drop_session` unlinks mid-walk, which is a
+# footgun for no gain here. Saving is the whole job.
+#
+# UNBUDGETED, ALSO DELIBERATELY. Every other save path in this tree is metered
+# because it competes with the tick; this one does not — there is no next tick. At
+# MAX_SESSIONS the walk is ~256 signatures, and an operator waiting a moment
+# longer for a clean stop is the trade every one of those signatures is buying.
+fn shutdown_save_all(): i64 {
+    var saved = 0;
+    var failed = 0;
+    var s = g_session_head;
+    while (s != 0) {
+        var nxt = load64(s + SS_NEXT);
+        if (load64(s + SS_AUTHED) == 1) {
+            # 1.7.11 (AD) — the same class gate the disconnect path uses. A
+            # session that never chose a class must not have `class = -1` written
+            # over a good record on the way out.
+            if (session_persistable(s) == 1) {
+                if (player_save(s) == 1) {
+                    saved = saved + 1;
+                } else {
+                    failed = failed + 1;
+                    audit_keyed(AK_SAVE_FAIL_DISC, SEV_WARNING, "save.fail.shutdown",
+                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+                }
+            }
+        }
+        s = nxt;
+    }
+    print("server: saved ", 14); print_num(saved); print(" session(s) on shutdown", 23);
+    if (failed > 0) { print(" (", 2); print_num(failed); print(" FAILED)", 8); }
+    println("");
+    return saved;
+}
+
 # Disconnect up to IDLE_REAP_MAX sessions that have been silent past the timeout,
 # and return how many were reaped. Called once per tick from tick_step. See the
 # block above for why the cap is not optional.
@@ -1657,7 +1715,25 @@ fn cmd_serve(port): i64 {
     # Player classes (M5).
     var cc = world_load_classes(DP_CLASSES);
     if (cc >= 0) { print_num(cc); println(" player classes"); }
-    else { println("world: no classes loaded — players spawn classless"); }
+    else { println("world: no classes loaded"); }
+    # 1.7.11 (AD) — FATAL. This used to print "players spawn classless" and carry
+    # on, which is the worse half of the classless-record defect: with the table
+    # empty, `player_auth_load`'s `cls >= g_class_count` clamp demotes EVERY
+    # character to -1, and the next disconnect writes that demotion to disk. One
+    # typo in data/classes.cyml plus a restart was playerbase-wide, irreversible
+    # loss — irreversible because the operator cannot re-sign a player's record.
+    #
+    # A server with no classes cannot run the game anyway (no character can be
+    # created), so the affordance was buying nothing and costing everything. The
+    # loader already unpublishes the table on ANY failure (F6), so `g_class_count`
+    # is a sound test for "the file did not load".
+    if (g_class_count == 0) {
+        println("world: FATAL — no player classes. Refusing to start:");
+        println("  a running server with an empty class table demotes every");
+        println("  character to classless on load, and the next disconnect");
+        println("  writes that to disk. Fix data/classes.cyml and restart.");
+        return 1;
+    }
     combat_seed(clock_now_ms());   # seed the hidden-roll RNG (M4)
     # M6: persistence engine — buffers, data/ dirs, libro audit chain — and
     # the debounced save cadence (~5 min of ticks, never below one).
@@ -1832,6 +1908,7 @@ fn cmd_serve(port): i64 {
     }
     #endif
     println("server: shutdown signal received; closing listener.");
+    shutdown_save_all();            # 1.7.11 — see below. BEFORE the audit flush.
     # 1.7.1 — a tally that never reaches the log is a flood nobody can see.
     audit_flush_all();
     sock_close(lfd);

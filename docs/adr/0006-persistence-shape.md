@@ -40,8 +40,20 @@ audit chain. Both writes are crash-safe.**
   `.tmp` from a crashed write is simply overwritten next save.
 - **Save triggers (M6-D)**, all out of the command hot path: on `save`, on
   disconnect (`quit` / idle reap / dropped socket, via `drop_session`), at
-  character creation, and a **debounced ~5-minute sweep** in the tick that
-  writes only sessions flagged dirty since their last save.
+  character creation, a **debounced ~5-minute sweep** in the tick that writes only
+  sessions flagged dirty since their last save, and — **added 1.7.11** — on
+  **signalled shutdown**, which walks every live session before the process exits.
+  That last one was missing for the whole 1.x line: this list was the specification
+  and the code matched it, so a clean SIGTERM silently discarded up to five minutes
+  of progress for every connected player. A trigger list is a contract; the gap was
+  in the contract as much as in the code.
+- **Not every authenticated session is persistable.** `SS_AUTHED` is set before
+  class selection, so `session_persistable` (1.7.11) also requires a chosen class:
+  a character abandoned at the class menu has no room, no inventory and no
+  progress, and writing `class = -1` for it produced a record nothing could repair
+  — records are signed with a key derived from the passphrase, which the server
+  never holds (ADR 0004). Such records are healed at login by returning the player
+  to the class menu.
 - **Audit chain**: a libro `FileStore` hash chain at `data/audit.libro`;
   every login/save/creation/auth-failure/tamper-rejection appends a signed,
   hash-linked entry — the tamper-evident "T.Ron" trail the roadmap named.
