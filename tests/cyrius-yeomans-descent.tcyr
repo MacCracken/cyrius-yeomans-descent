@@ -6144,6 +6144,8 @@ fn main() {
     test_carry_cap_get_contents();
     test_listing_bounds();
     test_preauth_alloc();
+    test_rx_bounds();
+    test_tick_and_menu_bounds();
 
 
     return assert_summary();
@@ -6877,6 +6879,316 @@ fn test_preauth_alloc(): i64 {
     assert_eq(player_exists("AllocHero", 9), 1, "...and the record is findable afterwards");
 
     _player_unlink("AllocHero", 9);
+    return 0;
+}
+
+# Count complete IAC triples from `from`, and whether the stream ends inside one.
+# A trailing partial is the defect: `IAC WONT` with no option byte makes a
+# conformant client eat the next data byte as the option code.
+fn _iac_scan(buf, n, from, out_partial): i64 {
+    var i = from;
+    var triples = 0;
+    store64(out_partial, 0);
+    while (i < n) {
+        if ((load8(buf + i) & 0xFF) == 255) {
+            if (i + 2 < n) { triples = triples + 1; i = i + 3; }
+            else { store64(out_partial, 1); i = n; }
+        } else {
+            i = i + 1;
+        }
+    }
+    return triples;
+}
+
+# === 1.7.9 — the RX loop must be able to afford its own replies. ===
+#
+# MEASURED on this tree, driving the real `session_consume_rx_max` with a TX
+# queue 4001 bytes full (a slow-reading peer) and 50 `IAC DO 42` triples of input:
+#
+#   | | TX after | complete triples | trailing PARTIAL escape | RX retained |
+#   |---|---|---|---|---|
+#   | before | **4096 — run dry** | 31 | **YES** | 0 |
+#   | after  | 4034 | 11 | no | 117, re-armed |
+#
+# The partial is a bare `IAC WONT` with no option byte, and the 19 further
+# replies were discarded outright because `telnet_tx_consume` clears the source
+# whether or not the append fit.
+#
+# NEITHER EXISTING BOUND COULD SEE IT, which is the part worth keeping:
+# `RX_MAX_LINES` counts COMPLETED LINES and a negotiation triple yields EV_NONE,
+# so `fired` stays 0; the 1.7.0 charge window bills only `ed25519_*` and prose
+# bytes, and negotiation costs neither. Every option except ECHO(1) and SGA(3) is
+# untracked and the refusal is STATELESS for untracked options, so there is no
+# Q-method state to damp the repeat either.
+fn test_rx_bounds(): i64 {
+    test_group("rx-bounds");
+
+    # --- The atomic appender, over its domain. This is the primitive the RX
+    # path needed and did not have.
+    var a = _freeable_sess();
+    _tx_reset(a);
+    assert_eq(session_appendtx_atomic_cstr(a, "abc"), 1, "a short append into an empty queue is written");
+    assert_eq(load64(a + SS_TX_LEN), 3, "...all of it");
+    store64(a + SS_TX_LEN, TX_CAP - 3);
+    assert_eq(session_appendtx_atomic_cstr(a, "xyz"), 1, "an append that EXACTLY fills the queue is written");
+    assert_eq(load64(a + SS_TX_LEN), TX_CAP, "...to the last byte");
+    assert_eq(session_appendtx_atomic_cstr(a, "!"), 0, "one byte past the end is refused");
+    assert_eq(load64(a + SS_TX_LEN), TX_CAP, "...and writes NOTHING — all or nothing, never a prefix");
+    store64(a + SS_TX_LEN, TX_CAP - 2);
+    assert_eq(session_appendtx_atomic_cstr(a, "abc"), 0, "a 3-byte escape into 2 bytes of room is refused");
+    assert_eq(load64(a + SS_TX_LEN), TX_CAP - 2,
+              "...and leaves no partial escape behind, which is the whole point");
+    session_free(a);
+
+    # --- The IAC sites that fire for EVERY real client: the passphrase prompt
+    # raises WILL ECHO and drops it again with WONT ECHO, both AFTER the prompt
+    # prose is already queued — so they meet a full buffer sooner than the
+    # negotiation path does, not later.
+    var e = _freeable_sess();
+    _tx_reset(e);
+    store64(e + SS_TX_LEN, TX_CAP - 2);
+    assert_eq(session_echo_off(e), 0, "WILL ECHO is refused rather than sent in halves");
+    assert_eq(load64(e + SS_TX_LEN), TX_CAP - 2, "...leaving no bare IAC");
+    assert_eq(session_echo_on(e), 0, "WONT ECHO likewise");
+    assert_eq(load64(e + SS_TX_LEN), TX_CAP - 2, "...likewise");
+    _tx_reset(e);
+    assert_eq(session_echo_off(e), 1, "with room, the option really is announced");
+    assert_eq(load64(e + SS_TX_LEN), 3, "...all three bytes of it");
+    session_free(e);
+
+    # --- session_tx_room over its domain. Pure, so it needs no socket.
+    var r = _freeable_sess();
+    store64(r + SS_TX_LEN, 0);
+    assert_eq(session_tx_room(r), TX_CAP, "an empty queue has the whole buffer free");
+    store64(r + SS_TX_LEN, TX_CAP);
+    assert_eq(session_tx_room(r), 0, "a full queue has none");
+    store64(r + SS_TX_LEN, TX_CAP - 10);
+    assert_eq(session_tx_room(r), 10, "...and the arithmetic in between");
+    session_free(r);
+
+    # --- THE BUG. A slow-reading peer leaves TX nearly full; 4001 is chosen so
+    # the remaining room (95) is NOT a multiple of 3 and the cut therefore lands
+    # INSIDE a triple rather than neatly between two.
+    var s = _freeable_sess();
+    store64(s + SS_PHASE, PHASE_CMD);
+    store64(s + SS_AUTHED, 1);
+    _tx_reset(s);
+    var pad = 0;
+    while (pad < 4001) { session_appendtx_cstr(s, "x"); pad = pad + 1; }
+    assert_eq(load64(s + SS_TX_LEN), 4001, "the queue really is nearly full");
+
+    var rx = load64(s + SS_RX_BUF);
+    var k = 0;
+    while (k < 150) {                          # 50 x `IAC DO 42`, an UNTRACKED option
+        store8(rx + k, IAC); store8(rx + k + 1, DO); store8(rx + k + 2, 42);
+        k = k + 3;
+    }
+    store64(s + SS_RX_LEN, 150);
+    var fired[8];
+    var ret = session_consume_rx_max(s, RX_MAX_LINES, &fired);
+
+    var tx = load64(s + SS_TX_BUF);
+    var n = load64(s + SS_TX_LEN);
+    var partial[8];
+    var triples = _iac_scan(tx, n, 4001, &partial);
+
+    assert_eq(load64(&partial), 0,
+              "THE ASSERTION THIS GROUP EXISTS FOR: no bare IAC reaches the wire");
+    assert(triples > 0, "...and the replies that DID fit were still sent");
+    assert_eq(load64(&fired), 0,
+              "negotiation completes NO line — which is why the line cap could never bound this");
+
+    # INPUT IS NOT COUPLED TO OUTPUT. An earlier cut of this fix refused to READ
+    # while the queue was full, which deadlocked: every pass consumed nothing,
+    # drain_pending_rx re-armed off SS_RX_LEN > 0, and the event loop clamped its
+    # timeout to zero — a 100% CPU spin the idle sweep could not collect, because
+    # session_on_readable_max refreshes the activity stamp off retained bytes.
+    # Bounding the OUTPUT has neither problem, and this pins that difference.
+    assert_eq(load64(s + SS_RX_LEN), 0, "the whole read is still consumed even with a full queue");
+    assert_eq(ret, 0, "...so no spurious backlog, and no spin");
+
+    # --- An ORDINARY client is unaffected: with room, every triple is answered
+    # and the whole read is consumed. Without this the group would pass with the
+    # loop refusing to do anything at all.
+    _tx_reset(s);
+    k = 0;
+    while (k < 150) {
+        store8(rx + k, IAC); store8(rx + k + 1, DO); store8(rx + k + 2, 42);
+        k = k + 3;
+    }
+    store64(s + SS_RX_LEN, 150);
+    ret = session_consume_rx_max(s, RX_MAX_LINES, &fired);
+    n = load64(s + SS_TX_LEN);
+    triples = _iac_scan(load64(s + SS_TX_BUF), n, 0, &partial);
+    assert_eq(triples, 50, "with room, every one of the 50 triples is answered");
+    assert_eq(load64(&partial), 0, "...none of them truncated");
+    assert_eq(load64(s + SS_RX_LEN), 0, "...the whole read is consumed");
+    assert_eq(ret, 0, "...and there is no backlog");
+
+    # --- THE ROOM HEADER, which ran AHEAD of the three sections 1.7.6 guarded.
+    #
+    # The title is capped by the loader (RM_TITLE_CAP = 80). The PROSE is not — it
+    # is a raw (ptr, len) borrowed straight from the parsed CYML buffer — so an
+    # authored room with a large body consumed the whole queue INCLUDING the 512
+    # bytes those sections hold back for the prompt. Guarding three sections and
+    # not the write that precedes them is the same partial application this
+    # release line keeps finding.
+    var hs = _freeable_sess();
+    store64(hs + SS_ROOM, 0);
+    store64(hs + SS_PHASE, PHASE_CMD);
+    store64(hs + SS_FD, 0 - 1);
+    store64(hs + SS_AUTHED, 1);
+    var rr = room_at(0);
+    var old_ptr = load64(rr + RM_PROSE_PTR);
+    var old_len = load64(rr + RM_PROSE_LEN);
+    var huge = alloc(6000);
+    memset(huge, 46, 6000);                       # 6000 '.' — well past TX_CAP
+    store64(rr + RM_PROSE_PTR, huge);
+    store64(rr + RM_PROSE_LEN, 6000);
+    _tx_reset(hs);
+    cmd_on_line(hs, "look", 4);
+    var hn = load64(hs + SS_TX_LEN);
+    var htx = load64(hs + SS_TX_BUF);
+    assert(hn <= TX_CAP, "an oversized room body stays inside the buffer");
+    assert(hn < TX_CAP, "...without running it dry");
+    assert_eq(_contains(htx, hn, "> "), 1,
+              "...and the PROMPT still reaches the client, which is what the reserve is for");
+    assert_eq(_contains(htx, hn, " ..."), 1, "...and the prose says it was cut");
+    store64(rr + RM_PROSE_PTR, old_ptr);
+    store64(rr + RM_PROSE_LEN, old_len);
+    # The ordinary room is untouched — no marker, and still well inside the buffer.
+    _tx_reset(hs);
+    cmd_on_line(hs, "look", 4);
+    hn = load64(hs + SS_TX_LEN); htx = load64(hs + SS_TX_BUF);
+    assert_eq(_contains(htx, hn, " ..."), 0, "an authored room is not truncated");
+    assert_eq(_contains(htx, hn, "> "), 1, "...and still gets its prompt");
+    session_free(hs);
+
+    # --- ITEM X: the passphrase mask is a 2x amplifier and had no bound either.
+    # One '*' per printable byte and THREE ("\b \b") per BS/DEL, so an interleave
+    # costs 4 TX bytes per 2 RX bytes. LINE_CAP equals RX_CAP, so it bounds
+    # nothing for a single read, and PASS_MAX is a line-dispatch check, never a
+    # per-byte one. The same reserve covers it.
+    store64(s + SS_PHASE, PHASE_PASS);
+    store64(s + SS_LINE_LEN, 0);
+    _tx_reset(s);
+    pad = 0;
+    while (pad < 4001) { session_appendtx_cstr(s, "x"); pad = pad + 1; }
+    k = 0;
+    while (k < 200) {                          # printable / DEL interleave
+        store8(rx + k, 97); store8(rx + k + 1, 127);
+        k = k + 2;
+    }
+    store64(s + SS_RX_LEN, 200);
+    ret = session_consume_rx_max(s, RX_MAX_LINES, &fired);
+    n = load64(s + SS_TX_LEN);
+    assert(n <= TX_CAP, "the mask cannot overrun the queue");
+    assert_eq(load64(s + SS_RX_LEN), 0, "...and it does not stall input either");
+    assert_eq(ret, 0, "...no backlog");
+
+    session_free(s);
+    return 0;
+}
+
+# === 1.7.9 — the two remaining loops of the 1.7.6 class, and the tick path. ===
+#
+# `class_send_prompt` is DORMANT at the four shipped classes; nothing flushes
+# between the lines of one read, so up to RX_MAX_LINES bad choices stack menus
+# into a single queue, and at MAX_ENTRIES = 32 authored classes two stacked menus
+# pass TX_CAP. `mob_swing` is on the TICK path, where `combat_flush` only marks
+# the session dirty (1.6.8 coalesced writes to one per session per tick) — so
+# every mob latched onto one player appends into the same 4 kB queue before
+# anything drains it.
+#
+# The rule both follow is 1.7.7's: ration the ECHO, never the EFFECT.
+fn test_tick_and_menu_bounds(): i64 {
+    test_group("tick-menu-bounds");
+
+    if (g_class_count == 0) { assert(0, "tick-menu-bounds: needs classes"); return 0; }
+
+    # --- THE CLASS MENU. Rather than authoring 32 classes, fill the queue to
+    # where a menu line cannot fit: the fit check is the thing under test, not
+    # the class count.
+    var s = _freeable_sess();
+    _tx_reset(s);
+    var pad = 0;
+    while (pad < TX_CAP - ROOM_TAIL_RESERVE - 8) { session_appendtx_cstr(s, "x"); pad = pad + 1; }
+    class_send_prompt(s);
+    var tx = load64(s + SS_TX_BUF);
+    var n = load64(s + SS_TX_LEN);
+    assert(n <= TX_CAP, "the menu stays inside the buffer");
+    assert(n < TX_CAP, "...without running it dry");
+    assert_eq(_contains(tx, n, "more callings not shown."), 1,
+              "...and it says how many callings it could not list");
+    assert_eq(_contains(tx, n, "Enter a number or name: "), 1,
+              "...while the PROMPT still reaches the client");
+
+    # With room, every class is listed and no notice appears.
+    _tx_reset(s);
+    class_send_prompt(s);
+    tx = load64(s + SS_TX_BUF); n = load64(s + SS_TX_LEN);
+    assert_eq(_contains(tx, n, "more callings not shown."), 0,
+              "an ordinary menu is not truncated");
+    assert_eq(_contains(tx, n, "Enter a number or name: "), 1, "...and still prompts");
+    assert(n < TX_CAP, "...well inside the buffer");
+    session_free(s);
+
+    # --- MOB SWING. THE EFFECT MUST SURVIVE THE ECHO BEING DROPPED. A player
+    # must never take unreported damage and then survive because a buffer was
+    # full — nor take none because it was.
+    if (g_mob_tpl_count == 0) { assert(0, "tick-menu-bounds: needs mob templates"); return 0; }
+    if (world_room_count() == 0) { assert(0, "tick-menu-bounds: needs a world"); return 0; }
+
+    var p = _freeable_sess();
+    store64(p + SS_ROOM, 0);
+    store64(p + SS_PHASE, PHASE_CMD);
+    store64(p + SS_FD, 0 - 1);
+    store64(p + SS_AUTHED, 1);
+    store64(p + SS_HP, 100000);            # survive every swing, so the loop runs
+    store64(p + SS_MAXHP, 100000);
+    store64(p + SS_AC, 50);                # HIGH ac = easy to hit (lower is harder)
+    var m = mob_spawn(mt_at(0), 0);
+
+    # A queue with no room for a combat line at all.
+    _tx_reset(p);
+    pad = 0;
+    while (pad < TX_CAP - ROOM_TAIL_RESERVE - 4) { session_appendtx_cstr(p, "x"); pad = pad + 1; }
+    var hp_before = load64(p + SS_HP);
+    # combat_try_hit misses on a natural 1 whatever the bonus, so swing until it
+    # connects rather than asserting a single roll — CI has caught this exact
+    # assumption before (1.6.12's "guaranteed hit" that wasn't).
+    var tries = 0;
+    while (tries < 40) {
+        mob_swing(p, m);
+        if (load64(p + SS_HP) < hp_before) { tries = 40; } else { tries = tries + 1; }
+    }
+    var hp_after = load64(p + SS_HP);
+    var n2 = load64(p + SS_TX_LEN);
+
+    assert(hp_after < hp_before,
+           "THE ASSERTION THIS EXISTS FOR: the swing still LANDS when its prose cannot be sent");
+    assert(n2 <= TX_CAP, "...and the queue is not overrun");
+    assert(n2 < TX_CAP, "...nor run dry");
+    assert_eq(_contains(load64(p + SS_TX_BUF), n2, "hits you for"), 0,
+              "...the line itself was the thing dropped");
+
+    # With room, the same swing reports itself normally.
+    _tx_reset(p);
+    hp_before = load64(p + SS_HP);
+    var saw = 0;
+    tries = 0;
+    while (tries < 40) {
+        _tx_reset(p);
+        mob_swing(p, m);
+        if (_contains(load64(p + SS_TX_BUF), load64(p + SS_TX_LEN), "hits you for") == 1) {
+            saw = 1; tries = 40;
+        } else { tries = tries + 1; }
+    }
+    assert(load64(p + SS_HP) < hp_before, "with room the swing still lands");
+    assert_eq(saw, 1, "...and now it is reported");
+
+    mob_remove(m);
+    session_free(p);
     return 0;
 }
 

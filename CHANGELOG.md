@@ -4,6 +4,99 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.9] — 2026-07-30
+
+**The wire stops being cut in half.** 1229 assertions (was 1180); `cyrius audit`
+exits 0; 6/6 benches; both targets build; **13/13 mutations killed**.
+
+The RX-side class 1.7.7's sweep turned up. 1.7.6 and 1.7.7 made *listings* stop
+mid-line; this release makes the same guarantee one layer down, where the unit
+being cut is a **protocol sequence** rather than a line of prose.
+
+### Fixed
+
+- **A full queue cut Telnet escapes in half.** `session_consume_rx_max` drained
+  the negotiation reply with a plain `session_appendtx` — which truncates at a
+  BYTE boundary — and then called `telnet_tx_consume` **unconditionally**, so
+  whatever did not fit was discarded. Measured by driving the real consumer with
+  a queue 4001 bytes full and 50 `IAC DO 42` triples:
+
+  | | TX after | complete triples | trailing PARTIAL escape |
+  |---|---|---|---|
+  | before | **4096 — run dry** | 31 | **yes** |
+  | after | 4034 | 11 | no |
+
+  The partial is a bare `IAC WONT` with no option byte, and a conformant client
+  then takes the next data byte as the option code — corrupting everything after
+  it. Appends of indivisible sequences now go through `session_appendtx_atomic`,
+  which writes all of it or none.
+
+- **The same defect at the two sites every real client hits.** `session_echo_off`
+  and `session_echo_on` push a raw `IAC WILL/WONT ECHO` through the same
+  truncating append, and they run from *inside* the dispatch path — after the
+  passphrase prompt's prose is already queued. So they meet a full buffer sooner
+  than the negotiation path does, not later. Found while reviewing the fix for
+  the first site, and it is the instance that actually fires in ordinary play.
+
+- **Neither of this server's input bounds could see any of it**, which is the
+  more useful half. `RX_MAX_LINES` counts COMPLETED LINES and a negotiation
+  triple yields `EV_NONE`, so `fired` stays 0. The 1.7.0 charge window bills only
+  `ed25519_*` and prose bytes, and negotiation costs neither. Both were
+  structurally blind.
+
+- **The room header ran ahead of the sections 1.7.6 guarded, and could eat their
+  reserve.** The title is capped by the loader (`RM_TITLE_CAP` = 80); the prose is
+  not — it is a raw `(ptr, len)` borrowed straight from the parsed CYML buffer. An
+  authored room with a body over ~3.5 kB truncated mid-prose *and* left the
+  objects, mobs and present-player sections nothing to write into, including the
+  512 bytes held back for the prompt. Guarding three sections and not the write
+  that precedes them is the same partial application this line keeps finding.
+
+- **`class_send_prompt` and `mob_swing`**, the last two loops of the 1.7.6 class.
+  The menu is dormant at four shipped classes but stacks up to `RX_MAX_LINES`
+  deep in one read. `mob_swing` is on the **tick path**, where `combat_flush` only
+  marks the session dirty — 1.6.8 coalesced writes to one per session per tick —
+  so every mob latched onto one player appends into the same 4 kB queue before
+  anything drains it. Both follow 1.7.7's rule: the damage, the death check and
+  the room broadcast happen regardless; only the echo is rationed.
+
+### Notes
+
+- **The first cut of this fix was worse than the bug, and the review caught it.**
+  It refused to *read* input while the queue was full. That coupled input to
+  output and deadlocked: with TX full and bytes retained, every pass consumed
+  nothing, `drain_pending_rx` re-armed off `SS_RX_LEN > 0`, and the event loop
+  clamped its timeout to zero — a **100% CPU spin doing no work**, which the idle
+  sweep could not collect because `session_on_readable_max` refreshes the activity
+  stamp off retained bytes alone. One connection writing ~8 kB and then not
+  reading would have pinned the loop indefinitely. Bounding the OUTPUT has
+  neither problem, and a test now pins that difference.
+
+- **A comment's arithmetic, corrected before anyone inherited it.** An earlier
+  draft of the bound said one fed byte can emit 3 + 34 bytes. It cannot: a
+  negotiation byte returns `EV_NONE` and `session_push_line_byte` runs only under
+  `EV_DATA`, so the two are mutually exclusive and the maximum is 34. Nothing
+  turned on it — which is exactly how a wrong number survives.
+
+- **Roadmap item Y is settled as WON'T FIX, and the roadmap was the thing that
+  was wrong.** `_restore_inv` enforces no carry cap, and this project's own
+  roadmap has recorded that as *closed* since 1.7.2. Measured: a crafted record
+  restores at most **1,583** items (not the "~4000" claimed — `SLURP_CAP` bounds
+  it); `item_new` uses **`fl_alloc`, not the bump allocator**, and the memory is
+  **fully reclaimed at disconnect on every exit path**; and a record a real server
+  can produce already holds up to **~685** items, because the binding constraint
+  is the writer's byte budget and never the carry cap. **Clamping to `MAX_INV` on
+  load would destroy real players' belongings** — which is what the source comment
+  has said all along. The code was right; the document was wrong for five
+  releases. Severity: low, no code change.
+
+- **Carried, not fixed:** item **AA** (16 bytes of bump arena per completed TCP
+  handshake, from a boxed `Ok(cfd)` in `lib/net.cyr` — the allocation is upstream,
+  the connection count is ours), and the stateless-refusal amplifier
+  (`telnet_respond_refuse` answers every repeat of an untracked option, and the
+  Q-state arrays to fix it already exist). Neither blocks the gate; both are in
+  the roadmap.
+
 ## [1.7.8] — 2026-07-30
 
 **AGNOS persistence, and the pre-auth parse.** 1180 assertions (was 1118);

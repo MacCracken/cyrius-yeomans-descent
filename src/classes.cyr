@@ -224,17 +224,35 @@ fn apply_class(s, idx): i64 {
 fn class_send_prompt(s): i64 {
     session_appendtx_cstr(s, "\r\nChoose your calling in the Under-Grid:\r\n");
     var i = 0;
+    var more = 0;
     while (i < g_class_count) {
         var c = cl_at(i);
-        session_appendtx_cstr(s, "  ");
-        session_appendtx_num(s, i + 1);
-        session_appendtx_cstr(s, ") ");
-        session_appendtx(s, cl_name_ptr(c), cl_name_len(c));
-        session_appendtx_cstr(s, " — ");
-        session_appendtx(s, cl_role_ptr(c), cl_role_len(c));
-        session_appendtx_cstr(s, "\r\n");
+        if (more > 0) {
+            more = more + 1;
+        } else {
+            # 1.7.9 — whole lines only; see RoomList in session.cyr. One menu fits
+            # comfortably at the four shipped classes, so this is dormant today —
+            # but nothing flushes between the lines of a single read, and up to
+            # RX_MAX_LINES bad choices can stack menus into one queue. At
+            # MAX_ENTRIES = 32 authored classes two stacked menus pass TX_CAP.
+            # Fixed with its siblings rather than left as the one loop in this
+            # class that still truncates, which is how 1.7.7's findings happened.
+            var need = 2 + 4 + 2 + cl_name_len(c) + 5 + cl_role_len(c) + 2;
+            if (room_line_fits(s, need) == 0) {
+                more = 1;
+            } else {
+                session_appendtx_cstr(s, "  ");
+                session_appendtx_num(s, i + 1);
+                session_appendtx_cstr(s, ") ");
+                session_appendtx(s, cl_name_ptr(c), cl_name_len(c));
+                session_appendtx_cstr(s, " — ");
+                session_appendtx(s, cl_role_ptr(c), cl_role_len(c));
+                session_appendtx_cstr(s, "\r\n");
+            }
+        }
         i = i + 1;
     }
+    list_append_more(s, more, "callings", " not shown.\r\n");
     session_appendtx_cstr(s, "Enter a number or name: ");
     return 0;
 }

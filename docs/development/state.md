@@ -3,13 +3,57 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-30 (v1.7.8 — **all five of the gate re-run's highs are closed**; eight new items from these two releases' own sweeps are 1.7.9, then gate re-run #2)
+> **Last refresh**: 2026-07-30 (v1.7.9 — the RX-side class closed; **gate re-run #2 is next**, and it is what decides whether the 1.x line closes)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.9** — 2026-07-30. **1229 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build; **13/13 mutations killed**.
+
+**The wire stops being cut in half.** 1.7.6 and 1.7.7 stopped *listings* ending
+mid-line; this release makes the same guarantee one layer down, where the unit
+being cut is a **protocol sequence**. `session_consume_rx_max` drained the Telnet
+negotiation reply with a truncating append and then consumed the source
+unconditionally, so a full queue put a bare `IAC WONT` on the wire — and a
+conformant client takes the next data byte as the option code. Measured: at a
+4001-byte-full queue, 31 triples out and a trailing partial; after, no partial.
+
+**The same defect at the sites every real client hits.** `session_echo_off` /
+`session_echo_on` push a raw `IAC WILL/WONT ECHO` through the same truncating
+append, from *inside* the dispatch path — after the passphrase prompt's prose is
+already queued, so they meet a full buffer sooner than the negotiation path, not
+later. Found while reviewing the fix for the first site.
+
+Also: the room header's authored prose ran unguarded ahead of the three sections
+1.7.6 bounded and could eat their 512-byte reserve; and the last two loops of
+that class — `class_send_prompt` and `mob_swing` — adopted the fit check.
+`mob_swing` matters because it is on the TICK path, where `combat_flush` only
+marks the session dirty, so every latched mob appends into one 4 kB queue before
+anything drains it.
+
+**Lessons carried, added this release:**
+
+- *Bound the output, not the input.* The first cut of this fix refused to READ
+  while the queue was full, and that deadlocked: every pass consumed nothing,
+  `drain_pending_rx` re-armed off `SS_RX_LEN > 0`, and the loop clamped its
+  timeout to zero — a 100% CPU spin the idle sweep could not collect, because
+  `session_on_readable_max` refreshes the activity stamp off retained bytes
+  alone. **The fix was worse than the defect**, and only an adversarial read of
+  the design caught it before it shipped. Coupling input to output on a
+  single-threaded server is a livelock waiting for a slow reader.
+- *Truncation is acceptable for prose and never for a sequence.* The right
+  primitive was missing rather than misused: `session_appendtx_atomic` writes all
+  of an indivisible thing or none of it. Dropping a whole negotiation reply is
+  protocol-legal; half of one is not.
+- *Check whether the document or the code is the thing that is wrong.* Roadmap
+  item E has been recorded as closed since 1.7.2 and never was — but the code was
+  right: a record a real server can produce already holds ~685 items, so clamping
+  the load path to `MAX_INV` would destroy real belongings. Five releases of a
+  false claim in the tracker, resolved by measuring instead of patching.
 
 **1.7.8** — 2026-07-30. **1180 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build; **12/14 mutations killed** (the two exceptions are named in
@@ -559,7 +603,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (1180 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (1229 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -602,7 +646,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **1180** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **1229** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -650,6 +694,12 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
   that actually subtracts HP, loaders publishing only on success, `player_save`
   failures no longer discarded, double-login refusal, template-id round trip,
   audit-chain resume
+- **rx-bounds / tick-menu-bounds** (1.7.9) — the atomic appender over its domain
+  (an exact fit is written, one byte past it writes NOTHING rather than a prefix);
+  no bare IAC on the wire from a full queue, at the negotiation drain and at the
+  `WILL/WONT ECHO` sites; input NOT coupled to output (the livelock the first cut
+  would have shipped); the room header's prose bound; the class menu; and
+  `mob_swing` still landing when its prose cannot be sent
 - **preauth-alloc** (1.7.8) — a wrong passphrase allocates ZERO bytes (20 attempts,
   measured against `alloc_used`), with the parse cost of the same record asserted
   as a contrast so the zero cannot pass for the wrong reason; the raw field
@@ -795,10 +845,12 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
-**Next: 1.7.9** — the RX-side unbounded class (roadmap W–Z): a pre-auth peer
-driving the server's own Telnet reply buffer past `TX_CAP`, the 2x passphrase
-mask, and the load-path carry cap this project recorded as closed and never was.
-Then gate re-run #2.
+**Next: gate re-run #2.** Every item from the first re-run and from 1.7.7-1.7.9's
+own sweeps is closed or deliberately carried (item **AA**, 16 B/connection at
+accept, needs a `lib/net.cyr` decision; and the stateless-refusal amplifier).
+The 1.x line closes when a re-run comes back with no critical or high findings —
+a checklist reaching zero has never been the bar, and three sweeps running have
+each found something the previous pass had no instrument for.
 
 **Next: 1.7.0** — re-derive both per-tick line budgets from the measured worst
 case and land the bench that gates a whole tick pass. Then 1.7.1–1.7.3, a gate
@@ -837,10 +889,9 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is 1.7.9**, not a milestone: see
+**Your next work is gate re-run #2**, not a milestone: see
 [`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
-is batched into. 2.0.0 (starting with M14) is gated behind 1.7.9 and a
-clean gate re-run. Joshua is post-1.0 backlog, not next.
+is batched into. 2.0.0 (starting with M14) is gated behind a clean gate re-run. Joshua is post-1.0 backlog, not next.
 
 ### Before you touch anything
 

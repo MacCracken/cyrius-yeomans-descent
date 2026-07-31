@@ -498,6 +498,14 @@ fn drain_pending_rx(): i64 {
             # shape. So the save happens, the meter sees it, and the charge
             # stops this pass from also dispatching lines. Bounding the reap
             # count itself is a separate item (tracked in the roadmap).
+            #
+            # 1.7.9 — a sweep flagged the ordering here as "checks the budget
+            # AFTER the mutation". That is true and it is the point: the check
+            # cannot precede work that must happen anyway. Worth stating the
+            # cost plainly rather than leaving a reader to rediscover it — the
+            # overshoot is exactly ONE signature per pass, because the charge is
+            # consulted immediately after the first teardown and stops the rest.
+            # It is a bounded, deliberate overshoot, not an unmetered path.
             session_drain(s);
             drop_session(g_epfd, s);
             if (charge_stop(charge_spent(), g_charge_cap, 0) == 1) {

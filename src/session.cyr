@@ -641,7 +641,10 @@ fn session_echo_off(s): i64 {
     if (ts != 0) { opt_set_us(ts, OPT_ECHO, Q_WANTYES); }
     var b[3];
     store8(&b + 0, IAC); store8(&b + 1, WILL); store8(&b + 2, OPT_ECHO);
-    return session_appendtx(s, &b, 3);
+    # 1.7.9 — atomic. This is the IAC site that fires for EVERY real client, at
+    # the passphrase prompt, AFTER the prompt prose has already been queued —
+    # so it is the one most likely to meet a full buffer, not the least.
+    return session_appendtx_atomic(s, &b, 3);
 }
 # Hand echo back (WONT ECHO) once passphrase entry is over. Our option state is
 # forced to Q_NO before the salvo so a straggling DO ECHO can't be mistaken for
@@ -651,7 +654,7 @@ fn session_echo_on(s): i64 {
     if (ts != 0) { opt_set_us(ts, OPT_ECHO, Q_NO); }   # back to client-echo line mode
     var b[3];
     store8(&b + 0, IAC); store8(&b + 1, WONT); store8(&b + 2, OPT_ECHO);
-    return session_appendtx(s, &b, 3);
+    return session_appendtx_atomic(s, &b, 3);   # 1.7.9 — atomic, as above
 }
 
 # Append a signed integer in decimal. Used by the M1-H status verb.
@@ -1262,7 +1265,25 @@ fn session_show_room(s): i64 {
     session_appendtx(s, room_title_ptr(r), room_title_len(r));
     session_appendtx_cstr(s, ansi_reset());
     session_appendtx_cstr(s, "\r\n");
-    session_appendtx(s, room_prose_ptr(r), room_prose_len(r));
+    # 1.7.9 — the HEADER runs ahead of the three sections 1.7.6 guarded, and it
+    # could eat the reserve those sections depend on. The title is capped by the
+    # loader (RM_TITLE_CAP = 80, via copy_str_capped) but the prose is NOT: it is
+    # a raw (ptr, len) borrowed straight from the parsed CYML buffer
+    # (world.cyr `RM_PROSE_PTR`/`RM_PROSE_LEN`), so an authored room with a body
+    # over ~3.5 kB truncated mid-prose AND left the objects, mobs and present-player
+    # sections with nothing to write into — including the 512 bytes held back for
+    # the prompt. Guarding three sections and not the thing that runs before them
+    # is the same partial-application this whole release line keeps finding.
+    #
+    # Operator-authored content rather than player input, so this is a robustness
+    # bound, not an attack surface — which is why it truncates and says so rather
+    # than refusing the room.
+    var plen = room_prose_len(r);
+    var avail = TX_CAP - ROOM_TAIL_RESERVE - load64(s + SS_TX_LEN) - 6;   # 6: " ...\r\n"
+    if (avail < 0) { avail = 0; }
+    if (plen > avail) { plen = avail; }
+    session_appendtx(s, room_prose_ptr(r), plen);
+    if (plen < room_prose_len(r)) { session_appendtx_cstr(s, " ..."); }
     session_appendtx_cstr(s, "\r\n");
     session_append_exits(s, r);
     session_append_objs(s, room);   # forward ref → item.cyr
@@ -1629,7 +1650,7 @@ fn session_push_line_byte(s, b): i64 {
     if (b == 8 || b == 127) {
         if (len > 0) {
             store64(s + SS_LINE_LEN, len - 1);
-            if (is_pass == 1) { session_appendtx_cstr(s, "\b \b"); }
+            if (is_pass == 1) { session_appendtx_atomic_cstr(s, "\b \b"); }   # 1.7.9
         }
         return 0;
     }
@@ -1637,7 +1658,9 @@ fn session_push_line_byte(s, b): i64 {
     if (b < 32) { return 0; }
     if (len >= LINE_CAP) {
         store64(s + SS_LINE_LEN, 0);
-        session_appendtx_cstr(s, "(line too long — buffer reset)\r\n");
+        # 1.7.9 — atomic: the em-dash is 3 UTF-8 bytes, so a truncating append
+        # can leave a half character on the wire.
+        session_appendtx_atomic_cstr(s, "(line too long — buffer reset)\r\n");
         return 0;
     }
     store8(ln + len, b);
@@ -1668,6 +1691,87 @@ fn session_push_line_byte(s, b): i64 {
 # it learns how many lines a session really fired, not how many it was offered.
 # Charging the full slice to a session that had one line queued would starve the
 # rest of the list for no work done.
+# === 1.7.9 — the RX loop must be able to afford its own replies. ===
+#
+# THE DEFECT. This loop fed one wire byte at a time and drained the Telnet
+# layer's reply with an unchecked `session_appendtx`, then called
+# `telnet_tx_consume` UNCONDITIONALLY. That primitive truncates at a BYTE
+# boundary and returns a short count nobody reads, so the consume threw away
+# whatever did not fit — and what does not fit is the tail of a **3-byte IAC
+# escape**. A bare `IAC WONT` with no option byte reaches the client, which then
+# takes the next data byte as the option code. Same class as the 1.7.6/1.7.7
+# listing truncations, one layer down, and worse in kind: the unit being cut is a
+# protocol sequence rather than a line of prose.
+#
+# WHY NEITHER EXISTING BOUND CAUGHT IT, which is the more useful half:
+#   - `fired >= maxlines` counts COMPLETED LINES. A negotiation triple yields
+#     EV_NONE, so `fired` stays 0 and RX_MAX_LINES never trips.
+#   - the 1.7.0 charge window bills `ed25519_*` and prose bytes. Negotiation
+#     costs neither, so `charge_stop` never trips either.
+# Both of this server's input bounds were structurally blind to it. `IAC DO 42`
+# repeated across one read produces an unconditional `IAC WONT 42` each time,
+# because every option except ECHO(1) and SGA(3) is untracked and
+# `telnet_respond_refuse` is STATELESS for untracked options — there is no
+# Q-method state to damp the repeat.
+#
+# THE FIX is one question asked before each byte: is there room for the most this
+# byte could possibly make us say? If not, stop and leave the rest of the read
+# retained — the same tail-retention the line cap and the charge window already
+# use, and `drain_pending_rx` re-arms it next tick via `g_rx_backlog`. TX filling
+# up becomes ordinary backpressure instead of a silently mangled protocol stream.
+# The most TX bytes ONE fed byte can produce, enumerated rather than estimated,
+# because the numbers explain why bounding the OUTPUT is sufficient:
+#
+#    3  one IAC triple. `ts_emit_iac3` is the only emitter, all eight of its call
+#       sites return immediately after it, `telnet_handle_negotiation` runs once
+#       per fed byte, `telnet_announce` is a no-op, and this loop consumes the
+#       reply buffer after every byte — so `telnet_tx_len` is 0 or 3, never more.
+#   34  "(line too long — buffer reset)\r\n", the largest thing
+#       `session_push_line_byte` writes for one byte (the em-dash is 3 UTF-8
+#       bytes). The mask is 1 and the BS/DEL erase is 3.
+#
+# The two are MUTUALLY EXCLUSIVE: a negotiation byte returns EV_NONE and
+# `session_push_line_byte` runs only under EV_DATA. So one byte emits at most 34,
+# not 37 — a distinction with no consequence here, recorded because an earlier
+# draft of this comment added them and this project has been bitten before by a
+# comment's arithmetic being taken for a measurement.
+
+# Bytes still free in the session's TX queue.
+fn session_tx_room(s): i64 { return TX_CAP - load64(s + SS_TX_LEN); }
+
+# Append `len` bytes ALL OR NOTHING. Returns 1 if written, 0 if dropped whole.
+#
+# This is the primitive the RX path needed and did not have. `session_appendtx`
+# truncates at a BYTE boundary, which is fine for prose — a short line is ugly —
+# and wrong for anything INDIVISIBLE. A Telnet escape is three bytes and means
+# nothing in pieces: half of `IAC WONT ECHO` on the wire is a bare `IAC WONT`,
+# and a conformant client then consumes the next data byte as the option code,
+# corrupting everything after it.
+#
+# Dropping a whole negotiation reply is protocol-legal — a peer that gets no
+# answer to an option simply does not get it, and may ask again — whereas half
+# an escape is not. Given a full queue those are the only two choices, so this
+# takes the one that cannot desynchronise the stream.
+#
+# NOT A RESERVE, DELIBERATELY. An earlier cut of this release refused to READ
+# input while the queue was full. That coupled input to output and deadlocked:
+# with TX full and bytes retained, every pass consumed nothing, `drain_pending_rx`
+# re-armed off `SS_RX_LEN > 0`, and the event loop clamped its timeout to zero —
+# a 100% CPU spin doing no work, which the idle sweep could not collect because
+# `session_on_readable_max` refreshes the activity stamp off retained bytes. That
+# is worse than the defect it was fixing. Bounding the OUTPUT has neither problem.
+fn session_appendtx_atomic(s, buf, len): i64 {
+    if (len <= 0) { return 1; }
+    if (session_tx_room(s) < len) { return 0; }
+    session_appendtx(s, buf, len);
+    return 1;
+}
+
+# The cstring form, for fixed server literals that must not arrive in pieces.
+fn session_appendtx_atomic_cstr(s, cstr): i64 {
+    return session_appendtx_atomic(s, cstr, strlen(cstr));
+}
+
 fn session_consume_rx_max(s, maxlines, out_fired): i64 {
     var rx = load64(s + SS_RX_BUF);
     var len = load64(s + SS_RX_LEN);
@@ -1688,9 +1792,14 @@ fn session_consume_rx_max(s, maxlines, out_fired): i64 {
         var ev = telnet_feed(ts, load8(rx + i));
         # Drain any negotiation reply into the tx queue before the data
         # byte, preserving RFC 854 on-wire ordering.
+        #
+        # 1.7.9 — ATOMIC. This used to be a plain `session_appendtx` followed by
+        # an UNCONDITIONAL `telnet_tx_consume`, so a full queue cut the 3-byte
+        # escape in half and then discarded the rest: a bare `IAC WONT` reached
+        # the client, which took the next data byte as the option code.
         var txl = telnet_tx_len(ts);
         if (txl > 0) {
-            session_appendtx(s, telnet_tx_buf(ts), txl);
+            session_appendtx_atomic(s, telnet_tx_buf(ts), txl);
             telnet_tx_consume(ts);
         }
         if (ev == EV_DATA) {

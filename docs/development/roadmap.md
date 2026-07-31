@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-30 (v1.7.8 — **all five of the gate re-run's highs are closed**; next is 1.7.9, then gate re-run #2)
+> **Last Updated**: 2026-07-30 (v1.7.9 — the RX-side class closed; **next is gate re-run #2**, which is what decides whether 1.x can close)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -30,8 +30,9 @@ ownership and fix size.
 | — | ~~1.7.6~~ | ~~2~~ | ✅ **Shipped.** The room listing no longer breaks the wire (it ended mid-escape with no prompt at 86 floor objects) · 1.6.12's audit granularity restored | — |
 | — | ~~1.7.7~~ | ~~2~~ | ✅ **Shipped.** Carried two existing fixes to the sites they were never applied to — `get` of a container (silent item loss at 199 against a cap of 100) · five listing verbs that truncated mid-line with no prompt | — |
 | — | ~~1.7.8~~ | ~~2~~ | ✅ **Shipped.** AGNOS saves never published (syscalls 82/87 are GPU calls there) · the pre-auth parse, 2,248 B/attempt → **0** · CI now builds `--agnos` | — |
-| 1 | [**1.7.9**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 9 | The **RX-side** unbounded class 1.7.7's sweep found — a pre-auth peer driving the server's own reply buffer past `TX_CAP`, the 2× passphrase mask, and the load-path cap this file wrongly recorded as closed, and 16 B/connection at accept | **yes** |
-| 2 | [**gate re-run #2**](#the-gate--what-closes-the-1x-line) | — | Re-run after 1.7.9. The first re-run returned **DO-NOT-CLOSE** | **yes** |
+| — | ~~1.7.9~~ | ~~9~~ | ✅ **Shipped.** The RX-side class — a half-sent Telnet escape on a full queue, at the negotiation drain AND at the `WILL/WONT ECHO` sites every real client hits · the unguarded room-header prose · the class menu · `mob_swing` on the tick path. Item Y settled as **doc-only**, item AA carried | — |
+| 1 | [**gate re-run #2**](#the-gate--what-closes-the-1x-line) | — | **Next.** The first re-run returned **DO-NOT-CLOSE**; this is what decides whether the 1.x line closes | **yes** |
+| 2 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and the stateless-refusal amplifier — neither blocking | — |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
@@ -169,7 +170,8 @@ unbounded class, on the RX side, which no previous pass had an instrument for.
 Listed worst first. None is fixed; all are new.
 
 **W. A pre-auth peer can make the server generate its own buffer overflow, three
-bytes at a time.** *(high)*
+bytes at a time.** *(high — CLOSED in 1.7.9, by bounding the OUTPUT rather than
+the input; the amplifier itself is carried, see AB below)*
 
 - **What breaks.** `session_consume_rx_max` ([`session.cyr:1671`](../../src/session.cyr:1671))
   appends the Telnet layer's reply buffer with an unchecked `session_appendtx`
@@ -199,7 +201,10 @@ bytes at a time.** *(high)*
 - **Whose code.** Ours. **Fix size.** Contained — the same fit-check shape, plus a
   bound on unsolicited refusals per pass.
 
-**X. The passphrase mask is a 2× amplifier with no bound.** *(medium)*
+**X. The passphrase mask is a 2× amplifier with no bound.** *(medium — CLOSED in
+1.7.9. The per-byte writes are atomic now, so nothing is cut mid-sequence; the
+sustained 2 TX bytes per RX byte RATE is inherent to server-side echo and is
+bounded by the queue, not by a counter.)*
 
 - `session_push_line_byte` ([`:1592`](../../src/session.cyr:1592)) emits one `*`
   per printable byte and **three** (`"\b \b"`) per BS/DEL, so an interleave of
@@ -228,10 +233,34 @@ bytes at a time.** *(high)*
   roadmap was never corrected to say so**, so this document has claimed a bound
   that does not exist for five releases — the precise failure mode this project
   has a standing lesson about (*a comment is not a bound*), one level up.
-- **What 1.7.9 owes it:** decide and record — either bound it with an audit line
-  on truncation, or mark E **won't-fix** with the reasoning above. Not both.
+- **SETTLED IN 1.7.9 — WON'T FIX, and the roadmap was the thing that was wrong.**
+  Measured rather than argued:
+  - A crafted record restores at most **1,583 items**, not the "~4000" this file
+    claimed — `file_read_all` truncates at `SLURP_CAP - 1` = 8191 bytes and a
+    longer file loses its trailing `sig` line, so the whole record must fit.
+  - `item_new` uses **`fl_alloc`, not the bump allocator**, and the memory is
+    **fully reclaimed at disconnect on every exit path** — `drop_session` →
+    `session_drop_inv` → `obj_free` (which recurses through `OI_CONTENTS`) →
+    `fl_free`. Traced, not assumed. So "unbounded" overstated it: this is a
+    transient high-water mark, not a leak.
+  - A record a REAL server can produce already holds up to **~685 items**,
+    because the binding constraint is the WRITER's byte budget (`SAVE_CAP` 4096,
+    ~3427 bytes of `inv` field) and never the carry cap. **Clamping to `MAX_INV`
+    on load would therefore destroy real players' belongings** — which is exactly
+    what the source comment at `MAX_INV` has said all along.
+  - Only ~2.3x separates the crafted maximum from the legitimate one, and the
+    memory comes back. **Severity: low.**
 
-**Z. Four smaller unbounded or mis-ordered sites.** *(low)*
+  The code was right and this document was wrong for five releases. Issue E is
+  **not** closed by a bound; it is closed by the deliberate decision already
+  recorded in the source, which nobody ever wrote down here.
+
+**Z. Four smaller unbounded or mis-ordered sites.** *(low — three CLOSED in
+1.7.9: the room-header prose, `class_send_prompt`, and `mob_swing`. The fourth,
+`drain_pending_rx`'s SS_QUIT arm, is **not a defect** — the teardown cannot be
+deferred without the H1/M12-C use-after-free, the code already said so, and the
+overshoot is exactly one signature per pass. Its comment now states that bound
+explicitly.)*
 
 - **`session_show_room`'s header** ([`session.cyr:1265`](../../src/session.cyr:1265))
   writes the authored room prose with a raw `session_appendtx` **ahead of** the
@@ -255,7 +284,7 @@ bytes at a time.** *(high)*
 ### Raised by 1.7.8's own sweep (2026-07-30)
 
 **AA. Every completed TCP handshake permanently consumes 16 bytes, before a byte
-is read.** *(medium)*
+is read.** *(medium — CARRIED past 1.7.9, needs a decision not a patch)*
 
 - **What breaks.** `sock_accept` returns `Ok(cfd)`, and the compiler boxes that
   enum payload with a bump `alloc(16)` — [`lib/net.cyr:358`](../../lib/net.cyr:358),
@@ -275,6 +304,20 @@ is read.** *(medium)*
   1.6.3 accept backoff bound *concurrency*, not the cumulative count.
 - **Do not confuse this with `ACCEPT_BACKOFF_TICKS`**, which stands the listener
   down after an accept *error*; a healthy connect/drop flood never touches it.
+
+**AB. The negotiation amplifier itself is still there.** *(low — raised by
+1.7.9's own design review)*
+
+- `telnet_respond_refuse` ([`telnet.cyr:269`](../../src/telnet.cyr:269)) is
+  **stateless** for untracked options, so N repeats of `IAC DO 42` buy N
+  unconditional `IAC WONT 42`. 1.7.9 made the reply atomic, so the wire is
+  correct and the queue bounds the volume — what remains is wasted work, not a
+  corruption or a leak.
+- **The fix is cheap and already half-built**: the 256-byte `TS_OPT_US` /
+  `TS_OPT_HIM` arrays exist and have spare state values, so an untracked option
+  could be refused at most once per session. Left out of 1.7.9 deliberately —
+  it changes RFC 1143 conformance on a path with no test coverage, and this
+  release already reworked its own design once.
 
 **Also confirmed, and deliberately not filed as a defect:** `cmd_put` places no
 limit on a room container's contents. That is roadmap item **Q** (the donation
