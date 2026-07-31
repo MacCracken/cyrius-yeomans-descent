@@ -3,13 +3,47 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.11 — gate re-run #2's **two highs are closed**; 3 medium + 3 low remain (AE-AI), then gate re-run #3)
+> **Last refresh**: 2026-07-31 (v1.7.12 — AE and AF closed; **AG + AH/AI remain**, then gate re-run #3)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.12** — 2026-07-31. **1270 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build; **5/5 mutations killed**.
+
+**Persistence integrity, and the bench that could not see the defect it was
+written to watch.**
+
+**A refused duplicate login reverted the live session.** The refusal set `SS_QUIT`
+and left `SS_AUTHED` set, so `drop_session` wrote the duplicate's load-time
+snapshot over everything the real session had done. The window is up to a full
+tick, not one batch: on the retained-line path `drain_pending_rx` condemns without
+dropping, and the drop lands on a later walk. One line.
+
+**Both batch loops tore sessions down unmetered** — `CHG_SIGN = 10` per teardown
+against a 20-unit window, so 64 condemned sessions spent 640 units while the pass
+believed itself metered. **Verbatim the 1.7.0 finding**, fixed there for
+`drain_pending_rx` and never carried to the batch loops.
+
+**Lessons carried, added this release:**
+
+- *A bench that cannot reach the expensive path reports a budget that is met and
+  tells you nothing.* Every fixture in `bench_tick_budget` was `memset`, so
+  `SS_AUTHED = 0` and the teardown arm could not fire — which is why AF survived
+  a gate sweep **in the code that bench exists to watch**. Measured now, both
+  ways: 6 ms / PASS with the fix, **59 ms / 118% of the drift allowance / FAIL**
+  without. Build the fixture that reaches the arm, or the gate is decoration.
+- *A presence check is not a wiring check.* The first source assertion for AF only
+  proved the drop arms were no longer one-liners, and passed with either loop's
+  meter deleted — the exact state that shipped for eleven releases. Guards that
+  must exist at N sites need a COUNT.
+- *Do not gate an unconditional save on a flag with known holes.* The gate asked
+  whether `drop_session` should consult `SS_SAVE_DIRTY`. It should not: the
+  `cmd_give` hole this release fixed is evidence the flag is not trustworthy, and
+  the unconditional save is what has been covering for it.
 
 **1.7.11** — 2026-07-31. **1259 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build; **10/10 mutations killed**.
@@ -713,7 +747,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (1259 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (1270 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -756,7 +790,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **1259** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **1270** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -956,9 +990,10 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
-**Next: 1.7.12** — the persistence-integrity mediums (roadmap **AE** and **AF**).
-Then 1.7.13 (the tx-queue class as one edit, **AG**) and 1.7.14 (hygiene, **AH**
-and **AI**), then gate re-run #3 — which must be allowed to **run the suite and
+**Next: 1.7.13** — the tx-queue class as ONE edit (roadmap **AG**): `examine`'s
+unbounded authored prose and the per-read queue accumulation are two altitudes of
+one accounting error, and fixing either alone leaves the mechanism. Then 1.7.14
+(hygiene, **AH** and **AI**), then gate re-run #3 — which must be allowed to **run the suite and
 the benches**, because AF survived only because a bench fixture could not reach
 the code path it measures.
 
@@ -998,7 +1033,7 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is 1.7.12** (roadmap items AE and AF), not a milestone: see
+**Your next work is 1.7.13** (roadmap item AG), not a milestone: see
 [`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
 is batched into. 2.0.0 (starting with M14) is gated behind a clean gate re-run. Joshua is post-1.0 backlog, not next.
 

@@ -42,6 +42,99 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 allowed to run the suite and the benches.**
 
 
+## [1.7.12] — 2026-07-31
+
+**Persistence integrity, and the bench that could not see the defect it was
+written to watch.** 1270 assertions (was 1259); `cyrius audit` exits 0; 6/6
+benches; both targets build; **5/5 mutations killed**.
+
+### Fixed
+
+- **A refused duplicate login reverted the real session's state (AE).**
+  `player_auth_load` sets `SS_AUTHED = 1` — the passphrase really did check out —
+  and the double-login refusal then set `SS_QUIT` and **left `SS_AUTHED` set**. So
+  the refused duplicate still owned the record, and `drop_session` wrote its
+  load-time snapshot over everything the live session had done since.
+
+  **The window is not one batch, which is why this looked harmless.** On the epoll
+  path the teardown does follow immediately. On the retained-line path it does
+  not: once `EVENT_LINES_MAX` is spent, `session_consume_rx_max` retains the
+  passphrase line and `drain_pending_rx` dispatches it in its *else* arm, which
+  sets `SS_QUIT` and does **not** drop. That consume also empties `SS_RX_LEN`, so
+  `g_rx_backlog` is not incremented and the loop parks in `epoll_wait` for a full
+  tick — the stale snapshot is held **up to 2500 ms**, spanning a later batch. A
+  victim's `passwd` or `save` inside that window was silently reverted.
+
+  One line: clear `SS_AUTHED` in the refusal arm. Item duplication was chased here
+  too and is **not** a risk — `session_drop_inv` frees the copies `_restore_inv`
+  minted rather than dropping them to the room.
+
+- **The epoll batch and the AGNOS sweep tore sessions down unmetered (AF).**
+  `drop_session`'s first act is an unconditional `player_save`, one
+  `ed25519_sign` — `CHG_SIGN = 10` against a `PASS_CHARGE_MAX` of 20. Neither
+  batch loop consulted the meter, so a full batch of `MAX_EPOLL_EVENTS = 64`
+  condemned sessions spent **640 charge units inside a 20-unit window** while
+  every other path in the pass believed it was metered.
+
+  **This is verbatim the 1.7.0 finding** — fixed there for `drain_pending_rx`,
+  never carried to the two batch loops, in the release whose own comment reads
+  *"ONE constant for BOTH dispatch sites, on purpose."* Both loops now use that
+  same shape: the teardown happens (it cannot be deferred — the fd is a real
+  resource, and deferring the save would hold a pointer `fl_free` is about to
+  reissue), the meter sees it, and the rest of the batch waits. epoll is
+  level-triggered, so every event not read is reported again next pass.
+
+- **`cmd_give` did not mark the recipient dirty.** `cmd_on_line` flags only the
+  session that typed the command, and this is the one verb in the tree that
+  mutates another session's persistent state. Swept rather than assumed: nothing
+  else writes `SS_INV` / `SS_HP` / `SS_CLASS` on a session other than the actor,
+  and `ability_heal` is self-only. Without it the debounced sweep could skip a
+  recipient who then did nothing, so a gift lived on the giver's record and not
+  the receiver's until their next command or disconnect.
+
+### Changed
+
+- **`bench_tick_budget` gained the arm it was missing, and it is a real gate.**
+  Every fixture in that bench was `memset` to zero and therefore had
+  `SS_AUTHED = 0`, so `drop_session`'s save arm could not fire and the teardown
+  measured as **nothing**. That is why AF survived a gate sweep *in code this
+  bench exists to watch.* A new `tb_condemned` fixture drives the real arm at the
+  real bound (`MAX_EPOLL_EVENTS`, not the smaller `TB_ATTACKERS`), and the numbers
+  are measured both ways:
+
+  | | teardown | torn down | gated pre-tick total |
+  |---|---|---|---|
+  | **with the fix** | 2 ms | 3 of 64 | 6 ms — 12% of the drift allowance, PASS |
+  | **without** | 55 ms | 64 of 64 | **59 ms — 118%, FAIL** |
+
+  So AF was a real breach of the ADR 0001 drift allowance, not a theoretical one.
+
+### Notes
+
+- **`drop_session` still does not consult `SS_SAVE_DIRTY`, deliberately.** The
+  gate re-run asked whether it should. The answer is no while the flag has holes
+  like the `cmd_give` one this release just fixed — an unconditional save on the
+  way out is what has been covering for them. Gating on a flag we have evidence is
+  wrong would convert a latent inconsistency into real data loss.
+
+- **A line that looked like a guard and was not.** The refusal arm first got a
+  belt-and-braces `SS_SAVE_DIRTY = 0` alongside the `SS_AUTHED` clear. Mutation
+  testing showed nothing could tell whether it was there — with `SS_AUTHED` clear
+  the flag is never consulted again — so it was removed rather than shipped as
+  untestable ballast.
+
+- **A presence check is not a wiring check.** The first source-level assertion for
+  AF only proved the drop arms were no longer one-liners, and passed with either
+  batch loop's meter deleted — *the exact state that shipped for eleven releases*.
+  It now counts: the meter must be consulted at **all three** drop sites, and each
+  must re-arm the loop.
+
+- **The test that failed for the right reason.** AE's end-to-end assertion first
+  came back `got 8, expected 99`, because the fixture raised `hp` above its
+  `maxhp` and the H3 invariant clamped it straight back on load — the assertion
+  was measuring the clamp, not the defect. This project has a standing lesson
+  about exactly that, and it cost one debugging round to re-learn.
+
 ## [1.7.11] — 2026-07-31
 
 **The two highs from gate re-run #2.** 1259 assertions (was 1229); `cyrius audit`

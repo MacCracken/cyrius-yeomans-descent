@@ -1844,7 +1844,32 @@ fn cmd_serve(port): i64 {
             if (data > TAG_SIGNAL) {
                 var keep[8];
                 budget = event_batch_step(epfd, data, ev_mask, clock_now_ms(), budget, &keep);
-                if (load64(&keep) == 0) { drop_session(epfd, data); }
+                if (load64(&keep) == 0) {
+                    drop_session(epfd, data);
+                    # === 1.7.12 (AF) — charge the teardown. ===
+                    #
+                    # `drop_session`'s first act is an unconditional `player_save`,
+                    # i.e. one `ed25519_sign` — CHG_SIGN = 10 against a
+                    # PASS_CHARGE_MAX of 20. This arm consulted no budget at all,
+                    # so a batch of MAX_EPOLL_EVENTS = 64 condemned sessions spent
+                    # 640 charge units inside a 20-unit window while every OTHER
+                    # path in the pass believed it was metered.
+                    #
+                    # This is VERBATIM the 1.7.0 finding — fixed there for
+                    # `drain_pending_rx`, never carried to the two batch loops, in
+                    # the release whose own comment reads "ONE constant for BOTH
+                    # dispatch sites, on purpose". Same shape as that fix: the
+                    # teardown happens (it cannot be deferred — the fd is a real
+                    # resource and deferring the save would hold a pointer
+                    # `fl_free` is about to reissue), the meter sees it, and the
+                    # rest of the batch waits. epoll is LEVEL-TRIGGERED, so every
+                    # event we do not read here is reported again next pass.
+                    if (charge_stop(charge_spent(), g_charge_cap, 0) == 1) {
+                        g_rx_backlog = g_rx_backlog + 1;
+                        i = n;
+                        continue;
+                    }
+                }
             }
             i = i + 1;
         }
@@ -1891,7 +1916,19 @@ fn cmd_serve(port): i64 {
             var nxt = load64(s + SS_NEXT);
             var keep[8];
             budget = event_batch_step(0, s, EPOLLIN, clock_now_ms(), budget, &keep);
-            if (load64(&keep) == 0) { drop_session(0, s); }
+            if (load64(&keep) == 0) {
+                drop_session(0, s);
+                # 1.7.12 (AF) — the agnos twin, and it needed this MORE than the
+                # epoll side: that loop is bounded by MAX_EPOLL_EVENTS = 64, this
+                # one walks EVERY session on every ~20 ms pass with no analog. The
+                # remainder is picked up next pass; g_rx_backlog also skips the
+                # pacing sleep so it is the very next one.
+                if (charge_stop(charge_spent(), g_charge_cap, 0) == 1) {
+                    g_rx_backlog = g_rx_backlog + 1;
+                    s = 0;
+                    continue;
+                }
+            }
             s = nxt;
         }
         drain_pending_rx();

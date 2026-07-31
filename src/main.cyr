@@ -41,7 +41,7 @@ include "src/server.cyr"
 # is a hand-synced copy. It silently drifted to 1.1.3 across the 1.1.4 and 1.1.5
 # releases (the `version` verb reported a build two releases old); the release
 # checklist in CLAUDE.md now names this line explicitly.
-var VERSION_STRING = "1.7.11";
+var VERSION_STRING = "1.7.12";
 
 # Identity line for the CLI, stdout only. What a connecting player sees is
 # session_send_motd's banner instead — operator-facing and wire-facing stay apart.

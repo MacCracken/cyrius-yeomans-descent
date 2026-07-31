@@ -2137,6 +2137,39 @@ fn login_on_pass(s, buf, len): i64 {
         if (session_already_online(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), s) == 1) {
             session_echo_on(s);
             session_appendtx_cstr(s, "\r\nThat character is already connected from another session.\r\n");
+            # === 1.7.12 (AE) — DISOWN the record before condemning the session. ===
+            #
+            # `player_auth_load` set SS_AUTHED = 1 a few lines above, because the
+            # passphrase really did check out. This arm then refuses the login and
+            # sets SS_QUIT — but it used to leave SS_AUTHED set, and `drop_session`
+            # saves any session that is authed. So the REFUSED duplicate wrote its
+            # snapshot — taken at load time, before the refusal — over whatever the
+            # live session had done since.
+            #
+            # THE WINDOW IS NOT ONE BATCH. On the epoll path the teardown does
+            # follow immediately, which is why this looks harmless. On the
+            # retained-line path it does not: once EVENT_LINES_MAX is spent by
+            # earlier sessions, `session_consume_rx_max` retains the passphrase
+            # line and `drain_pending_rx` dispatches it in its *else* arm, which
+            # sets SS_QUIT and does NOT drop — the drop happens on a later walk.
+            # That consume also empties SS_RX_LEN, so `g_rx_backlog` is not
+            # incremented and the loop parks in `epoll_wait` for a full tick. The
+            # stale snapshot is therefore held up to 2500 ms, spanning a whole
+            # later batch, and a victim's `passwd` or `save` inside that window is
+            # silently reverted.
+            #
+            # Clearing SS_AUTHED is the whole fix: the session keeps its refusal
+            # message and its condemnation, and simply stops owning a record it
+            # was never granted. Item duplication was chased here too and is NOT a
+            # risk — `session_drop_inv` frees the copies `_restore_inv` minted
+            # rather than dropping them to the room.
+            # Clearing SS_AUTHED is the whole fix and the ONLY thing needed: with
+            # it clear, `session_persistable` is false and the dirty flag is never
+            # consulted for this session again. A belt-and-braces
+            # `SS_SAVE_DIRTY = 0` was written here first and then removed —
+            # mutation testing showed nothing could tell whether it was there,
+            # which is the definition of a line that looks like a guard and is not.
+            store64(s + SS_AUTHED, 0);
             store64(s + SS_QUIT, 1);
             audit_keyed(AK_LOGIN_DUP, SEV_WARNING, "login.dup",
             load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());

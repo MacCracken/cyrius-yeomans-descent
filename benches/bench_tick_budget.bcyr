@@ -113,6 +113,21 @@ fn tb_armed_pass(nlines): i64 {
     return s;
 }
 
+# A CONDEMNED authenticated session: real identity, already flagged to quit, so
+# `dispatch_session_max` returns keep = 0 and the batch loop tears it down.
+#
+# 1.7.12 — THIS FIXTURE IS THE POINT OF THE RELEASE'S BENCH WORK. Every other
+# fixture here is `memset` to zero and therefore has `SS_AUTHED = 0`, so
+# `drop_session`'s save arm could not fire and the teardown measured as nothing.
+# That is exactly why AF — the unmetered teardown, verbatim the 1.7.0 finding —
+# survived a gate sweep in code this bench exists to watch. **A bench that cannot
+# reach the expensive path reports a budget that is met and tells you nothing.**
+fn tb_condemned(seed): i64 {
+    var s = tb_saver(seed);
+    store64(s + SS_QUIT, 1);
+    return s;
+}
+
 # An authenticated session with a real derived identity, dirty and due a save.
 fn tb_saver(seed): i64 {
     var s = fl_alloc(SS_SIZE);
@@ -226,7 +241,39 @@ fn main(): i64 {
     g_session_head = 0;
     tb_line("drain_pending_rx (one window)  ", drain_us);
 
-    var gated_us = event_us + drain_us;
+    # --- The CONDEMNED-SESSION TEARDOWN, driven exactly as the epoll batch drives
+    # it: step, drop on keep == 0, then consult the meter.
+    #
+    # Driven at MAX_EPOLL_EVENTS, not TB_ATTACKERS, because that is the real bound
+    # on the arm under test — one `epoll_wait` returns up to 64 events and every
+    # one of them can be a condemned authed session. `drop_session`'s first act is
+    # an unconditional `player_save`, one ed25519_sign, CHG_SIGN = 10 against a
+    # PASS_CHARGE_MAX of 20, so before 1.7.12 a full batch spent 640 units inside a
+    # 20-unit window. MEASURED HERE, both ways: 64 of 64 torn down for ~52 ms
+    # unmetered, against 3 of 64 for ~2 ms once the meter is consulted. The first
+    # of those breaches the drift allowance this bench gates, which is the whole
+    # reason the arm now exists.
+    var tb = event_pass_begin();
+    var t2b = clock_now_ns();
+    var d = 0;
+    var dropped = 0;
+    while (d < MAX_EPOLL_EVENTS) {
+        var dkeep[8];
+        tb = event_batch_step(0, tb_condemned(d), EPOLLIN, 0, tb, &dkeep);
+        if (load64(&dkeep) == 0) {
+            dropped = dropped + 1;
+            if (charge_stop(charge_spent(), g_charge_cap, 0) == 1) { d = MAX_EPOLL_EVENTS; continue; }
+        }
+        d = d + 1;
+    }
+    var drop_us = (clock_now_ns() - t2b) / 1000;
+    event_pass_end();
+    tb_line("condemned teardown (one window)", drop_us);
+    print("      (tore down ", 17); print_num(dropped);
+    print(" of ", 4); print_num(MAX_EPOLL_EVENTS);
+    println(" condemned sessions before the meter stopped the batch)");
+
+    var gated_us = event_us + drain_us + drop_us;
     print("    ---", 7); println("");
     print("    GATED: pre-tick-check total : ", 34);
     print_num(gated_us / 1000); print(" ms   (", 8);

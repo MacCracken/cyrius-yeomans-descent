@@ -4748,12 +4748,22 @@ fn test_legacy_guards(): i64 {
     store64(second + SS_PHASE, PHASE_PASS);
     _tx_reset(second);
     login_on_pass(second, "twinnedphrase", 13);
-    # The refusal CONDEMNS the session (SS_QUIT) rather than un-authenticating it:
-    # player_auth_load has already proved who they are by this point, which is
-    # deliberate — checking earlier would let the prompt be used to probe who is
-    # online. So the observable is SS_QUIT, not SS_AUTHED.
+    # The refusal CONDEMNS the session (SS_QUIT). The CHECK still happens after
+    # `player_auth_load` has proved who they are — deliberately, because checking
+    # earlier would let the prompt be used to probe who is online.
+    #
+    # 1.7.12 (AE) — but the refused session no longer keeps SS_AUTHED. This
+    # comment used to say the observable was "SS_QUIT, not SS_AUTHED", and that
+    # conflated two different things: WHEN the check runs, and whether the refused
+    # session still owns the record afterwards. It did, and `drop_session` saves
+    # anything authed — so the duplicate wrote its load-time snapshot over
+    # everything the live session had done since.
     assert_eq(load64(second + SS_QUIT), 1,
               "a SECOND login to a character already online is REFUSED");
+    assert_eq(load64(second + SS_AUTHED), 0,
+              "...and DISOWNS the record — it was never granted the session");
+    assert_eq(session_persistable(second), 0,
+              "...so nothing on the way out will save it");
     assert(load64(second + SS_PHASE) != PHASE_CMD,
            "...and never reaches the command prompt");
     assert_eq(load64(first + SS_QUIT), 0,
@@ -4762,7 +4772,88 @@ fn test_legacy_guards(): i64 {
                         "already connected"), 1,
               "...and the second session is told why");
 
+    # --- AE END TO END: the victim's progress must survive the duplicate's
+    # teardown. The window is not hypothetical — on the retained-line path the
+    # drop happens on a LATER walk, up to a full tick after the refusal, so a
+    # `passwd` or `save` in between is exactly what used to be reverted.
+    # MAXHP moves with HP. Raising hp alone would be clamped straight back to 8 by
+    # the H3 hp-vs-maxhp invariant on load, and the assertion below would then be
+    # measuring that clamp rather than AE — the "is this testing the rule or the
+    # clamp" trap this project has a standing lesson about. Caught by this very
+    # assertion failing at 8.
+    store64(first + SS_MAXHP, 99);
+    store64(first + SS_HP, 99);                       # the live session plays on...
+    assert_eq(player_save(first), 1, "...and saves");  # ...and disk now says 99
+    store64(second + SS_TS, telnet_state_new());
+    store64(second + SS_RX_BUF, fl_alloc(RX_CAP));
+    drop_session(0, second);                          # the duplicate is torn down
+    var check = _mk_sess("Twinned", 7);
+    assert_eq(player_auth_load(check, "twinnedphrase", 13), 1, "the record still loads");
+    assert_eq(load64(check + SS_HP), 99,
+              "THE ASSERTION AE EXISTS FOR: the duplicate's stale snapshot did NOT overwrite it");
+
+
+    # --- 1.7.12: the RECIPIENT of a gift is marked dirty. `cmd_on_line` flags only
+    # the session that typed the command, and `cmd_give` is the one verb in the
+    # tree that mutates another session's persistent state — swept, and it really
+    # is the only one: nothing else writes SS_INV/SS_HP/SS_CLASS on a session other
+    # than the actor, and `ability_heal` is self-only. Without this the debounced
+    # sweep could skip a recipient who then does nothing, so the gift lived on the
+    # giver's record and not the receiver's.
+    #
+    # This is also WHY `drop_session` deliberately does not consult SS_SAVE_DIRTY:
+    # the gate re-run asked whether it should, and the answer is no while the flag
+    # has holes like this one. The unconditional save on the way out is what has
+    # been covering for them.
+    var gv = _freeable_sess();
+    var rc = _freeable_sess();
+    store64(gv + SS_ROOM, 0); store64(rc + SS_ROOM, 0);
+    store64(gv + SS_PHASE, PHASE_CMD); store64(rc + SS_PHASE, PHASE_CMD);
+    store64(gv + SS_AUTHED, 1); store64(rc + SS_AUTHED, 1);
+    store64(gv + SS_INV, 0); store64(rc + SS_INV, 0);
+    memcpy(load64(rc + SS_NAME_BUF), "Receiver", 8);
+    store64(rc + SS_NAME_LEN, 8);
+    memcpy(load64(gv + SS_NAME_BUF), "Giver", 5);
+    store64(gv + SS_NAME_LEN, 5);
+    ilist_push(gv + SS_INV, item_new(ot_at(0)));
+    var ghead = g_session_head;
+    store64(gv + SS_NEXT, rc); store64(rc + SS_NEXT, 0);
+    g_session_head = gv;
+    store64(gv + SS_SAVE_DIRTY, 0);
+    store64(rc + SS_SAVE_DIRTY, 0);
+    _tx_reset(gv);
+    cmd_on_line(gv, "give scrip to Receiver", 22);
+    assert_eq(inv_count(rc), 1, "the gift really moved to the recipient");
+    assert_eq(load64(rc + SS_SAVE_DIRTY), 1,
+              "...and the RECIPIENT is flagged dirty, not just the giver");
+    g_session_head = ghead;
+    _drain_ilist(rc + SS_INV); store64(rc + SS_INV, 0);
+    _drain_ilist(gv + SS_INV); store64(gv + SS_INV, 0);
+    session_free(gv); session_free(rc);
+
+    # --- AF's WIRING. The suite cannot run either batch loop, so the guard that
+    # the teardown consults the meter is asserted from the source — the same
+    # technique 1.7.11 used for the shutdown call site, and for the same reason:
+    # AF *was* a missing call, in code a bench was written to watch. The bench now
+    # reaches the arm too (bench_tick_budget's condemned-teardown window, which
+    # measures 59 ms / 118% of the drift allowance with this reverted).
+    var drop_epoll = _src_offset_of("src/server.cyr", "drop_session(epfd, data);");
+    var drop_agnos = _src_offset_of("src/server.cyr", "drop_session(0, s);");
+    assert(drop_epoll > 0, "the epoll batch still tears down condemned sessions");
+    assert(drop_agnos > 0, "...and so does the agnos sweep");
+    # THREE sites must consult the meter after a teardown: drain_pending_rx (the
+    # 1.7.0 fix) and the two batch loops (the ones it was never carried to). A
+    # presence check is not enough — it passes with either batch loop reverted,
+    # which is precisely the state that shipped for eleven releases.
+    assert_eq(_src_count("src/server.cyr", "charge_stop(charge_spent(), g_charge_cap, 0)"), 3,
+              "the teardown meter is consulted at ALL THREE drop sites, not just the first");
+    # Four re-arm sites: the two teardown arms above, drain_pending_rx's own
+    # condemned arm, and its retained-bytes arm (server.cyr:535).
+    assert_eq(_src_count("src/server.cyr", "g_rx_backlog = g_rx_backlog + 1;"), 4,
+              "...and each one re-arms the loop so the remainder is not stranded");
+
     g_session_head = gh;
+    _player_unlink("Twinned", 7);
     _player_unlink("Twinned", 7);
     return 0;
 }
@@ -7191,6 +7282,36 @@ fn test_tick_and_menu_bounds(): i64 {
     mob_remove(m);
     session_free(p);
     return 0;
+}
+
+# How many times `needle` appears in `path` outside comment text.
+#
+# The counting form of _src_offset_of. Presence is not enough for a guard that
+# must exist at SEVERAL sites: 1.7.12's teardown meter has to be consulted in the
+# epoll batch AND the agnos sweep, and an assertion that merely finds "one
+# somewhere" passes with either of them deleted — which is exactly how AF (the
+# same guard, present in drain_pending_rx and missing from both batch loops)
+# survived a gate sweep.
+fn _src_count(path, needle): i64 {
+    var buf = alloc(200000);
+    var n = file_read_all(path, buf, 200000 - 1);
+    if (n <= 0) { return 0 - 1; }
+    var nlen = strlen(needle);
+    var hits = 0;
+    var i = 0;
+    var in_comment = 0;
+    while (i < n) {
+        var c = load8(buf + i) & 0xFF;
+        if (c == 10) { in_comment = 0; i = i + 1; continue; }
+        if (c == 35) { in_comment = 1; }
+        if (in_comment == 0) {
+            if (i + nlen <= n) {
+                if (_bytes_eq(buf + i, needle, nlen) == 1) { hits = hits + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return hits;
 }
 
 # Byte offset of `needle` in `path`, ignoring comment text; -1 if absent.

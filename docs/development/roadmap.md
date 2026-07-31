@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.11 — gate re-run #2's **two highs are closed**; 3 medium + 3 low remain, then gate re-run #3)
+> **Last Updated**: 2026-07-31 (v1.7.12 — AE and AF closed; **AG + AH/AI remain**, then gate re-run #3)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -34,7 +34,7 @@ ownership and fix size.
 | — | ~~1.7.10~~ | — | ✅ **Shipped.** Toolchain `6.4.86 → 6.5.4` + a refreshed dependency snapshot. No source change; closed the **sakshi shadow gap** carried since 1.2.0 and the toolchain-drift warning | — |
 | — | ~~gate re-run #2~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **2 high**, 3 medium, 3 low. Nothing dropped; ten reports collapsed to eight distinct defects | — |
 | — | ~~1.7.11~~ | ~~2~~ | ✅ **Shipped.** **AC** shutdown now saves every live session (verified against a running server) · **AD** closed at all three points — the disconnect gate, the login heal for records already on disk, and a fatal boot on an empty class table | — |
-| 2 | [**1.7.12**](#1712--persistence-integrity) | 2 | **AE** a refused duplicate login reverts the real session · **AF** the epoll batch teardown is unmetered — verbatim the 1.7.0 finding, never carried across | **yes** |
+| — | ~~1.7.12~~ | ~~2~~ | ✅ **Shipped.** **AE** the refused duplicate now disowns the record · **AF** both batch loops charge the teardown — and `bench_tick_budget` gained the arm that could not fire, which now FAILS at 118% of the drift allowance when reverted | — |
 | 3 | [**1.7.13**](#1713--the-tx-queue-class-as-one-edit) | 1 | **AG** the reserve is per-command, the queue is per-read — `examine`'s unbounded prose and cross-command accumulation, as one edit | **yes** |
 | 4 | [**1.7.14**](#1714--hygiene) | 2 | **AH** key material in never-wiped globals · **AI** the idle-reap budget | — |
 | 5 | [**gate re-run #3**](#the-gate--what-closes-the-1x-line) | — | And it must be allowed to **run the suite and the benches** — AF survived only because a bench fixture could not reach the code path | **yes** |
@@ -142,9 +142,30 @@ typo does it to everyone.** *(high — CLOSED in 1.7.11)*
   `class < 0` record (or route such a login back to `PHASE_CLASS`), **and** make a
   failed class-table load fatal, or suppress saves while `g_class_count == 0`.
 
-### 1.7.12 — persistence integrity
+### ✅ 1.7.12 — persistence integrity (SHIPPED)
 
-**AE. A refused duplicate login reverts the real session's state.** *(medium)*
+Items AE and AF are **closed**. 1270 assertions (was 1259), 5/5 mutations killed.
+
+**AF was a real drift breach, now measured both ways.** The bench arm that could
+never fire — every fixture was `memset`, so `SS_AUTHED = 0` and `drop_session`'s
+save arm was unreachable — now drives 64 condemned authed sessions at the real
+`MAX_EPOLL_EVENTS` bound: **2 ms / 3 torn down with the fix, 55 ms / 64 torn down
+without, taking the gated pre-tick total to 59 ms — 118% of the ADR 0001 drift
+allowance, FAIL.** That is the instrument whose absence let AF survive a gate
+sweep in code the bench exists to watch.
+
+**Also fixed, from the sweep's uninstrumented list:** `cmd_give` did not mark the
+RECIPIENT dirty. Swept rather than patched — it is the only verb in the tree that
+mutates another session's persistent state (`ability_heal` is self-only).
+
+**Decided, not deferred:** `drop_session` still does **not** consult
+`SS_SAVE_DIRTY`. The gate asked whether it should; the answer is no while the flag
+has holes like the one above, because the unconditional save is what covers for
+them.
+
+### 1.7.12 — the two items (detail, retained)
+
+**AE. A refused duplicate login reverts the real session's state.** *(medium — CLOSED in 1.7.12)*
 
 - `player_auth_load` sets `SS_AUTHED = 1`
   ([`persist.cyr:2051`](../../src/persist.cyr:2051)); the double-login refusal
@@ -165,7 +186,7 @@ typo does it to everyone.** *(high — CLOSED in 1.7.11)*
   credential cannot be rotated away from", not takeover. **Fix size.** One line.
 
 **AF. The epoll batch's teardown is unmetered — verbatim the 1.7.0 finding, not
-carried across.** *(medium)*
+carried across.** *(medium — CLOSED in 1.7.12)*
 
 - `src/server.cyr:1768` drops on `keep == 0` with no `charge_spent()` consultation,
   and the teardown consumes no line budget. The signature *is* counted

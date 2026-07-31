@@ -873,6 +873,19 @@ fn cmd_give(s, pa): i64 {
     }
     ilist_remove(inv_slot, o);
     ilist_push(target + SS_INV, o);
+    # 1.7.12 — MARK THE RECIPIENT DIRTY. `cmd_on_line` flags only the session that
+    # typed the command, and this is the one verb in the tree that mutates another
+    # session's persistent state (swept: nothing else writes SS_INV/SS_HP/SS_CLASS
+    # on a session other than the actor — `ability_heal` is self-only). Without
+    # this the debounced sweep could skip a recipient who then does nothing, so a
+    # gift existed on the giver's record and not the receiver's until their next
+    # command or disconnect.
+    #
+    # Also why `drop_session` deliberately does NOT consult SS_SAVE_DIRTY: the
+    # gate re-run asked whether it should, and the answer is no while the flag has
+    # holes like this one. An unconditional save on the way out is what has been
+    # covering for them.
+    store64(target + SS_SAVE_DIRTY, 1);
 
     session_appendtx_cstr(s, "You give ");
     append_item_name(s, o);
