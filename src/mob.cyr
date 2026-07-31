@@ -779,7 +779,35 @@ fn mob_tick_all(tick): i64 {
                             # H7-b — and it actually swings now. Skipped when the
                             # player is already fighting THIS mob, or
                             # combat_round would swing it a second time.
-                            if (load64(tgt + SS_TARGET) != m) { mob_swing(tgt, m); }
+                            #
+                            # === 1.7.16 (AK) — "would swing it" is the condition. ===
+                            #
+                            # The comment above states the rule correctly and the
+                            # code approximated it with `SS_TARGET == m` alone,
+                            # which is only equivalent WHILE combat_round actually
+                            # runs. `combat_tick_all` (server.cyr) gates the whole
+                            # round on `SS_PHASE == PHASE_CMD`, so the moment a
+                            # player types `passwd` mid-fight neither side swings:
+                            # combat_round is skipped for the phase, and this arm
+                            # defers to it anyway. Measured by gate re-run #3
+                            # against a live server at the authored 2.5 s tick:
+                            # **0 combat lines in 40 s while engaged**, then combat
+                            # resuming on the same engagement once the re-key
+                            # completed. At 1 HP that is unbounded invulnerability
+                            # from two shipped verbs, and the idle reaper cannot
+                            # collect it either because every re-prompt refreshes
+                            # SS_LAST_MS.
+                            #
+                            # Deferring only when the OTHER site will really act is
+                            # the whole fix. The consequence is deliberate: a player
+                            # who opens the passphrase prompt mid-fight keeps taking
+                            # damage and stops dealing it. Safety is not something a
+                            # menu should grant.
+                            var round_swings = 0;
+                            if (load64(tgt + SS_TARGET) == m) {
+                                if (load64(tgt + SS_PHASE) == PHASE_CMD) { round_swings = 1; }
+                            }
+                            if (round_swings == 0) { mob_swing(tgt, m); }
                             _mob_flee(m);    # engaged: break off?
                         }
                     } else {

@@ -116,6 +116,18 @@ fn session_drop_inv(s): i64 {
     var o = load64(s + SS_INV);
     while (o != 0) {
         var nxt = oi_next(o);      # capture before the free
+        # 1.7.16 (AM) — these holdings are going OFFLINE. drop_session has just
+        # saved them, so the record and the census agree. Counted one level deep,
+        # matching what `_build_record` flattens and what `_restore_inv` will mint
+        # back — so the login side subtracts exactly what this side added.
+        var ci = obj_census_index(o);          # forward ref → persist.cyr
+        if (ci >= 0) { obj_census_adjust(ci, 1); }
+        var inner = oi_contents(o);
+        while (inner != 0) {
+            var ii = obj_census_index(inner);
+            if (ii >= 0) { obj_census_adjust(ii, 1); }
+            inner = oi_next(inner);
+        }
         obj_free(o);
         o = nxt;
     }
@@ -1003,6 +1015,15 @@ fn _obj_id_world_count(idptr, idlen): i64 {
         n = n + _obj_id_count_list(load64(s + SS_INV), idptr, idlen);
         s = load64(s + SS_NEXT);
     }
+    # 1.7.16 (AM) — and the players who are NOT connected. Without this term the
+    # ceiling only ever saw objects lying in rooms: the session walk above is
+    # provably dead on the reset path, because `maybe_zone_reset` defers while any
+    # player is in-world. So every item carried offline was invisible, the reset
+    # minted a replacement, and the owner brought theirs back at the next login —
+    # unbounded across cycles, including for objects authored exactly once.
+    # `obj_offline_census_build` refreshes this at the top of each reset pass.
+    var tpl = obj_tpl_by_id(idptr, idlen);       # forward ref → persist.cyr census
+    if (tpl != 0) { n = n + obj_offline_count((tpl - g_obj_tpls) / OT_SIZE); }
     return n;
 }
 

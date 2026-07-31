@@ -350,6 +350,20 @@ fn login_on_class(s, buf, len): i64 {
         audit_keyed(AK_SAVE_FAIL_CREATE, SEV_WARNING, "save.fail.create",
         load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
         session_appendtx_cstr(s, "\r\nWARNING: your character could not be written to disk.\r\n");
+    } else {
+        # 1.7.16 (AL) — count the ACCOUNT here, where the record it refers to has
+        # just been written, rather than at `login_on_confirm` where only an
+        # identity was sealed. Nothing in the tree decrements, so an increment
+        # placed before the record exists is a slot burned forever by a peer that
+        # simply hangs up at the class menu.
+        #
+        # RESIDUAL, stated rather than hidden: the cap is tested at confirm time
+        # and committed here, so N concurrent creations can all pass the test and
+        # all commit, overshooting by at most the number of sessions in that
+        # window. `max_accounts` is a disk bound an operator chooses, not a
+        # security boundary, and bounded overshoot is the right trade against
+        # holding a reservation no teardown path could reliably release.
+        g_account_count = g_account_count + 1;
     }
     session_send_cmd_prompt(s);
     return 0;

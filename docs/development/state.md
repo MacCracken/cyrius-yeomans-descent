@@ -3,13 +3,50 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.15 — AJ/AN/AO closed; **3 high + 3 medium + 7 low remain** from gate re-run #3. Next is 1.7.16)
+> **Last refresh**: 2026-07-31 (v1.7.16 — **every high from gate re-run #3 is closed**; 2 medium + 7 low remain. Next is 1.7.17)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.16** — 2026-07-31. **1362 assertions**; `cyrius audit` exits 0; 6/6 benches;
+fuzz clean; both targets build; **10/10 mutations killed**.
+
+**The peer-reachable highs** — the last three of gate re-run #3, and with them
+**every high that run found**.
+
+**`passwd` mid-fight granted permanent immunity.** `combat_tick_all` gates the
+round on `PHASE_CMD`; `mob_tick_all` deferred to that round whenever the player
+was targeting the mob. Outside `PHASE_CMD` neither side swung. The deferral now
+asks the question its own comment already stated — *will combat_round actually
+swing this?*
+
+**An object was duplicated on every logout/reset cycle**, because the reset
+ceiling counted rooms plus ONLINE sessions and the reset only fires when nobody is
+online. There is now an offline census, seeded once at boot and moved by login and
+disconnect. Re-verified live: six cycles, still one copy.
+
+**The account cap counted sealed identities**, with no decrement anywhere — 436
+phantom slots/s, unauthenticated, no records written. 1.7.11 widened it without
+noticing, by correctly removing the record that used to make the count true.
+
+**Lessons carried, added this release:**
+
+- *A fix for unbounded growth can be unbounded growth.* The census's first design
+  rebuilt itself from disk every reset — measured at ~70 kB of permanently lost
+  arena per rebuild, which is item C's shape inside the fix for item AM. Measuring
+  the fix, not just the defect, is what caught it.
+- *A test that depends on disk state left by an earlier run is a landmine, and a
+  change can arm one that was never there.* Making the reset consult offline
+  holdings coupled a pre-existing assertion to `data/players`, so it passed under
+  `cyrius test` and failed under `cyrius audit`. Both commands were right; the
+  test had to learn to control its precondition.
+- *Two guards ordered wrongly can be worse than one missing.* Seeding the census
+  from `persist_init` before the ready flag recursed forever, because the builder
+  calls `persist_init` itself. The order is now pinned by a test, since only the
+  order makes it terminate.
 
 **1.7.15** — 2026-07-31. **1340 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build; **9/9 mutations killed**.
@@ -881,7 +918,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (1340 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (1362 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -924,7 +961,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **1340** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **1362** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -1124,10 +1161,10 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
-**Next: 1.7.16** — the peer-reachable highs (roadmap **AK** `passwd` mid-fight
-grants permanent immunity; **AM** unlimited duplication of unique artifacts;
-**AL** the account cap burns 436 phantom slots/s unauthenticated). Then 1.7.17
-(mechanics and instruments), then gate re-run #4 — which should first build the
+**Next: 1.7.17** — mechanics and instruments (roadmap **AP** a mob cannot kill an
+unengaged player; **AQ** the fuzz gate is a no-op on half its iterations; and the
+low tail **AR-AY**, which includes **two benches in the audit gate that cannot
+fail**). Then gate re-run #4 — which should first build the
 offline-population conservation harness and the phase x tick matrix — which must be allowed to **run the suite and
 the benches**, because AF survived only because a bench fixture could not reach
 the code path it measures.
@@ -1168,7 +1205,7 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is 1.7.16** (roadmap items AK, AM, AL), not a milestone: see
+**Your next work is 1.7.17** (roadmap items AP, AQ and the AR-AY tail), not a milestone: see
 [`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
 is batched into. 2.0.0 (starting with M14) is gated behind a clean gate re-run. Joshua is post-1.0 backlog, not next.
 

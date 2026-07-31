@@ -839,9 +839,26 @@ fn test_reset(): i64 {
     assert_eq(_count_all_mobs(), n0, "back to full population");
 
     # M7-D object respawn: synthesize an objspawn on room 0 and reapply.
+    #
+    # 1.7.16 (AM) — THIS ASSERTION HAS A PRECONDITION IT DID NOT HAVE BEFORE. The
+    # reset ceiling now counts objects held by players who are not connected, so
+    # whether a spawn happens depends on `data/players`. Zeroed explicitly for
+    # this id, and restored afterwards, rather than left to whatever records
+    # earlier groups left behind — which is exactly how this test came to pass
+    # under `cyrius test` and FAIL under `cyrius audit`, the two differing only in
+    # what was on disk when the process started.
+    var scrip_tpl = obj_tpl_by_id("scrip", 5);
+    var scrip_idx = 0 - 1;
+    if (scrip_tpl != 0) { scrip_idx = (scrip_tpl - g_obj_tpls) / OT_SIZE; }
+    var scrip_held = 0;
+    if (scrip_idx >= 0) {
+        scrip_held = obj_offline_count(scrip_idx);
+        obj_census_adjust(scrip_idx, 0 - scrip_held);
+    }
     store64(room_at(0) + RM_OBJSPAWN, str_from("scrip"));
     assert_eq(zone_reset_room_objs(0), 1, "objspawn places the authored object");
     assert_eq(zone_reset_room_objs(0), 0, "no double-up — object already present");
+    if (scrip_idx >= 0) { obj_census_adjust(scrip_idx, scrip_held); }
 
     return 0;
 }
@@ -4250,7 +4267,39 @@ fn test_account_cap(): i64 {
     login_on_confirm(ok_s, "cappedphrase", 12);
     assert_eq(load64(ok_s + SS_QUIT), 0, "under the cap, creation is not refused");
     assert_eq(load64(ok_s + SS_PHASE), PHASE_CLASS, "...and it proceeds to class selection");
-    assert_eq(g_account_count, 1, "...and the account is counted");
+    # 1.7.16 (AL) — sealing an identity does NOT count an account. This asserted
+    # `1` here, which is the defect: nothing decrements, so an increment placed
+    # before the record exists is a slot a peer burns forever by hanging up at the
+    # class menu. Measured at 436 slots/s, unauthenticated, with no records written.
+    assert_eq(g_account_count, 0,
+              "sealing an identity does NOT count an account — no record exists yet");
+    _tx_reset(ok_s);
+    login_on_class(ok_s, "1", 1);
+    assert_eq(load64(ok_s + SS_PHASE), PHASE_CMD, "...choosing a class completes creation");
+    assert_eq(player_exists("Capped", 6), 1, "...the record is on disk");
+    assert_eq(g_account_count, 1, "...and NOW the account is counted");
+
+    # The abandon case, which is the attack: seal and walk away.
+    _player_unlink("Abandon", 7);
+    var ab = _mk_sess("Abandon", 7);
+    store64(ab + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(ab + SS_FD, 0 - 1);
+    store64(ab + SS_PHASE, PHASE_CONFIRMPASS);
+    var ab_blk = sess_ident(ab);
+    memcpy(ab_blk, cap_salt, SALT_LEN);
+    ident_derive(cap_salt, "abandonphrase", 13, ab_blk + IDENT_SK, ab_blk + IDENT_PK);
+    var before_ab = g_account_count;
+    var ai = 0;
+    while (ai < 25) {                       # twenty-five seal-and-drop cycles
+        store64(ab + SS_PHASE, PHASE_CONFIRMPASS);
+        _tx_reset(ab);
+        login_on_confirm(ab, "abandonphrase", 13);
+        ai = ai + 1;
+    }
+    assert_eq(g_account_count, before_ab,
+              "THE ASSERTION AL EXISTS FOR: 25 abandoned creations burn ZERO account slots");
+    assert_eq(player_exists("Abandon", 7), 0, "...and leave no record behind");
+    _player_unlink("Abandon", 7);
 
     g_max_accounts = saved_max;
     g_account_count = saved_cnt;
@@ -6295,6 +6344,7 @@ fn main() {
     test_queue_per_read();
     test_key_scratch_wiped();
     test_operator_edit_blast();
+    test_peer_reachable_highs();
 
 
     return assert_summary();
@@ -8173,6 +8223,234 @@ fn test_operator_edit_blast(): i64 {
     _player_unlink("Fresh", 5);
     session_free(h); session_free(fresh);
     return 0;
+}
+
+# === 1.7.16 — the peer-reachable highs of gate re-run #3 (AK, AM, AL). ===
+#
+# **AK** — `combat_tick_all` gates the whole round on `SS_PHASE == PHASE_CMD`;
+# `mob_tick_all` deferred to it whenever the player was targeting that mob. So the
+# moment a player typed `passwd` mid-fight, NEITHER side swung: the round was
+# skipped for the phase, and the mob's own swing was skipped because it expected
+# the round to make it. Measured live at the authored 2.5 s tick: **0 combat lines
+# in 40 s while engaged**, then combat resuming on the same engagement once the
+# re-key finished. At 1 HP that is unbounded invulnerability from two shipped verbs.
+#
+# **AM** — `_obj_id_world_count` summed rooms plus ONLINE sessions, and
+# `maybe_zone_reset` defers while any player is in-world, so the session term is
+# provably always zero on that path. Objects carried offline were invisible, the
+# reset minted replacements, and the owner brought theirs back. Measured: six
+# get/quit/reset/relog cycles turned one `notice` into **seven**, and produced
+# **five copies of `relic`, which is authored exactly once**. Re-verified live
+# after the fix: six cycles, still one.
+fn test_peer_reachable_highs(): i64 {
+    test_group("peer-reachable-highs");
+    persist_init();
+    if (g_obj_tpl_count == 0) { assert(0, "peer-reachable-highs: needs object templates"); return 0; }
+    if (g_mob_tpl_count == 0) { assert(0, "peer-reachable-highs: needs mob templates"); return 0; }
+    if (world_room_count() == 0) { assert(0, "peer-reachable-highs: needs a zone"); return 0; }
+
+    # --- AK. A player engaged with a mob, parked in the passphrase prompt.
+    var p = _freeable_sess();
+    store64(p + SS_ROOM, 0);
+    store64(p + SS_FD, 0 - 1);
+    store64(p + SS_AUTHED, 1);
+    store64(p + SS_HP, 100000); store64(p + SS_MAXHP, 100000);
+    store64(p + SS_AC, 50);                       # HIGH ac = easy to hit
+    var head = g_session_head;
+    store64(p + SS_NEXT, 0);
+    g_session_head = p;
+
+    var m = mob_spawn(mt_at(0), 0);
+    mi_set_target(m, p);                          # the mob has latched on
+    store64(p + SS_TARGET, m);                    # ...and the player is fighting it
+    store64(p + SS_PHASE, PHASE_CHPASS_NEW);      # ...then types `passwd`
+
+    var hp0 = load64(p + SS_HP);
+    var t = 1;
+    while (t < 60) {                              # combat_try_hit misses on a natural 1
+        store64(m + MI_ACTED, 0);
+        mob_tick_all(t);
+        if (load64(p + SS_HP) < hp0) { t = 60; } else { t = t + 1; }
+    }
+    assert(load64(p + SS_HP) < hp0,
+           "THE ASSERTION AK EXISTS FOR: a mob still swings at a player parked in `passwd`");
+
+    # ...and the normal case is unchanged: while the player is at the command
+    # prompt and fighting this mob, mob_tick_all still defers to combat_round, or
+    # the mob would swing twice a tick.
+    store64(p + SS_PHASE, PHASE_CMD);
+    store64(p + SS_HP, 100000);
+    var hp1 = load64(p + SS_HP);
+    var t2 = 1;
+    while (t2 < 30) {
+        store64(m + MI_ACTED, 0);
+        mob_tick_all(t2);
+        t2 = t2 + 1;
+    }
+    assert_eq(load64(p + SS_HP), hp1,
+              "...while at the command prompt it still defers to combat_round, as before");
+
+    mi_set_target(m, 0);
+    mob_remove(m);
+    g_session_head = head;
+    session_free(p);
+
+    # --- AM. The offline census.
+    #
+    # Seeded ONCE from disk at persist_init, then moved by the two events that
+    # actually change it: `_restore_inv` takes a holding online at login, and
+    # `session_drop_inv` returns it offline at disconnect. It is NOT rebuilt per
+    # reset — the first cut did that, and `dir_list` / `str_from` allocate on a
+    # bump arena with no free, measured at ~70 kB permanently lost per rebuild on
+    # a path that runs every 15 minutes.
+    var idp = ot_at(0) + OT_ID;
+    var idl = load64(ot_at(0) + OT_ID_LEN);
+
+    # THE BOOT SEED IS WIRED, and wired in the right ORDER. Every assertion below
+    # calls the builder itself, so none of them can tell whether `persist_init`
+    # ever does — the same "the function works, nothing calls it" gap 1.7.11
+    # through 1.7.15 each had to close from the source. The ordering is pinned
+    # too, and not decoratively: the builder calls `persist_init`, so seeding
+    # before the ready flag is unbounded recursion. It was, on the first attempt.
+    var ready_at = _src_offset_of("src/persist.cyr", "g_persist_ready = 1;");
+    var seed_at  = _src_offset_of("src/persist.cyr", "obj_offline_census_build();");
+    assert(ready_at > 0, "persist_init sets its ready flag where we think it does");
+    assert(seed_at > 0, "...and seeds the offline census");
+    assert(seed_at > ready_at,
+           "...AFTER the flag — seeding before it recurses through persist_init forever");
+
+    # THE BOOT SEED. Everything below moves the census by delta; this is the one
+    # assertion that it is ever populated from disk in the first place. Without
+    # it the whole mechanism can be correct and start from zero forever.
+    _player_unlink("Census", 6);
+    var cs = _mk_sess("Census", 6);
+    var csblk = sess_ident(cs);
+    var cssalt = alloc(SALT_LEN);
+    var cq = 0;
+    while (cq < SALT_LEN) { store8(cssalt + cq, 3 + cq); cq = cq + 1; }
+    memcpy(csblk, cssalt, SALT_LEN);
+    ident_derive(cssalt, "censusphrase", 12, csblk + IDENT_SK, csblk + IDENT_PK);
+    store64(csblk + IDENT_CREATED, 1);
+    store64(cs + SS_FD, 0 - 1);
+    store64(cs + SS_ROOM, 0 - 1);
+    store64(cs + SS_HP, 9); store64(cs + SS_MAXHP, 9);
+    store64(cs + SS_CLASS, 0);
+    store64(cs + SS_AUTHED, 1);
+    store64(cs + SS_INV, 0);
+    ilist_push(cs + SS_INV, item_new(ot_at(0)));
+    ilist_push(cs + SS_INV, item_new(ot_at(0)));
+    ilist_push(cs + SS_INV, item_new(ot_at(0)));
+    assert_eq(player_save(cs), 1, "a record holding three of an authored object");
+    _drain_ilist(cs + SS_INV); store64(cs + SS_INV, 0);
+
+    var seed_before = obj_offline_count(0);
+    obj_offline_census_build();
+    var seed_with = obj_offline_count(0);
+    _player_unlink("Census", 6);
+    obj_offline_census_build();
+    assert_eq(seed_with - obj_offline_count(0), 3,
+              "the boot seed READS a record's inventory off disk — three items, three counted");
+
+    # Seed a KNOWN offline holding rather than trusting whatever other fixtures
+    # have left on disk: the census floors at zero, so a fixture that assumes
+    # `off0 >= 2` and gets 0 measures the floor instead of the move.
+    obj_census_adjust(0, 5);
+    var off0 = obj_offline_count(0);
+    assert(off0 >= 2, "the fixture really does have offline holdings to move");
+
+    # A returning player's items leave the offline population...
+    var r = _freeable_sess();
+    store64(r + SS_INV, 0);
+    _restore_inv(r, "scrip,scrip", 11);
+    assert_eq(inv_count(r), 2, "the returning player gets their two items");
+    assert_eq(obj_offline_count(0), off0 - 2,
+              "THE ASSERTION AM EXISTS FOR: coming online REMOVES them from the offline census");
+
+    # ...and the online walk now counts them instead, so the total is conserved.
+    var head0 = g_session_head;
+    store64(r + SS_NEXT, 0);
+    g_session_head = r;
+    assert_eq(_obj_id_world_count(idp, idl), _obj_id_count_rooms(idp, idl) + off0,
+              "...with the world total unchanged across the move — online + offline is conserved");
+    g_session_head = head0;
+
+    # ...and disconnecting puts them back.
+    session_drop_inv(r);
+    assert_eq(obj_offline_count(0), off0,
+              "disconnecting RETURNS them to the offline census — the round trip conserves");
+    session_free(r);
+
+    # The census never goes negative, however inconsistent the inputs.
+    obj_census_adjust(0, 0 - 999999);
+    assert_eq(obj_offline_count(0), 0, "the census floors at zero rather than underflowing");
+
+    # THE CEILING, AND THE WIRING. `_obj_id_world_count` must READ the census, and
+    # `zone_reset_objs` must respect the result. Driven through the real reset.
+    var saved_heads = alloc(world_room_count() * 8);
+    var ri = 0;
+    while (ri < world_room_count()) {
+        store64(saved_heads + ri * 8, load64(room_at(ri) + RM_OBJ_HEAD));
+        store64(room_at(ri) + RM_OBJ_HEAD, 0);
+        ri = ri + 1;
+    }
+    # Pick a template with headroom — the suite leaves other fixtures' records on
+    # disk, and a hardcoded choice can be at its ceiling before this test starts.
+    var pick = 0 - 1;
+    var need = 0;
+    var ti = 0;
+    while (ti < g_obj_tpl_count) {
+        var tp = ot_at(ti);
+        var au = _obj_id_authored_count(tp + OT_ID, load64(tp + OT_ID_LEN));
+        var hd = obj_offline_count(ti);
+        if (au > hd) { if (pick < 0) { pick = ti; need = au - hd; } }
+        ti = ti + 1;
+    }
+    assert(pick >= 0, "some authored object still has headroom above what records hold");
+    var pidp = ot_at(pick) + OT_ID;
+    var pidl = load64(ot_at(pick) + OT_ID_LEN);
+
+    obj_census_adjust(pick, need);                  # offline players now hold the lot
+    var arena0 = alloc_used();
+    zone_reset_objs();
+    assert_eq(_obj_id_count_rooms(pidp, pidl), 0,
+              "THE WIRING ASSERTION: a reset mints NOTHING for an id the offline players already hold");
+    var reset_arena = alloc_used() - arena0;
+
+    # ...and the same reset restocks once those holdings are gone, so the
+    # assertion above cannot be passing because the reset is simply broken.
+    obj_census_adjust(pick, 0 - need);
+    ri = 0;
+    while (ri < world_room_count()) {
+        _drain_ilist(room_at(ri) + RM_OBJ_HEAD);
+        store64(room_at(ri) + RM_OBJ_HEAD, 0);
+        ri = ri + 1;
+    }
+    zone_reset_objs();
+    assert(_obj_id_count_rooms(pidp, pidl) > 0, "...while an id with headroom IS restocked");
+
+    # AND THE RESET COSTS NO ARENA. This is the assertion that keeps the census
+    # off the disk: a per-reset `dir_list` would show up here immediately.
+    assert_eq(reset_arena, 0,
+              "a zone reset allocates ZERO bump arena — the census is not rebuilt from disk");
+
+    ri = 0;
+    while (ri < world_room_count()) {
+        _drain_ilist(room_at(ri) + RM_OBJ_HEAD);
+        store64(room_at(ri) + RM_OBJ_HEAD, load64(saved_heads + ri * 8));
+        ri = ri + 1;
+    }
+    return 0;
+}
+
+# How many instances of this id are lying in rooms (no session, no offline term)?
+fn _obj_id_count_rooms(idptr, idlen): i64 {
+    var n = 0;
+    var ri = 0;
+    while (ri < world_room_count()) {
+        n = n + _obj_id_count_list(room_obj_head(room_at(ri)), idptr, idlen);
+        ri = ri + 1;
+    }
+    return n;
 }
 
 var exit_code = main();

@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.15 — AJ/AN/AO closed; **3 high + 3 medium + 7 low remain** from gate re-run #3. Next is 1.7.16)
+> **Last Updated**: 2026-07-31 (v1.7.16 — **every high from gate re-run #3 is closed**; 2 medium + 7 low remain. Next is 1.7.17)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -39,7 +39,7 @@ ownership and fix size.
 | — | ~~1.7.14~~ | ~~2~~ | ✅ **Shipped.** **AH** `ident_derive` and the confirm path now wipe their key scratch · **AI** the reap budget is spent only on reaps that cost a signature | — |
 | — | ~~gate re-run #3~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **4 high**, 5 medium, 7 low. Finders could BUILD AND RUN this time; three of the four highs were demonstrated against a live server | — |
 | — | ~~1.7.15~~ | ~~3~~ | ✅ **Shipped.** **AJ** a rejected objects table is now fatal (exit 1), and a dropped id is counted, audited and reported · **AN** `class` by stable id, both forms read · **AO** a healed character keeps its room | — |
-| 2 | [**1.7.16**](#1716--reachable-by-a-peer-today) | 3 | **AK** `passwd` mid-fight = permanent immunity · **AM** unlimited duplication of unique artifacts · **AL** the account cap burns 436 phantom slots/s unauthenticated | **yes** |
+| — | ~~1.7.16~~ | ~~3~~ | ✅ **Shipped.** **AK** the two tick consumers now agree what a phase means · **AM** an offline census, seeded once and moved by login/disconnect · **AL** the account is counted where the record is written | — |
 | 3 | [**1.7.17**](#1717--mechanics-and-instruments) | 10 | **AP** mobs cannot kill an unengaged player · **AQ** the fuzz gate is a no-op on half its iterations · plus the low tail (AR-AY), including **two benches that cannot fail** | **yes** |
 | 4 | [**gate re-run #4**](#the-gate--what-closes-the-1x-line) | — | Build the **offline-population conservation harness** and the **phase × tick matrix** first — see "no instrument for" above | **yes** |
 | 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
@@ -142,10 +142,31 @@ resuming, so `login_on_class` runs `session_enter_world` and the player is
 silently moved to the start room, permanently. Reproduced: `hub.flagon` →
 `hub.gate`. **Fix: the heal must call `session_resume_world`.**
 
-### 1.7.16 — reachable by a peer today
+### ✅ 1.7.16 — reachable by a peer today (SHIPPED)
+
+Items AK, AM and AL are **closed**, and with them **every high from gate re-run
+#3**. 1362 assertions (was 1340), 10/10 mutations killed. AM re-verified live: six
+get/quit/reset/relog cycles, still one copy (the sweep measured seven).
+
+**The AM census was wrong twice before it was right**, and both were caught by
+measuring rather than reviewing:
+- Rebuilding it per reset is correct but costs **~70 kB of permanently lost arena
+  per rebuild** (`dir_list` / `str_from` allocate; `alloc` has no free) — 1.7.1's
+  item-C shape reappearing *inside the fix for a different unbounded-growth bug*.
+  It is now seeded ONCE at boot and moved by login and disconnect.
+- Seeding it from `persist_init` **before** the ready flag recursed forever,
+  because the builder calls `persist_init` itself. A test pins the ordering.
+
+**A pre-existing test then failed under `cyrius audit` and passed under
+`cyrius test`.** The difference was real: the reset now consults offline holdings,
+so anything driving `zone_reset_room_objs` depends on what is in `data/players`
+when the process starts. That test now controls its own precondition — but the
+coupling is new, and worth remembering before adding more reset-driven tests.
+
+### 1.7.16 — the three items (detail, retained)
 
 **AK. Typing `passwd` mid-fight makes you permanently immune to the mob you are
-fighting.** *(high)*
+fighting.** *(high — CLOSED in 1.7.16)*
 
 - `combat_tick_all` gates the whole round on `SS_PHASE == PHASE_CMD`
   ([`server.cyr:1383`](../../src/server.cyr:1383)); `mob_tick_all`
@@ -158,8 +179,7 @@ fighting.** *(high)*
   reap; re-key completed → combat resumes on the same engagement. At 1 HP this is
   unbounded invulnerability from two shipped verbs.
 
-**AM. An object is duplicated on every logout/reset cycle.** *(high — filed
-medium, re-rated up on the evidence)*
+**AM. An object is duplicated on every logout/reset cycle.** *(high — CLOSED in 1.7.16)*
 
 - `_obj_id_world_count` ([`item.cyr:994`](../../src/item.cyr:994)) sums room
   contents plus **online** sessions — and `maybe_zone_reset` defers while any
@@ -171,7 +191,7 @@ medium, re-rated up on the evidence)*
   ceiling of 2. **On the unique authored artifact: `relic` → five copies.** A
   player can mint unlimited copies of a one-of-a-kind item.
 
-**AL. The account cap counts sealed identities, not records.** *(high)*
+**AL. The account cap counts sealed identities, not records.** *(high — CLOSED in 1.7.16)*
 
 - `g_account_count` is incremented when the identity is sealed
   ([`persist.cyr:2451`](../../src/persist.cyr:2451)) and **there is no decrement

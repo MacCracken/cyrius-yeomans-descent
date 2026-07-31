@@ -69,6 +69,87 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 allowed to run the suite and the benches.**
 
 
+## [1.7.16] — 2026-07-31
+
+**The peer-reachable highs.** 1362 assertions (was 1340); `cyrius audit` exits 0;
+6/6 benches; fuzz clean; both targets build; **10/10 mutations killed**.
+
+The three remaining highs from gate re-run #3 (**AK**, **AM**, **AL**), all
+reachable by an ordinary peer with no admin and no malice.
+
+### Fixed
+
+- **Typing `passwd` mid-fight made you permanently immune (AK).**
+  `combat_tick_all` gates the whole round on `SS_PHASE == PHASE_CMD`, and
+  `mob_tick_all` skipped its own swing whenever the player was targeting that mob
+  — deferring to a round that, outside `PHASE_CMD`, never runs. **Neither side
+  swung.** Measured by the sweep at the authored 2.5 s tick: 0 combat lines in
+  40 s while engaged, then combat resuming on the same engagement once the re-key
+  finished. At 1 HP that is unbounded invulnerability from two shipped verbs, and
+  the idle reaper cannot collect it either because every re-prompt refreshes
+  `SS_LAST_MS`.
+
+  The deferral now asks the question its own comment already stated — *will
+  `combat_round` actually swing this?* — rather than approximating it with
+  `SS_TARGET == m`. The consequence is deliberate: a player who opens the
+  passphrase prompt mid-fight keeps taking damage and stops dealing it.
+
+- **An object was duplicated on every logout/reset cycle (AM).**
+  `_obj_id_world_count` summed room contents plus **online** sessions, and
+  `maybe_zone_reset` defers while any player is in-world — so the session term is
+  provably always zero on that path and the ceiling really meant "how many are
+  lying in rooms". Everything carried offline was invisible, the reset minted a
+  replacement, and the owner brought theirs back. Measured: six
+  get/quit/reset/relog cycles turned one `notice` into **seven**, and produced
+  **five copies of `relic`, which is authored exactly once**. Re-verified live
+  after the fix: six cycles, still one.
+
+  There is now an **offline census** — per-template counts of what saved records
+  hold — seeded once at boot and moved by the two events that change it:
+  `_restore_inv` takes a holding online at login, `session_drop_inv` returns it
+  offline at disconnect, immediately after `drop_session`'s save.
+
+- **The account cap counted sealed identities, not records (AL).**
+  `g_account_count` was incremented the moment an identity was sealed, and
+  **nothing anywhere decrements** — so a peer that hung up at the class menu burned
+  a slot for a character that never existed. Measured: **200 slots in 0.46 s
+  (436/s)** from one reused name and a 27-byte payload, unauthenticated, with
+  **zero records on disk**, after which a genuine player is refused. The increment
+  now happens where the record is actually written.
+
+  **1.7.11 widened this without noticing**: `session_persistable` correctly
+  stopped `drop_session` writing a classless record on abandon, and thereby
+  removed the record that used to make the count true.
+
+### Notes
+
+- **The census design was wrong twice before it was right, and both were caught by
+  measurement rather than review.** The first cut rebuilt it from disk at the top
+  of every reset pass — correct, but `dir_list` and `str_from` allocate on an
+  arena with no free, **measured at ~70 kB permanently lost per rebuild** on a
+  path that runs every fifteen minutes. That is 1.7.1's item-C shape reappearing
+  *inside the fix for a different unbounded-growth bug*. The second cut seeded it
+  from `persist_init` — before the ready flag, so the builder's own
+  `persist_init()` call recursed forever. A test now pins both the wiring and the
+  ordering, because only the ordering makes it terminate.
+
+- **`cyrius audit` failed where `cyrius test` passed, and the difference was real.**
+  The reset now consults offline holdings, which makes anything driving
+  `zone_reset_room_objs` depend on what is in `data/players` when the process
+  starts — so a pre-existing assertion passed from a clean tree and failed after a
+  prior test run had left records. The test now zeroes the census for the id it
+  exercises and restores it. **A test whose outcome depends on disk state left by
+  an earlier run is a landmine**, and this release added the coupling that armed it.
+
+- **Two of this release's own test bugs.** `session_free` was called on a
+  `_mk_sess` session, which leaves `SS_TS = 0` — `telnet_state_free` dereferenced
+  it and the run died with SIGSEGV after printing its own group header, which is
+  the "a test that dies silently reads exactly like a test that passed" lesson,
+  live. And a fixture hardcoded template 0, which is authored exactly once and was
+  already held by a leftover record, so the ceiling was permanently met and the
+  restock assertion could never run; the template is now chosen at runtime for
+  headroom.
+
 ## [1.7.15] — 2026-07-31
 
 **The operator-edit blast radius.** 1340 assertions (was 1310); `cyrius audit`

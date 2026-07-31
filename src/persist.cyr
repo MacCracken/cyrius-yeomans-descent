@@ -188,6 +188,10 @@ fn persist_init(): i64 {
     config_apply_env();
     g_account_count = accounts_count_disk();
     g_persist_ready = 1;
+    # 1.7.16 (AM) — seeded ONCE, and AFTER the ready flag: the builder calls
+    # persist_init itself (it is reachable from tests directly), so seeding before
+    # this line is unbounded recursion. It was, on the first attempt.
+    obj_offline_census_build();
     audit_size_check();             # 1.7.1 / ADR 0009 — one boot-time size warning
     return 0;
 }
@@ -1795,6 +1799,163 @@ fn _class_index_by_id(buf, len): i64 {
     return 0 - 1;
 }
 
+# === 1.7.16 (AM) — the OFFLINE census. ===
+#
+# THE DEFECT. `_obj_id_world_count` (item.cyr) sums room contents plus ONLINE
+# sessions, and `maybe_zone_reset` defers while any player is in-world — so the
+# session term is provably ALWAYS ZERO on the reset path, and the ceiling was
+# really "how many are lying in rooms". Every object a player carried offline was
+# invisible, so the reset respawned a replacement, and the player brought theirs
+# back at the next login. Measured by gate re-run #3: six get/quit/reset/relog
+# cycles turned one `notice` into **seven** against an authored ceiling of 2, and
+# **five copies of `relic`, which is authored exactly once**.
+#
+# WHY A CENSUS AND NOT A CLAMP. The obvious alternative — refuse to restore an
+# item when the world is already at the ceiling — destroys property the player
+# legitimately owns because somebody else happens to be holding one. The count is
+# what was wrong, so the count is what is fixed.
+#
+# WHY IT IS SEEDED ONCE AND THEN MAINTAINED BY DELTA. The first cut rebuilt it at
+# the top of every reset pass. That is correct but not free: `dir_list` and
+# `str_from` allocate, and `alloc` has no free — MEASURED at ~70 kB of permanently
+# lost arena per rebuild, which on a 15-minute reset cadence is the 1.7.1 item-C
+# shape reappearing inside the fix for a different unbounded-growth bug.
+#
+# So the disk is walked exactly ONCE, from `persist_init`, and after that the
+# census moves with the events that actually change it: an item leaves the offline
+# population when `_restore_inv` mints it for a returning player, and rejoins it
+# when `session_drop_inv` frees that player's inventory at disconnect — which
+# happens immediately after `drop_session`'s save, so the record and the census
+# agree. A `kill -9` skips the disconnect hook, and the next boot re-seeds.
+var g_obj_offline = 0;      # per-template offline holdings; index-parallel to g_obj_tpls
+# Path scratch for the census walk, allocated ONCE. These were originally
+# `alloc`ed inside the walk's loops, which is an unbounded bump leak on a path
+# that runs on EVERY zone reset — `alloc` has no free, so it would have been
+# ~3 x PATH_CAP per record per reset, forever. That is the defect class of 1.7.1's
+# item C and of the still-open item AA, and it very nearly shipped inside the fix
+# for a different unbounded-growth bug.
+var g_census_sub  = 0;
+var g_census_pre  = 0;
+var g_census_path = 0;
+
+# Add one record's `inv` field to the census.
+fn _census_add_record(path): i64 {
+    var n = file_read_all(path, g_persist_slurp, SLURP_CAP - 1);
+    if (n <= 0) { return 0; }
+    store8(g_persist_slurp + n, 0);
+    var ilen[8];
+    var inv = _scan_kv(g_persist_slurp, n, "inv", &ilen);
+    if (inv == 0) { return 0; }
+    var len = load64(&ilen);
+    var i = 0;
+    while (i < len) {
+        var start = i;
+        while (i < len) {
+            if ((load8(inv + i) & 0xFF) == 44) { break; }   # ','
+            i = i + 1;
+        }
+        var idlen = i - start;
+        if (idlen > 0) {
+            var tpl = obj_tpl_by_id(inv + start, idlen);
+            if (tpl != 0) {
+                var idx = (tpl - g_obj_tpls) / OT_SIZE;
+                if (idx >= 0) {
+                    if (idx < g_obj_tpl_count) {
+                        store64(g_obj_offline + idx * 8, load64(g_obj_offline + idx * 8) + 1);
+                    }
+                }
+            }
+        }
+        if (i < len) { i = i + 1; }
+    }
+    return 0;
+}
+
+# Rebuild the whole census. Called once at the top of each reset pass.
+fn obj_offline_census_build(): i64 {
+    persist_init();
+    if (g_obj_tpl_count <= 0) { return 0; }
+    if (g_obj_offline == 0) { g_obj_offline = alloc(MAX_ENTRIES * 8); }
+    memset(g_obj_offline, 0, MAX_ENTRIES * 8);
+    if (g_census_sub == 0)  { g_census_sub  = alloc(PATH_CAP); }
+    if (g_census_pre == 0)  { g_census_pre  = alloc(PATH_CAP); }
+    if (g_census_path == 0) { g_census_path = alloc(PATH_CAP); }
+    var top = dir_list(str_from(DP_PLAYERS));
+    var n = vec_len(top);
+    if (n <= 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var nm = vec_get(top, i);
+        if (_is_record_name(nm) == 1) {
+            # A legacy flat record, still read since 1.7.2.
+            if (_join2(g_census_path, DP_PLAYERS_S, str_data(nm), str_len(nm)) == 1) {
+                _census_add_record(g_census_path);
+            }
+        } else {
+            if (_join2(g_census_sub, DP_PLAYERS_S, str_data(nm), str_len(nm)) == 1) {
+                var inner = dir_list(str_from(g_census_sub));
+                var m = vec_len(inner);
+                var j = 0;
+                while (j < m) {
+                    var rn = vec_get(inner, j);
+                    if (_is_record_name(rn) == 1) {
+                        if (_join2(g_census_pre, g_census_sub, "/", 1) == 1) {
+                            if (_join2(g_census_path, g_census_pre, str_data(rn), str_len(rn)) == 1) {
+                                _census_add_record(g_census_path);
+                            }
+                        }
+                    }
+                    j = j + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Move `delta` holdings of template `idx` between the offline and online
+# populations. Called from `_restore_inv` (login: offline -> online) and
+# `session_drop_inv` (disconnect: online -> offline).
+fn obj_census_adjust(idx, delta): i64 {
+    if (g_obj_offline == 0) { return 0; }
+    if (idx < 0) { return 0; }
+    if (idx >= g_obj_tpl_count) { return 0; }
+    var v = load64(g_obj_offline + idx * 8) + delta;
+    if (v < 0) { v = 0; }        # never negative: a mismatch must not underflow
+    store64(g_obj_offline + idx * 8, v);
+    return 0;
+}
+
+# Template index for an instance's originating id, or -1.
+fn obj_census_index(o): i64 {
+    var tpl = obj_tpl_by_id(oi_tpl_id_ptr(o), oi_tpl_id_len(o));
+    if (tpl == 0) { return 0 - 1; }
+    return (tpl - g_obj_tpls) / OT_SIZE;
+}
+
+# How many of template `idx` are held by players who are not connected?
+fn obj_offline_count(idx): i64 {
+    if (g_obj_offline == 0) { return 0; }
+    if (idx < 0) { return 0; }
+    if (idx >= g_obj_tpl_count) { return 0; }
+    return load64(g_obj_offline + idx * 8);
+}
+
+# Append `b[0..blen)` to the NUL-terminated `a`, into `out`. 1 on success.
+fn _join2(out, a, b, blen): i64 {
+    var off = 0;
+    while ((load8(a + off) & 0xFF) != 0) {
+        if (off >= PATH_CAP - 2) { return 0; }
+        store8(out + off, load8(a + off));
+        off = off + 1;
+    }
+    if (off + blen >= PATH_CAP - 1) { return 0; }
+    memcpy(out + off, b, blen);
+    store8(out + off + blen, 0);
+    return 1;
+}
+
 # Re-instantiate inventory from a comma-separated template-id list.
 fn _restore_inv(s, ids, len): i64 {
     var dropped = 0;
@@ -1808,7 +1969,12 @@ fn _restore_inv(s, ids, len): i64 {
         var idlen = i - start;
         if (idlen > 0) {
             var tpl = obj_tpl_by_id(ids + start, idlen);
-            if (tpl != 0) { ilist_push(s + SS_INV, item_new(tpl)); }
+            if (tpl != 0) {
+                ilist_push(s + SS_INV, item_new(tpl));
+                # 1.7.16 (AM) — this holding is ONLINE now; the session walk in
+                # _obj_id_world_count counts it, so the offline census must not.
+                obj_census_adjust((tpl - g_obj_tpls) / OT_SIZE, 0 - 1);
+            }
             else { dropped = dropped + 1; }
         }
         if (i < len) { i = i + 1; }
@@ -2532,7 +2698,18 @@ fn login_on_confirm(s, buf, len): i64 {
         load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
         return 0;
     }
-    g_account_count = g_account_count + 1;
+    # 1.7.16 (AL) — the increment MOVED to where the record is actually written
+    # (classes.cyr, on the first successful player_save). It used to fire here, at
+    # the moment the identity was sealed, and nothing anywhere decrements — so a
+    # peer that reached this line and then dropped at the class menu burned a slot
+    # for a character that does not exist. Measured by gate re-run #3:
+    # **200 slots in 0.46 s (436/s)** from one reused name and a 27-byte payload,
+    # unauthenticated, with **zero records on disk** — after which a genuine player
+    # is refused with "This world is not accepting new characters."
+    #
+    # 1.7.11 widened this without noticing: `session_persistable` correctly stopped
+    # `drop_session` writing a classless record on abandon, and thereby removed the
+    # record that used to make the count true.
     store64(s + SS_FAILS, 0);   # sealed — the creation attempt count resets
     store64(blk + IDENT_CREATED, get_epoch_secs());
     store64(s + SS_AUTHED, 1);
