@@ -45,6 +45,24 @@ jobs:
           mkdir -p build
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
+      - name: Build (AGNOS target)
+        # 1.7.8 — THE CAUSE, not the instance.
+        #
+        # `--agnos` was never built here, and that is the whole reason a defect of
+        # this size lived in the tree: on AGNOS, syscall 82 is GPU dispatch and 87
+        # is a GPU blit, not rename and unlink, and `sys_mkdir` takes a PATH LENGTH
+        # where Linux takes a MODE. `player_save` used the raw numbers and the
+        # Linux argument order, so on that target **no player record was ever
+        # published and every reconnect was offered a brand-new character** — while
+        # the x86_64 suite stayed green, because there 82/87 genuinely ARE rename
+        # and unlink.
+        #
+        # A compile is not proof the target works — nothing here executes the AGNOS
+        # binary. What it does buy is the thing that was actually missing: a
+        # signature change in a `#ifdef CYRIUS_TARGET_AGNOS` branch now BREAKS THE
+        # BUILD instead of rotting silently until someone runs the server.
+        run: cyrius build src/main.cyr build/${{ github.event.repository.name }}-agnos --agnos
+
       - name: Test
         # MUST be bare `cyrius test`. The old step was `cyrius test src/test.cyr`,
         # and `src/test.cyr` is a deliberate no-op stub (`fn main() { return 0; }`)

@@ -4,6 +4,115 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.8] — 2026-07-30
+
+**AGNOS persistence, and the pre-auth parse.** 1180 assertions (was 1118);
+`cyrius audit` exits 0; 6/6 benches; both targets build; 12/14 mutations killed
+(the two exceptions are stated below rather than rounded up).
+
+The last two high findings from the gate re-run. Both had been true for many
+releases; neither could fail a test, for two different and instructive reasons.
+
+### Fixed
+
+- **On the AGNOS build, a player record was never published at all.**
+  `player_save` renamed its temp file with a raw `syscall(82)` and retired the
+  legacy flat copy with `syscall(87)`. Those are `rename` and `unlink` on x86_64.
+  On AGNOS they are **`SYS_GPU_DISPATCH` and `SYS_GPU_BLIT_SHM`** — the latter
+  annotated in the stdlib, in as many words, *"UNLINK on Linux — DELETES A
+  FILE"*. The record directories were not created either: `sys_mkdir` takes a
+  **mode** on Linux and a **path length** on AGNOS, and the call passed 0755.
+
+  So on `--agnos`: character creation warned it could not write, every autosave
+  and disconnect save failed the same way, and **every reconnect was offered a
+  brand-new character.** README and `docs/guides/running.md` had advertised
+  AGNOS persistence as working identically since 1.1.0.
+
+  All three now go through the portable `lib/io.cyr` wrappers (`file_rename`,
+  `xunlink`) or one new `_mkdir_portable` helper carrying the `#ifdef` shape
+  `player_exists` already used. **The stdlib was never wrong** — `lib/io.cyr` has
+  had correct AGNOS branches since before this bug, and the comment at the 1.7.4
+  audit-rotation rename says to use them "not the raw syscall above". That
+  release fixed its own new code and did not go back six lines.
+
+- **Every login attempt against an existing name permanently consumed 2,248
+  bytes.** `player_auth_load` parsed the whole record with `toml_parse` *before*
+  checking the passphrase, and that memory never comes back: the bump allocator
+  has no free at all, and the freelist never munmaps. Reachable by anyone who can
+  open a socket — no account needed, and the login prompt itself answers which
+  names exist. Five guesses per connection is ~11 kB gone forever per connection,
+  and 1.7.1's rollup window correctly suppresses the repeated audit entries, so
+  the instrument stays quiet while it happens.
+
+  The decision needs only `salt` and `pubkey`, both written by `_fhex` as exactly
+  `<key> = "<hex>"` on their own line, so both are now read straight out of the
+  slurp buffer and the parse is deferred until the passphrase has proved itself.
+  **Measured: 2,248 bytes per attempt → 0.** This is 1.7.0's argument one resource
+  along — that release stopped a wrong passphrase paying for a 7 ms
+  `ed25519_verify` it could not use, and left the parse where it stood. Unlike
+  CPU, arena never comes back.
+
+  It also removes a **null-dereference reachable from the unauthenticated login
+  path**: `str_new` returns 0 under memory pressure and bayan's parser
+  dereferences it immediately, so exhausting the arena crashed the server.
+
+### Changed
+
+- **CI builds the AGNOS target.** *The cause, not the instance.* `--agnos` was
+  never built here, which is the whole reason a defect of this size lived in the
+  tree. A compile is not proof the target works — nothing executes the AGNOS
+  binary — but a signature change in an `#ifdef CYRIUS_TARGET_AGNOS` branch now
+  breaks the build instead of rotting until someone runs the server.
+
+- **`docs/guides/running.md` stops claiming what was not true.** Its AGNOS
+  persistence paragraph is rewritten to say what broke, what changed, and — since
+  nothing here boots AGNOS — that end-to-end persistence on that kernel has not
+  been re-verified since the fix.
+
+### Notes
+
+- **The fast path is an optimisation, never a second record format.** The raw
+  scanner is deliberately stricter than bayan, which accepts a leading indent,
+  `salt="x"`, tabs around the `=`, and more. The first version of this fix
+  returned a terminal `-2` whenever the strict scan failed — which would have
+  turned every one of those shapes from "loads fine" into "your character is
+  corrupt". A failed scan now **falls through** to the parser and the original
+  code path, unchanged, and the fast path additionally declines any record not
+  beginning `[player]` so it never reasons about sections it cannot see. Both
+  behaviours are asserted.
+
+- **The fix could have opened a worse hole than it closed, and the guard against
+  it is verified rather than assumed.** Two readers now look at one record. bayan
+  and the scanner both take the *first* match on a duplicate key, so a loose
+  decoy line placed ahead of the real one is read by bayan and skipped by the
+  scanner — measured on all four loose shapes. Without a guard, a crafted record
+  could authenticate against the scanner's salt while every field was restored
+  from bayan's. A validly-signed crafted record now proves the guard fires; an
+  equal-prefix decoy proves the length half is load-bearing too.
+
+  The first version of that test spliced a decoy into an existing record, which
+  changed the signed prefix — so `ed25519_verify` refused it and the assertion
+  passed **with the guard deleted**. Three mutations survived on it. A player owns
+  their signing key (ADR 0004); the adversary signs their own crafted record, and
+  so must the test.
+
+- **Two mutations were not killed, stated rather than rounded up.** The pubkey
+  half of the differential guard survives, because `filepk` is re-decoded from the
+  *parsed* pubkey and the signature must verify under it — a pubkey differential
+  is already fatal three steps later. It is kept anyway, because that subsumption
+  is a fact about today's ordering rather than an invariant anyone declared. One
+  further mutation was a stale pattern in the harness that failed to apply, which
+  the harness reports as `BAD-PATTERN` rather than as a survivor — the 1.7.4
+  lesson that *a mutation script that fails to apply reports a false SURVIVED.*
+
+- **The only guard that could have caught the AGNOS bug reads the source.** No
+  test running on x86_64 can distinguish `rename` from GPU dispatch, because there
+  syscall 82 genuinely *is* rename; and a raw number compiles fine on both
+  targets, so the new CI build does not catch it either. A suite assertion now
+  requires `src/persist.cyr`, `src/session.cyr` and `src/item.cyr` to contain no
+  raw numeric `syscall(` outside a comment, and proves itself non-vacuous by
+  finding a planted one.
+
 ## [1.7.7] — 2026-07-30
 
 **Carry the fixes to the sites they were never applied to.** 1118 assertions

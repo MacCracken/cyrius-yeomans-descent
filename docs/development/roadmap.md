@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-30 (v1.7.7 — two of the gate re-run's four highs closed; **1.7.8 is next**, then gate re-run #2)
+> **Last Updated**: 2026-07-30 (v1.7.8 — **all five of the gate re-run's highs are closed**; next is 1.7.9, then gate re-run #2)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -29,9 +29,9 @@ ownership and fix size.
 | — | ~~1.7.5~~ | ~~1 of 2~~ | ✅ **Shipped.** Ground decay — player-dropped items expire after two zone-reset intervals (30 min). The last item of the 1.6/1.7 audit line | — |
 | — | ~~1.7.6~~ | ~~2~~ | ✅ **Shipped.** The room listing no longer breaks the wire (it ended mid-escape with no prompt at 86 floor objects) · 1.6.12's audit granularity restored | — |
 | — | ~~1.7.7~~ | ~~2~~ | ✅ **Shipped.** Carried two existing fixes to the sites they were never applied to — `get` of a container (silent item loss at 199 against a cap of 100) · five listing verbs that truncated mid-line with no prompt | — |
-| 1 | [**1.7.8**](#178--agnos-persistence-and-the-pre-auth-parse) | 2 | AGNOS saves never publish · every login against an existing name leaks 2.2 kB pre-auth | **yes** |
-| 2 | [**1.7.9**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 8 | The **RX-side** unbounded class 1.7.7's sweep found — a pre-auth peer driving the server's own reply buffer past `TX_CAP`, the 2× passphrase mask, and the load-path cap this file wrongly recorded as closed | **yes** |
-| 3 | [**gate re-run #2**](#the-gate--what-closes-the-1x-line) | — | Re-run after 1.7.8/1.7.9. The first re-run returned **DO-NOT-CLOSE** | **yes** |
+| — | ~~1.7.8~~ | ~~2~~ | ✅ **Shipped.** AGNOS saves never published (syscalls 82/87 are GPU calls there) · the pre-auth parse, 2,248 B/attempt → **0** · CI now builds `--agnos` | — |
+| 1 | [**1.7.9**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 9 | The **RX-side** unbounded class 1.7.7's sweep found — a pre-auth peer driving the server's own reply buffer past `TX_CAP`, the 2× passphrase mask, and the load-path cap this file wrongly recorded as closed, and 16 B/connection at accept | **yes** |
+| 2 | [**gate re-run #2**](#the-gate--what-closes-the-1x-line) | — | Re-run after 1.7.9. The first re-run returned **DO-NOT-CLOSE** | **yes** |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
@@ -54,11 +54,15 @@ the release.
 
 ---
 
-## Open issues — 2 high, from the gate re-run (2026-07-29)
+## Open issues — the gate re-run's five highs are ALL CLOSED (2026-07-30)
 
-**The gate re-run returned DO-NOT-CLOSE** with five highs. **Three are now
-closed**: R and S in 1.7.7, and V (the account cap) which was fixed in the working
-tree at the time and is committed. **T and U remain, and are 1.7.8.**
+**The gate re-run returned DO-NOT-CLOSE** with five highs. **All five are now
+closed**: R and S in 1.7.7, T and U in 1.7.8, and V (the account cap) committed
+before either.
+
+**That does not close the 1.x line.** Those two releases' own sweeps raised
+**eight new items** — see below — and the gate is a *re-run coming back clean*,
+not a checklist reaching zero. Next is 1.7.9, then the re-run.
 
 **The lesson, stated once because it is the same lesson as the previous sixteen
 releases:** three of the four are *a rule applied at some sites and not the
@@ -224,7 +228,7 @@ bytes at a time.** *(high)*
   roadmap was never corrected to say so**, so this document has claimed a bound
   that does not exist for five releases — the precise failure mode this project
   has a standing lesson about (*a comment is not a bound*), one level up.
-- **What 1.7.8 owes it:** decide and record — either bound it with an audit line
+- **What 1.7.9 owes it:** decide and record — either bound it with an audit line
   on truncation, or mark E **won't-fix** with the reasoning above. Not both.
 
 **Z. Four smaller unbounded or mis-ordered sites.** *(low)*
@@ -248,14 +252,70 @@ bytes at a time.** *(high)*
   rather than before it, so every pass overshoots by at least one signature.
   Bounded at one; noted for correctness of the accounting, not as a risk.
 
+### Raised by 1.7.8's own sweep (2026-07-30)
+
+**AA. Every completed TCP handshake permanently consumes 16 bytes, before a byte
+is read.** *(medium)*
+
+- **What breaks.** `sock_accept` returns `Ok(cfd)`, and the compiler boxes that
+  enum payload with a bump `alloc(16)` — [`lib/net.cyr:358`](../../lib/net.cyr:358),
+  and identically on the AGNOS branch at [`:343`](../../lib/net.cyr:343). The bump
+  arena has no free, so it is 16 bytes per connection, forever. Reached from
+  `handle_accept` (`src/server.cyr`) at the earliest possible point — before the
+  MOTD is queued, before a name is typed, before anything is validated.
+- **Can it happen today? Yes, unauthenticated**, from anyone who can complete a
+  handshake. ~5.7 MB/hour at 100 connections/s. Small next to the 2,248 bytes
+  1.7.8 removed, and unbounded in exactly the same way.
+- **Whose code — split, and the split matters.** The allocation is in `lib/`,
+  which is off-limits here. **The connection COUNT is entirely ours**, and so is
+  the choice to consume a boxed `Result` per accept. This is the 1.7.1 shape
+  again: descent's lever is the count, not the per-item cost.
+- **Fix size.** Needs a decision before a patch — an upstream `lib/net.cyr` change
+  (a non-allocating accept), or an accept-rate bound here. `MAX_SESSIONS` and the
+  1.6.3 accept backoff bound *concurrency*, not the cumulative count.
+- **Do not confuse this with `ACCEPT_BACKOFF_TICKS`**, which stands the listener
+  down after an accept *error*; a healthy connect/drop flood never touches it.
+
 **Also confirmed, and deliberately not filed as a defect:** `cmd_put` places no
 limit on a room container's contents. That is roadmap item **Q** (the donation
 bin) and is already 2.0 work; the sweep verified it is no longer a `MAX_INV`
 bypass, because contents of a *carried* container are counted by `inv_count`.
 
-### 1.7.8 — AGNOS persistence and the pre-auth parse
+### ✅ 1.7.8 — AGNOS persistence and the pre-auth parse (SHIPPED)
 
-**T. On the AGNOS build, a player record is never published at all.** *(high)*
+Items T and U are **closed**. 1180 assertions (was 1118), `cyrius audit` 0, 6/6
+benches, both targets build, 12/14 mutations killed (the two exceptions are named
+in the CHANGELOG rather than rounded up).
+
+**Both were measured.** The AGNOS syscall collision was confirmed in the emitted
+artefact — the `0x57` immediate count in a `CYRIUS_DCE=1 --agnos` build drops by
+exactly one when the raw `unlink` goes, and the rename read its number from a
+global exactly as the original finding described. The pre-auth parse went from
+**2,248 bytes per attempt to 0**, with the parse cost of the same record asserted
+as a contrast so the zero cannot pass for the wrong reason.
+
+**The cause was fixed alongside the instance:** CI now builds `--agnos`, and a
+suite assertion requires `persist.cyr` / `session.cyr` / `item.cyr` to contain no
+raw numeric `syscall(` outside a comment — the only guard that could have caught
+this, since on x86_64 syscall 82 genuinely *is* rename and a raw number compiles
+fine on both targets.
+
+**Two things worth keeping:**
+
+- *The fix nearly opened a worse hole than it closed.* Reading `salt`/`pubkey`
+  with a second, stricter parser creates a differential: bayan accepts shapes the
+  scanner skips, so a decoy line ahead of the real one is read by one and not the
+  other. Guarded, and the guard is verified by a **validly-signed** crafted record
+  — the first version of that test spliced a decoy into an existing record, broke
+  the signed prefix, and therefore passed with the guard deleted.
+- *A fast path must never become a second file format.* The first cut returned a
+  terminal `-2` whenever the strict scan failed, which would have turned every
+  hand-edited or non-canonical record from "loads" into "corrupt". It falls
+  through to the parser instead.
+
+### 1.7.8 — the two items (detail, retained)
+
+**T. On the AGNOS build, a player record is never published at all.** *(high — CLOSED in 1.7.8)*
 
 - **What breaks.** `player_save` asks for `syscall(82)` to rename the temp file
   into place and `syscall(87)` to unlink the old one. On AGNOS those numbers are
@@ -290,7 +350,7 @@ bypass, because contents of a *carried* container are counted by `inv_count`.
   rots again.
 
 **U. Every login attempt against an existing character permanently consumes
-2,248 bytes.** *(high)*
+2,248 bytes.** *(high — CLOSED in 1.7.8)*
 
 - **What breaks.** The record is parsed into memory **before the passphrase is
   checked**, and that memory can never be reused. Five guesses per connection

@@ -3,13 +3,61 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-30 (v1.7.7 — three of the gate re-run's five highs closed; **T and U remain** and are 1.7.8, plus eight new items 1.7.7's own sweep raised)
+> **Last refresh**: 2026-07-30 (v1.7.8 — **all five of the gate re-run's highs are closed**; eight new items from these two releases' own sweeps are 1.7.9, then gate re-run #2)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.8** — 2026-07-30. **1180 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build; **12/14 mutations killed** (the two exceptions are named in
+the CHANGELOG rather than rounded up).
+
+**AGNOS persistence, and the pre-auth parse.** The last two highs from the gate
+re-run. Both had been true for many releases, and neither could fail a test — for
+two different and instructive reasons.
+
+**`player_save` never published anything on `--agnos`.** It renamed with a raw
+`syscall(82)` and unlinked with `syscall(87)`; those are rename and unlink on
+x86_64 and **GPU dispatch and GPU blit** on AGNOS, the latter annotated in the
+stdlib as *"UNLINK on Linux — DELETES A FILE"*. Directories were not created
+either — `sys_mkdir` takes a **mode** on Linux and a **path length** on AGNOS. So
+on that target every save failed and **every reconnect was offered a brand-new
+character**, while the x86_64 suite stayed green because there the numbers are
+genuinely correct. Confirmed in the emitted artefact, not just the source.
+
+**The stdlib was never wrong.** `lib/io.cyr` has carried correct AGNOS branches
+throughout, and the comment at the 1.7.4 rotation rename says to use them "not the
+raw syscall above". 1.7.4 fixed its own new code and did not go back six lines.
+
+**A wrong passphrase cost 2,248 permanently-lost bytes; now it costs 0.** The
+record was fully parsed before the passphrase was checked, and the bump allocator
+has no free. `salt` and `pubkey` are now read straight from the slurp buffer and
+the parse deferred until the passphrase has proved itself. This also removes a
+null-dereference an attacker could reach by exhausting the arena — `str_new`
+returns 0 on OOM and bayan's parser dereferences it immediately.
+
+**Lessons carried, added this release:**
+
+- *The guard has to be able to see the defect.* No test on x86_64 can tell rename
+  from GPU dispatch, and a raw syscall number compiles fine on both targets, so
+  neither the suite nor the new CI `--agnos` build would catch a regression. What
+  catches it is a suite assertion that **reads the source** and requires no raw
+  numeric `syscall(` outside a comment. When the failure is invisible to every
+  instrument you have, the instrument is what needs building.
+- *A fast path must never quietly become a second file format.* The first cut
+  returned a terminal "corrupt record" whenever its stricter scanner failed, which
+  would have broken every hand-edited or non-canonical save. It falls through to
+  the parser instead, and the optimisation applies only to the canonical shape —
+  which is all real traffic.
+- *A fix that adds a second reader adds a differential.* Two parsers over one
+  security-relevant input disagree on shapes neither author considered; the guard
+  against it is only worth having if a test can make it fire, and making it fire
+  needed a **validly-signed** crafted record. The first version of that test broke
+  the signed prefix, so the signature check refused it and the assertion passed
+  with the guard deleted.
 
 **1.7.7** — 2026-07-30. **1118 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build; **17/17 mutations killed**.
@@ -511,7 +559,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (1118 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (1180 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -554,7 +602,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **1118** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **1180** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -602,6 +650,13 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
   that actually subtracts HP, loaders publishing only on success, `player_save`
   failures no longer discarded, double-login refusal, template-id round trip,
   audit-chain resume
+- **preauth-alloc** (1.7.8) — a wrong passphrase allocates ZERO bytes (20 attempts,
+  measured against `alloc_used`), with the parse cost of the same record asserted
+  as a contrast so the zero cannot pass for the wrong reason; the raw field
+  scanner over its domain; the parser-differential guard, proved by a
+  VALIDLY-SIGNED crafted record; the fast path falling through rather than
+  refusing a record only bayan can read; and the source-level assertion that no
+  raw numeric `syscall(` survives in persist/session/item
 - **room-listing / listing-bounds / carry-cap-get** (1.7.6-1.7.7) — the wire is a
   correctness surface: every listing stops at a whole item with the tail reserve
   intact and reports what it omitted (`look`'s three sections, `inventory`, `who`,
@@ -740,9 +795,10 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
-**Next: 1.7.8** — items T and U (AGNOS saves never publish; every login against an
-existing name permanently consumes 2,248 bytes pre-auth). Then **1.7.9**, the
-RX-side class 1.7.7's sweep raised (roadmap W–Z), then gate re-run #2.
+**Next: 1.7.9** — the RX-side unbounded class (roadmap W–Z): a pre-auth peer
+driving the server's own Telnet reply buffer past `TX_CAP`, the 2x passphrase
+mask, and the load-path carry cap this project recorded as closed and never was.
+Then gate re-run #2.
 
 **Next: 1.7.0** — re-derive both per-tick line budgets from the measured worst
 case and land the bench that gates a whole tick pass. Then 1.7.1–1.7.3, a gate
@@ -781,9 +837,9 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is 1.7.8**, not a milestone: see
+**Your next work is 1.7.9**, not a milestone: see
 [`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
-is batched into. 2.0.0 (starting with M14) is gated behind 1.7.8, 1.7.9 and a
+is batched into. 2.0.0 (starting with M14) is gated behind 1.7.9 and a
 clean gate re-run. Joshua is post-1.0 backlog, not next.
 
 ### Before you touch anything

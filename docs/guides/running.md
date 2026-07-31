@@ -39,9 +39,28 @@ only signalfd/timerfd (never sockets) and is 3-arg, so the Linux epoll multiplex
 ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)) becomes a
 `sleep_ms`-paced poll loop: drain non-blocking `sock_accept`, sweep the session
 list with non-blocking `sock_recv` — same single-threaded single-owner model, same
-2.5 s combat tick. Persistence (`data/players/`, `data/audit.libro`) works
-identically via AGNOS's `flock`/`lseek`. Clean shutdown is in-band / process-kill
-(AGNOS has no signalfd); the env knobs below are unchanged.
+2.5 s combat tick. Clean shutdown is in-band / process-kill (AGNOS has no
+signalfd); the env knobs below are unchanged.
+
+**Persistence (`data/players/`, `data/audit.libro`) — read this if you ran an
+AGNOS build before 1.7.8.** This guide claimed persistence "works identically"
+from 1.1.0, and it did not: `player_save` published records with raw
+`syscall(82)` / `syscall(87)`, which are `rename` and `unlink` on Linux but
+**GPU dispatch and GPU blit on AGNOS** — and it created its directories with a
+`sys_mkdir` argument order only Linux uses. On that target **no player record
+was ever written, and every reconnect was offered a brand-new character.** The
+x86_64 suite could not see it, and CI never built `--agnos` at all.
+
+Fixed in 1.7.8: every filesystem call now goes through the portable `lib/io.cyr`
+wrappers (`file_rename`, `xunlink`) or an explicit `#ifdef CYRIUS_TARGET_AGNOS`
+branch, a test asserts `src/persist.cyr` contains no raw numeric syscall, and CI
+builds both targets.
+
+**Scope of that claim, stated plainly:** CI *compiles* the AGNOS target; nothing
+here *executes* it. The syscall numbers and argument orders are now correct by
+construction against `lib/syscalls_x86_64_agnos.cyr`, but end-to-end persistence
+on a booted AGNOS kernel has not been re-verified since the fix. If you run one,
+that is the check worth reporting.
 
 To boot AGNOS and play the MUD off the sovereign kernel end-to-end (QEMU — no
 hardware needed), use the container harness in the **agnosticos** repo at

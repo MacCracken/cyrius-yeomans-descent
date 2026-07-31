@@ -61,9 +61,46 @@ enum PersistConst {
 var PL_ERR_UNREADABLE = 0 - 2;   # malformed, truncated, or signature mismatch
 var PL_ERR_SCHEMA     = 0 - 3;   # intact + signed, but written by a newer server
 
-# rename(2) is not wrapped in the x86_64 stdlib (only sys_mkdir is); the
-# syscall number is 82 — rename(const char *old, const char *new).
-var SYS_RENAME_NR = 82;
+# === 1.7.8 — the AGNOS publish path. ======================================
+#
+# THE BUG THIS REPLACES. This file used to publish a record with raw
+# `syscall(82, tmp, path)` to rename and `syscall(87, tmp)` to unlink, under a
+# comment claiming rename "is not wrapped in the x86_64 stdlib". Both halves of
+# that were wrong by 1.7.4: `lib/io.cyr` carries `file_rename` and `xunlink`, and
+# both already branch correctly on the target.
+#
+# On AGNOS those two numbers are not rename and unlink. `SYS_GPU_DISPATCH = 82`
+# and `SYS_GPU_BLIT_SHM = 87` (`lib/syscalls_x86_64_agnos.cyr:96`/`:101`, the
+# latter annotated *"UNLINK on Linux — DELETES A FILE"*). So on the `--agnos`
+# build every save wrote its temp file and then asked the GPU to dispatch a
+# matrix multiply instead of publishing it: **no record was ever created, and
+# every reconnect was offered a brand-new character.** Verified in the emitted
+# artefact, not just the source — `mov $0x52,%eax` reaches the `--agnos` binary.
+#
+# It stayed invisible because 82/87 genuinely ARE rename/unlink on x86_64, so the
+# whole suite is green, and **CI never built `--agnos` at all.** That is the cause;
+# the syscalls were only the instance. CI now builds both targets.
+#
+# The tree already knew: the comment at the audit-rotation rename below says to
+# use `file_rename` "not the raw syscall above: that one predates io.cyr's wrapper
+# and misses the agnos 4-arg form". 1.7.4 fixed its own new code and did not go
+# back six lines.
+
+# Create a directory, portably. AGNOS is LENGTH-carrying — `sys_mkdir(path, pathlen)`
+# — where Linux is MODE-carrying — `sys_mkdir(path, mode)`. Handing the AGNOS form
+# 0755 asks it to read a 493-byte path, so `data/` and `data/players/` were never
+# created there either; this is the same defect as the two syscalls above wearing
+# different clothes, and it is why it gets ONE helper rather than three #ifdefs.
+# EEXIST is the normal case and is ignored at every call site.
+fn _mkdir_portable(path): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var n = 0;
+    while (load8(path + n) != 0) { n = n + 1; }
+    return sys_mkdir(path, n);
+    #else
+    return sys_mkdir(path, 0x1ED);       # 0755
+    #endif
+}
 
 var g_persist_save  = 0;
 var g_persist_slurp = 0;
@@ -124,8 +161,8 @@ fn persist_init(): i64 {
     g_persist_dec   = alloc(256);
     g_ident_scratch = alloc(256);
     g_fmt_scratch   = alloc(32);
-    sys_mkdir(DP_DATADIR, 0x1ED);        # 0755 — ignore EEXIST
-    sys_mkdir(DP_PLAYERS, 0x1ED);
+    _mkdir_portable(DP_DATADIR);         # 1.7.8 — ignore EEXIST
+    _mkdir_portable(DP_PLAYERS);
     # H4 (1.6.1) — a STREAMING chain, not a retaining one. descent is a
     # write-through consumer: audit_event appends an event, hands it straight to
     # the FileStore, and never reads g_audit_chain back — nothing in this tree
@@ -1207,7 +1244,7 @@ fn _path_for(name, len, out): i64 {
     return off;
 }
 
-# Ensure a name's shard directory exists. Cheap and unconditional: sys_mkdir on an
+# Ensure a name's shard directory exists. Cheap and unconditional: mkdir on an
 # existing directory returns EEXIST, which is ignored exactly as persist_init
 # already does for data/ and data/players/.
 fn _shard_mkdir(name, len): i64 {
@@ -1217,7 +1254,7 @@ fn _shard_mkdir(name, len): i64 {
     while ((load8(pre + i) & 0xFF) != 0) { store8(g_persist_tmp + off, load8(pre + i)); off = off + 1; i = i + 1; }
     store8(g_persist_tmp + off, _shard_char(name, len)); off = off + 1;
     store8(g_persist_tmp + off, 0);
-    sys_mkdir(g_persist_tmp, 0x1ED);             # 0755 — EEXIST ignored
+    _mkdir_portable(g_persist_tmp);              # 1.7.8 — EEXIST ignored
     return 0;
 }
 
@@ -1564,7 +1601,7 @@ fn player_save(s): i64 {
     # crash mid-write leaves either the old record or the new one — never a
     # torn file. A stale <name>.cyml.tmp from a crashed write is simply
     # overwritten on the next save.
-    if (syscall(SYS_RENAME_NR, g_persist_tmp, g_persist_path) != 0) { return 0 - 1; }
+    if (file_rename(g_persist_tmp, g_persist_path) != 0) { return 0 - 1; }   # 1.7.8 — not syscall(82)
     # 1.7.2 — the record is now durably at the sharded path, so retire any legacy
     # flat copy. Lazy per-player migration: nothing to run, nothing to schedule,
     # and a deployment converts itself as players save.
@@ -1574,7 +1611,7 @@ fn player_save(s): i64 {
     # data loss. The flat file is only ever read as a fallback, so a crash between
     # the two leaves a harmless duplicate that the next save clears.
     _path_for_flat(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), g_persist_tmp);
-    syscall(87, g_persist_tmp);                  # unlink; ENOENT is the normal case
+    xunlink(g_persist_tmp);                      # 1.7.8 — not syscall(87); ENOENT is normal
     store64(s + SS_LAST_SAVE_MS, clock_now_ms());
     store64(s + SS_SAVE_DIRTY, 0);
     audit_keyed(AK_SAVE, SEV_INFO, "save", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
@@ -1601,6 +1638,70 @@ fn _find_sig_offset(buf, n): i64 {
         i = i + 1;
     }
     return 0 - 1;
+}
+
+# === 1.7.8 — read one field out of the RAW record, allocating nothing. ======
+#
+# WHY THIS EXISTS. `player_auth_load` used to `toml_parse` the whole record before
+# it checked the passphrase, and that memory is **never reclaimed**: the bump
+# allocator has no free at all, and the freelist never munmaps. So every login
+# attempt against a name that exists — from anyone who can open a socket, with no
+# account needed, and the login prompt itself tells you which names exist —
+# permanently consumed ~2,248 bytes. Five guesses per connection before the socket
+# closes is ~11 kB gone forever per attacker connection, and 1.7.1's rollup window
+# correctly suppresses the repeated audit entries, so the instrument stays quiet
+# while it happens.
+#
+# The decision needs only `salt` and `pubkey`, both fixed-form hex written by
+# `_fhex` as exactly `<key> = "<hex>"` on their own line. So they can be read
+# straight out of the slurp buffer and the parse deferred until the passphrase has
+# already proved itself.
+#
+# STRICT ON PURPOSE: the shape accepted here is exactly what `_fhex` writes — a
+# leading newline, the key, one space, `=`, one space, an opening quote, and no
+# newline before the closing quote. A looser scanner is how a differential between
+# two parsers gets built, and `player_auth_load` closes that hole a second way by
+# re-checking both values against the parsed record once it does parse.
+
+# Match `<key> = "<value>"` at `p`. Returns the value pointer (length via out_len)
+# or 0. `rest` bounds every read to the slurp buffer.
+fn _kv_at(p, rest, key, klen, out_len): i64 {
+    if (rest < klen + 5) { return 0; }
+    var k = 0;
+    while (k < klen) {
+        if ((load8(p + k) & 0xFF) != (load8(key + k) & 0xFF)) { return 0; }
+        k = k + 1;
+    }
+    var q = p + klen;
+    if ((load8(q) & 0xFF) != 32)     { return 0; }   # ' '
+    if ((load8(q + 1) & 0xFF) != 61) { return 0; }   # '='
+    if ((load8(q + 2) & 0xFF) != 32) { return 0; }   # ' '
+    if ((load8(q + 3) & 0xFF) != 34) { return 0; }   # '"'
+    var v = q + 4;
+    var lim = rest - (klen + 4);
+    var m = 0;
+    while (m < lim) {
+        var c = load8(v + m) & 0xFF;
+        if (c == 34) { store64(out_len, m); return v; }   # closing quote
+        if (c == 10) { return 0; }                        # newline first — malformed
+        m = m + 1;
+    }
+    return 0;
+}
+
+# First `<key> = "<value>"` line in the raw record. Keys always start a line: the
+# record opens `[player]\n`, so every field is newline-preceded.
+fn _scan_kv(buf, n, key, out_len): i64 {
+    var klen = strlen(key);
+    var i = 0;
+    while (i < n) {
+        if ((load8(buf + i) & 0xFF) == 10) {          # '\n'
+            var r = _kv_at(buf + i + 1, n - (i + 1), key, klen, out_len);
+            if (r != 0) { return r; }
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # Re-instantiate inventory from a comma-separated template-id list.
@@ -1656,6 +1757,86 @@ fn player_auth_load(s, pass, passlen): i64 {
     if (n <= 0) { return 0 - 1; }
     store8(g_persist_slurp + n, 0);
 
+    var salt   = g_persist_dec;          # [0,16)
+    var filepk = g_persist_dec + 16;     # [16,48)
+    var filesig = g_persist_dec + 48;    # [48,112)
+
+    # === 1.7.8 — authenticate before ALLOCATING, not merely before verifying. ===
+    #
+    # 1.7.0 moved the derive ahead of `ed25519_verify` so a wrong passphrase
+    # stopped paying 7 ms of CPU it could not use. It left the *parse* where it
+    # was, so a wrong passphrase still bought ~2,248 bytes of permanently-lost
+    # arena — and unlike CPU, that never comes back. This is the same argument one
+    # resource along: **stop paying for an answer you cannot use.**
+    #
+    # `salt` and `pubkey` are read straight from the raw buffer. Both are
+    # fixed-form, both are exact-length-checked before any decode (the 0.9.0
+    # overflow guard, unchanged in substance — `hex_decode_into` writes len/2
+    # bytes with no destination bound), and neither is trusted for anything beyond
+    # deciding whether this passphrase belongs to this record.
+    #
+    # THE TRUST BOUNDARY DOES NOT MOVE. The previous code already decoded and used
+    # both of these before the signature was checked; all that changes is which
+    # parser read them, and the verify below still gates every field restore.
+    #
+    # THE FAST PATH IS AN OPTIMISATION, NEVER AN AUTHORITY. The scanner is
+    # deliberately STRICTER than bayan — bayan accepts a leading indent, `salt="x"`
+    # with no spaces, tabs around the `=`, a key on line 1 with no section header,
+    # and several shapes besides. If a strict scan that fails were treated as a
+    # malformed record, every one of those would turn from "loads fine" into a
+    # TERMINAL -2, and this function would have acquired a second, stricter record
+    # format by accident. So a failed scan falls THROUGH to the parser and the
+    # original code path, unchanged; only the canonical shape — which is the only
+    # shape `_fhex` has ever written, i.e. all real traffic — takes the shortcut.
+    var blk = sess_ident(s);
+    var slen[8]; var pklen[8];
+    var saltraw = _scan_kv(g_persist_slurp, n, "salt", &slen);
+    var pkraw   = _scan_kv(g_persist_slurp, n, "pubkey", &pklen);
+    var fast = 0;
+    if (saltraw != 0) {
+        if (pkraw != 0) {
+            if (load64(&slen) == SALT_LEN * 2) {
+                if (load64(&pklen) == PK_LEN * 2) { fast = 1; }
+            }
+        }
+    }
+    # ...and only for a record shaped the way this server writes them: `[player]`
+    # on line 1. The scanner has no concept of SECTIONS, and bayan does. Without
+    # this, a planted `x = 1` ahead of the header puts bayan's first section
+    # elsewhere — it would find no salt and return -2, exactly as today, but the
+    # raw scan would already have bought a full ~1 ms `ident_derive` on the way.
+    # A free derive on an unauthenticated path is the amplification the whole
+    # 1.7.0 auth-order work exists to deny, so the fast path declines anything it
+    # cannot reason about and lets the parser answer.
+    if (fast == 1) {
+        if (_bytes_eq(g_persist_slurp, "[player]\n", 9) == 0) { fast = 0; }
+    }
+    # The 0.9.0 overflow guard, re-established on this path rather than inherited:
+    # `hex_decode_into` writes len/2 bytes with NO destination bound, and
+    # g_persist_dec is 256 bytes. The exact-length tests above are what make these
+    # two decodes safe, and they run before either of them.
+    if (fast == 1) {
+        if (hex_decode_into(saltraw, SALT_LEN * 2, salt) == 0)  { fast = 0; }
+    }
+    if (fast == 1) {
+        if (hex_decode_into(pkraw, PK_LEN * 2, filepk) == 0)    { fast = 0; }
+    }
+
+    var authed = 0;
+    if (fast == 1) {
+        ident_derive(salt, pass, passlen, blk + IDENT_SK, blk + IDENT_PK);
+        if (_bytes_eq(blk + IDENT_PK, filepk, PK_LEN) == 0) { return 0; }
+        # ^^^ THE POINT OF THE RELEASE. A wrong passphrase returns HERE, having
+        # allocated nothing at all. Everything below runs only for a caller who
+        # has already proved they hold the key this record names.
+        #
+        # It also removes a null-dereference an attacker could reach by exhausting
+        # the arena: `str_new` returns 0 on OOM and bayan's parser dereferences it
+        # immediately, so the old order let a memory-pressure attack crash the
+        # server from the unauthenticated login path.
+        authed = 1;
+    }
+
     # The record is a single [player] section; toml_parse returns a vec of
     # sections (mirror world.cyr's zone-header read).
     var secs = toml_parse(str_new(g_persist_slurp, n));
@@ -1668,20 +1849,57 @@ fn player_auth_load(s, pass, passlen): i64 {
     if (pkv == 0)   { return 0 - 2; }
     if (sigv == 0)  { return 0 - 2; }
 
-    var salt   = g_persist_dec;          # [0,16)
-    var filepk = g_persist_dec + 16;     # [16,48)
-    var filesig = g_persist_dec + 48;    # [48,112)
+    # NO PARSER DIFFERENTIAL. Two readers now look at one record, and a record
+    # they disagree about is a record this server refuses — full stop. Without
+    # this, a crafted file could authenticate against the SCANNER's view of
+    # salt/pubkey while every field below was restored from BAYAN's view, which is
+    # a strictly worse bug than the leak being fixed. It is reachable: bayan
+    # accepts shapes the scanner skips, and on a duplicate key both take the
+    # first, so a loose decoy line placed ahead of the real one splits them.
+    #
+    # Only meaningful when the fast path actually ran; when it did not, nothing
+    # raw-scanned was ever used. Both length AND bytes: an equal-prefix decoy
+    # (`salt = <real><more>`) passes a memcmp given the scanner's length, and the
+    # length test is also what keeps that memcmp inside bayan's string.
     # SECURITY (0.9.0): hex_decode_into writes str_len/2 bytes with NO
     # destination bound, and this runs BEFORE signature verification — an
     # over-long salt/pubkey/sig hex would overflow the 256-byte g_persist_dec.
     # Require the exact hex lengths up front so a corrupt/planted record is
     # rejected before any decode.
+    #
+    # These run BEFORE the differential comparison below, deliberately: they are
+    # what bounds its memcmp inside bayan's string. Both sides are then known to
+    # be exactly SALT_LEN*2 / PK_LEN*2.
     if (str_len(saltv) != SALT_LEN * 2) { return 0 - 2; }
     if (str_len(pkv)   != PK_LEN * 2)   { return 0 - 2; }
     if (str_len(sigv)  != SIG_LEN * 2)  { return 0 - 2; }
+
+    if (fast == 1) {
+        # LOAD-BEARING, and mutation-verified: the SALT comparison. The early-out
+        # above decided "this passphrase belongs to this record" from the raw
+        # scan, and `blk` is committed from the PARSED salt further down. A record
+        # the two readers disagree about would authenticate against one salt and
+        # commit another, so it is refused outright.
+        if (_bytes_eq(str_data(saltv), saltraw, SALT_LEN * 2) == 0) { return 0 - 2; }
+        # Kept, and honestly NOT independently mutation-killable: a pubkey
+        # differential is already fatal, because `filepk` is re-decoded from the
+        # PARSED pubkey below and the signature must verify under it. Retained
+        # because it fails at the cause rather than three steps later as a
+        # "tampered" verdict, and because relying on that subsumption is a fact
+        # about today's ordering rather than an invariant anyone declared.
+        if (_bytes_eq(str_data(pkv), pkraw, PK_LEN * 2) == 0) { return 0 - 2; }
+    }
     if (hex_decode_into(str_data(saltv), str_len(saltv), salt) == 0) { return 0 - 2; }
-    if (hex_decode_into(str_data(pkv), str_len(pkv), filepk) == 0) { return 0 - 2; }
+    if (hex_decode_into(str_data(pkv), str_len(pkv), filepk) == 0)   { return 0 - 2; }
     if (hex_decode_into(str_data(sigv), str_len(sigv), filesig) == 0) { return 0 - 2; }
+
+    # The slow path still owes the authentication the fast path already did. Same
+    # conjunction, same order relative to the verify — 1.7.0's reorder is intact;
+    # this is only the branch where no canonical raw scan was available.
+    if (authed == 0) {
+        ident_derive(salt, pass, passlen, blk + IDENT_SK, blk + IDENT_PK);
+        if (_bytes_eq(blk + IDENT_PK, filepk, PK_LEN) == 0) { return 0; }
+    }
 
     # M11-C — refuse a record whose string values could split the signed prefix.
     #
@@ -1697,7 +1915,7 @@ fn player_auth_load(s, pass, passlen): i64 {
     if (_has_ctrl(toml_get(pairs, "room")) == 1) { return 0 - 2; }
     if (_has_ctrl(toml_get(pairs, "inv")) == 1)  { return 0 - 2; }
 
-    # === Authentication BEFORE integrity (1.7.0). ===
+    # === Authentication BEFORE integrity (1.7.0), and before ALLOCATION (1.7.8). ===
     #
     # This function tests two independent things, and BOTH must pass:
     #   authentication — does the typed passphrase derive the key the record
@@ -1710,9 +1928,15 @@ fn player_auth_load(s, pass, passlen): i64 {
     # conjunction, cheaper order: 8006 us -> 1066 us on the line an attacker can
     # queue for free, measured independently twice (8006->1066 and 7780->1012).
     #
-    # There is direct precedent forty lines above, at the passlen bounds H5
-    # (1.6.2) hoisted ahead of this same verify, in the same words: it just stops
-    # paying for the answer first.
+    # 1.7.8 moved the derive itself further up still — ahead of `toml_parse` —
+    # because a wrong passphrase was still buying ~2,248 bytes of arena that
+    # nothing ever reclaims. THE DERIVE AND ITS COMPARISON NOW LIVE ABOVE, at the
+    # raw-scan block; what remains here is the verify they gate. Both halves of
+    # the conjunction are unchanged, and so is the order between them.
+    #
+    # There is direct precedent above, at the passlen bounds H5 (1.6.2) hoisted
+    # ahead of this same verify, in the same words: it just stops paying for the
+    # answer first.
     #
     # NOTHING IS TRUSTED EARLIER. Both inputs to the moved code are established
     # independently of the signature: `salt` and `filepk` are exact-length-checked
@@ -1730,11 +1954,9 @@ fn player_auth_load(s, pass, passlen): i64 {
     # wrong-passphrase result, and an attacker able to rewrite the pubkey has
     # already destroyed the record for its owner and holds write access to
     # data/players/, which is a strictly larger problem than this signal.
-    if (passlen < PASS_MIN) { return 0; }
-    if (passlen > PASS_MAX) { return 0; }
-    var blk = sess_ident(s);
-    ident_derive(salt, pass, passlen, blk + IDENT_SK, blk + IDENT_PK);
-    if (_bytes_eq(blk + IDENT_PK, filepk, PK_LEN) == 0) { return 0; }
+    # (The derive and its comparison ran above, before `toml_parse` — 1.7.8. The
+    # duplicated passlen bounds that used to sit here went with them; they are
+    # still checked, at the top of this function, before the record is even read.)
 
     # Integrity: the record must be self-consistent under its own pubkey.
     var prefix = _find_sig_offset(g_persist_slurp, n);

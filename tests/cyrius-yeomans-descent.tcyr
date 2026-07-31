@@ -6143,6 +6143,7 @@ fn main() {
     test_room_listing_bounds();
     test_carry_cap_get_contents();
     test_listing_bounds();
+    test_preauth_alloc();
 
 
     return assert_summary();
@@ -6543,6 +6544,339 @@ fn test_listing_bounds(): i64 {
     g_session_head = saved_head;
     session_free(s);
     session_free(w);
+    return 0;
+}
+
+# Build a validly-signed record for `name` from an arbitrary field block, so a
+# crafted record can be made to VERIFY. Without this every crafted record is
+# refused by the signature check and no assertion can reach the guards that sit
+# behind it — which is exactly how the first version of this group let three
+# mutations survive.
+fn _sign_record_as(name, nl, blk, body): i64 {
+    var rec = alloc(SLURP_CAP);
+    var o = _str_into(rec, 0, "[player]\n");
+    o = _str_into(rec, o, body);
+    var sig = alloc(SIG_LEN);
+    ed25519_sign(blk + IDENT_SK, rec, o, sig);      # sign the prefix, as _build_record does
+    o = _str_into(rec, o, "sig = \"");
+    o = _str_into(rec, o, hex_encode(sig, SIG_LEN));
+    o = _str_into(rec, o, "\"\n");
+    _write_record_raw(name, nl, rec, o);
+    return 0;
+}
+
+# Count raw numeric syscalls in a source file, ignoring comment lines.
+#
+# THE ONLY GUARD THAT COULD HAVE CAUGHT 1.7.8's AGNOS BUG. `syscall(82, ...)` and
+# `syscall(87, ...)` are rename and unlink on x86_64 and GPU dispatch / GPU blit
+# on AGNOS, so NO test running on this target can tell the two apart — the suite
+# was green for seven releases with the tree unable to save a single record on
+# `--agnos`. Compiling `--agnos` in CI (added this release) catches a signature
+# change; it does not catch a raw number, because a raw number compiles fine on
+# both. Reading the source does.
+fn _raw_syscalls_in(path): i64 {
+    var buf = alloc(200000);
+    var n = file_read_all(path, buf, 200000 - 1);
+    if (n <= 0) { return 0 - 1; }
+    var hits = 0;
+    var i = 0;
+    var line_is_comment = 0;
+    while (i < n) {
+        var c = load8(buf + i) & 0xFF;
+        if (c == 10) { line_is_comment = 0; i = i + 1; continue; }   # newline ends a comment
+        # A '#' ANYWHERE starts a comment, not just in column 0 — the first
+        # version of this only handled leading '#' and so flagged this release's
+        # own trailing notes ("# 1.7.8 — not syscall(82)"), which is a scanner
+        # that reports the thing it was written to prove absent.
+        if (c == 35) { line_is_comment = 1; }
+        if (line_is_comment == 0) {
+            if (c == 115) {                                 # 's'
+                if (_bytes_eq(buf + i, "syscall(", 8) == 1) {
+                    var d = load8(buf + i + 8) & 0xFF;
+                    if (d >= 48) { if (d <= 57) { hits = hits + 1; } }   # a DIGIT, not a named constant
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return hits;
+}
+
+# === 1.7.8 — a wrong passphrase must not cost the server memory. ===
+#
+# MEASURED on this tree. `player_auth_load` parsed the whole record with
+# `toml_parse` BEFORE checking the passphrase, and that memory is never
+# reclaimed: the bump allocator has no free at all and the freelist never
+# munmaps. Contrast, both measured here and asserted below:
+#
+#   toml_parse of one record ............ 2,248 bytes, permanently
+#   a wrong-passphrase login (after) .... 0 bytes
+#
+# Reachable by anyone who can open a socket. No account is needed to find a
+# target either — the login prompt itself answers whether a name exists
+# ("Passphrase:" vs "No record answers to that name") — and 1.7.1's rollup window
+# correctly suppresses the repeated audit entries, so the instrument stays quiet
+# while it happens. Five guesses per connection is ~11 kB gone per connection.
+#
+# This is 1.7.0's argument one resource along. That release stopped a wrong
+# passphrase paying for a 7 ms `ed25519_verify` it could not use; the parse was
+# left where it stood, and unlike CPU, arena never comes back.
+fn test_preauth_alloc(): i64 {
+    test_group("preauth-alloc");
+    persist_init();
+
+    # --- The raw scanner, over its domain. It is deliberately STRICTER than
+    # bayan: exactly `<key> = "<value>"` at the start of a line, which is exactly
+    # what `_fhex` writes. Strictness here is fail-closed — an unrecognised shape
+    # yields 0 and the caller refuses the record.
+    var vlen[8];
+    var buf = alloc(512);
+    var o = _str_into(buf, 0, "[player]\nsalt = \"abcd\"\npubkey = \"ef01\"\n");
+    var r = _scan_kv(buf, o, "salt", &vlen);
+    assert(r != 0, "the scanner finds a well-formed key");
+    assert_eq(load64(&vlen), 4, "...with the right length");
+    assert_eq(load8(r) & 0xFF, 97, "...pointing at the value, not the key");
+    r = _scan_kv(buf, o, "pubkey", &vlen);
+    assert(r != 0, "...and finds a later key too");
+    assert_eq(load8(r) & 0xFF, 101, "...at its own value ('e')");
+    assert_eq(_scan_kv(buf, o, "nosuchkey", &vlen), 0, "a missing key yields nothing");
+    # A key name that is a PREFIX of a present one must not match it.
+    assert_eq(_scan_kv(buf, o, "sal", &vlen), 0, "a prefix of a real key does not match");
+
+    # Unterminated and newline-interrupted values are refused rather than run on.
+    var bad = alloc(256);
+    var bo = _str_into(bad, 0, "[player]\nsalt = \"abcd\n");
+    assert_eq(_scan_kv(bad, bo, "salt", &vlen), 0, "a value with no closing quote is refused");
+    bo = _str_into(bad, 0, "[player]\nsalt = abcd\"\n");
+    assert_eq(_scan_kv(bad, bo, "salt", &vlen), 0, "a value with no OPENING quote is refused");
+    bo = _str_into(bad, 0, "[player]\nsalt=\"abcd\"\n");
+    assert_eq(_scan_kv(bad, bo, "salt", &vlen), 0, "the loose `key=\"v\"` shape is refused (fail-closed)");
+
+    # --- A real record, and the headline measurement.
+    var s = _mk_sess("AllocHero", 9);
+    var blk = sess_ident(s);
+    random_bytes(blk, SALT_LEN);
+    ident_derive(blk, "rightpass", 9, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 1);
+    store64(s + SS_ROOM, 0 - 1); store64(s + SS_AUTHED, 1);
+    store64(s + SS_HP, 20); store64(s + SS_MAXHP, 20);
+    assert_eq(player_save(s), 1, "a real record is on disk");
+
+    # Warm every one-time-init path FIRST. Without this the measurement below
+    # picks up first-touch singletons and reports a per-attempt cost that is not
+    # per-attempt at all — the 1.6.9 lesson about control arms, in miniature.
+    var warm = _mk_sess("AllocHero", 9);
+    assert_eq(player_auth_load(warm, "wrongpass", 9), 0, "a wrong passphrase is refused");
+
+    var N = 20;
+    var b0 = alloc_used();
+    var i = 0;
+    while (i < N) {
+        var t = _mk_sess("AllocHero", 9);
+        assert_eq(player_auth_load(t, "wrongpass", 9), 0, "...refused every time");
+        i = i + 1;
+    }
+    var spent = alloc_used() - b0;
+    assert_eq(spent, 0,
+              "THE ASSERTION THIS GROUP EXISTS FOR: 20 wrong-passphrase logins allocate ZERO bytes");
+
+    # The CONTRAST, so the zero above cannot be passing because the record is
+    # unreadable or the function is short-circuiting for some other reason. This
+    # is the cost that used to be paid on the line an attacker can queue for free.
+    _path_for(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), g_persist_path);
+    var n = file_read_all(g_persist_path, g_persist_slurp, SLURP_CAP - 1);
+    assert(n > 0, "the record really is readable");
+    var c0 = alloc_used();
+    toml_parse(str_new(g_persist_slurp, n));
+    var parse_cost = alloc_used() - c0;
+    assert(parse_cost > 1000,
+           "...and parsing it really does cost real, unreclaimable memory (measured 2248 B)");
+
+    # And the right passphrase still works — otherwise a function that simply
+    # refused everything would pass every assertion above.
+    var good = _mk_sess("AllocHero", 9);
+    assert_eq(player_auth_load(good, "rightpass", 9), 1, "the correct passphrase still loads");
+    assert_eq(load64(good + SS_HP), 20, "...and restores the record's fields");
+
+    # --- NO PARSER DIFFERENTIAL. Two readers now look at one record.
+    #
+    # This is a hole the fix ITSELF could have opened, and the guard against it is
+    # load-bearing rather than decorative — verified, not assumed. bayan accepts
+    # shapes the strict scanner skips (`salt="x"`, `salt  =  "x"`, a leading
+    # indent, a tab before the `=`), and on a duplicate key BOTH take the FIRST
+    # match. So a loose line placed ahead of the real one is read by bayan and
+    # skipped by the scanner: the scanner authenticates against the REAL salt
+    # while every field below would have been restored from the ATTACKER'S.
+    #
+    # Measured: all four loose shapes produce that disagreement.
+    #
+    # THE CRAFTED RECORD MUST VERIFY, or this proves nothing. The first version of
+    # this assertion spliced a loose line into an existing record, which changed
+    # the signed prefix — so `ed25519_verify` refused it and the assertion passed
+    # with the guard DELETED. Three mutations survived on that. A player owns
+    # their signing key (ADR 0004), so the honest adversary here signs their own
+    # crafted record, and the test must do the same.
+    var loose = alloc(512);
+    var lo = _str_into(loose, 0, "salt=\"");
+    var z = 0;
+    while (z < SALT_LEN * 2) { store8(loose + lo, 97); lo = lo + 1; z = z + 1; }   # 'a' x32
+    lo = _str_into(loose, lo, "\"\nsalt = \"");
+    lo = _str_into(loose, lo, hex_encode(blk, SALT_LEN));          # the REAL salt, strict shape
+    lo = _str_into(loose, lo, "\"\npubkey = \"");
+    lo = _str_into(loose, lo, hex_encode(blk + IDENT_PK, PK_LEN));
+    lo = _str_into(loose, lo, "\"\n");
+    store8(loose + lo, 0);
+    _sign_record_as("Crafted", 7, blk, loose);
+
+    var cs = _mk_sess("Crafted", 7);
+    var cres = player_auth_load(cs, "rightpass", 9);
+    assert_eq(cres, 0 - 2,
+              "a validly-signed record the two readers DISAGREE about is refused");
+    assert(cres != 1, "...and above all it does not authenticate");
+
+    # The same record without the decoy loads, so the refusal above is the
+    # disagreement and not something incidental about hand-signed records.
+    var clean = alloc(512);
+    var qo = _str_into(clean, 0, "salt = \"");
+    qo = _str_into(clean, qo, hex_encode(blk, SALT_LEN));
+    qo = _str_into(clean, qo, "\"\npubkey = \"");
+    qo = _str_into(clean, qo, hex_encode(blk + IDENT_PK, PK_LEN));
+    qo = _str_into(clean, qo, "\"\n");
+    store8(clean + qo, 0);
+    _sign_record_as("Crafted", 7, blk, clean);
+    var cs2 = _mk_sess("Crafted", 7);
+    assert_eq(player_auth_load(cs2, "rightpass", 9), 1,
+              "...the identical record WITHOUT the decoy line loads normally");
+
+    # --- THE FAST PATH IS AN OPTIMISATION, NOT A SECOND RECORD FORMAT.
+    #
+    # The scanner is stricter than bayan on purpose, and the first version of this
+    # fix returned a TERMINAL -2 whenever the strict scan failed. That would have
+    # turned every shape bayan accepts but the scanner skips — a leading indent,
+    # `salt="x"` with no spaces, tabs around the `=` — from "loads fine" into
+    # "your character is corrupt", i.e. it would have quietly given this server a
+    # second, narrower save format. A failed scan must FALL THROUGH to the parser.
+    var lshape = alloc(512);
+    var lso = _str_into(lshape, 0, "salt=\"");                 # loose: no spaces
+    lso = _str_into(lshape, lso, hex_encode(blk, SALT_LEN));
+    lso = _str_into(lshape, lso, "\"\n  pubkey  =  \"");       # loose: indent + wide spacing
+    lso = _str_into(lshape, lso, hex_encode(blk + IDENT_PK, PK_LEN));
+    lso = _str_into(lshape, lso, "\"\n");
+    store8(lshape + lso, 0);
+    # Neither key is in the canonical shape, so the scanner must decline both...
+    var chk[8];
+    assert_eq(_scan_kv(lshape, lso, "salt", &chk), 0, "the scanner declines the loose salt");
+    assert_eq(_scan_kv(lshape, lso, "pubkey", &chk), 0, "...and the loose pubkey");
+    # ...and the record must STILL load, via the parser, exactly as before 1.7.8.
+    _sign_record_as("Crafted", 7, blk, lshape);
+    var ls = _mk_sess("Crafted", 7);
+    assert_eq(player_auth_load(ls, "rightpass", 9), 1,
+              "a record only BAYAN can read still loads — the fast path falls through, it does not refuse");
+    # And a wrong passphrase against that same record is still re-promptable (0),
+    # never terminal — the slow path owes the same authentication.
+    var ls2 = _mk_sess("Crafted", 7);
+    assert_eq(player_auth_load(ls2, "wrongpass", 9), 0,
+              "...and a wrong passphrase on the slow path is still 0, not -2");
+
+    # THE LENGTH HALF OF THE GUARD, which the byte comparison alone does NOT
+    # cover. Give bayan a value whose first 32 bytes ARE the scanner's value and
+    # which then runs on: the memcmp is handed the scanner's length, compares 32
+    # bytes, and passes. Only the length check sees the difference — and without
+    # it the comparison would also be reading `slen` bytes out of a string that
+    # may be shorter, which is the memory-safety half of why it is there.
+    var pfx = alloc(512);
+    var fo = _str_into(pfx, 0, "salt=\"");
+    fo = _str_into(pfx, fo, hex_encode(blk, SALT_LEN));        # a PREFIX-MATCHING decoy...
+    z = 0;
+    while (z < SALT_LEN * 2) { store8(pfx + fo, 97); fo = fo + 1; z = z + 1; }   # ...that keeps going
+    fo = _str_into(pfx, fo, "\"\nsalt = \"");
+    fo = _str_into(pfx, fo, hex_encode(blk, SALT_LEN));
+    fo = _str_into(pfx, fo, "\"\npubkey = \"");
+    fo = _str_into(pfx, fo, hex_encode(blk + IDENT_PK, PK_LEN));
+    fo = _str_into(pfx, fo, "\"\n");
+    store8(pfx + fo, 0);
+    _sign_record_as("Crafted", 7, blk, pfx);
+    var cs6 = _mk_sess("Crafted", 7);
+    assert_eq(player_auth_load(cs6, "rightpass", 9), 0 - 2,
+              "a decoy whose value merely STARTS with the real one is still refused");
+
+    # A decoy on `pubkey` is refused the same way — the guard covers both fields.
+    var pdec = alloc(512);
+    var po = _str_into(pdec, 0, "pubkey=\"");
+    z = 0;
+    while (z < PK_LEN * 2) { store8(pdec + po, 97); po = po + 1; z = z + 1; }
+    po = _str_into(pdec, po, "\"\nsalt = \"");
+    po = _str_into(pdec, po, hex_encode(blk, SALT_LEN));
+    po = _str_into(pdec, po, "\"\npubkey = \"");
+    po = _str_into(pdec, po, hex_encode(blk + IDENT_PK, PK_LEN));
+    po = _str_into(pdec, po, "\"\n");
+    store8(pdec + po, 0);
+    _sign_record_as("Crafted", 7, blk, pdec);
+    var cs3 = _mk_sess("Crafted", 7);
+    assert_eq(player_auth_load(cs3, "rightpass", 9), 0 - 2,
+              "a decoy `pubkey` line is refused too");
+
+    # KEYS MUST START A LINE. `xsalt = "..."` is a different key and must not be
+    # read as `salt`; a scanner that matched anywhere would take the decoy's value
+    # and the real passphrase would then fail to derive it.
+    var pre = alloc(512);
+    var xo = _str_into(pre, 0, "xsalt = \"");
+    z = 0;
+    while (z < SALT_LEN * 2) { store8(pre + xo, 97); xo = xo + 1; z = z + 1; }
+    xo = _str_into(pre, xo, "\"\nsalt = \"");
+    xo = _str_into(pre, xo, hex_encode(blk, SALT_LEN));
+    xo = _str_into(pre, xo, "\"\npubkey = \"");
+    xo = _str_into(pre, xo, hex_encode(blk + IDENT_PK, PK_LEN));
+    xo = _str_into(pre, xo, "\"\n");
+    store8(pre + xo, 0);
+    _sign_record_as("Crafted", 7, blk, pre);
+    var cs4 = _mk_sess("Crafted", 7);
+    assert_eq(player_auth_load(cs4, "rightpass", 9), 1,
+              "a key that merely ENDS with the name we want is not that key");
+
+    # An over-long `pubkey` hex is refused BEFORE the decode, exactly as the
+    # 0.9.0 salt guard is. `hex_decode_into` writes len/2 bytes with no
+    # destination bound, so without this the 256-byte g_persist_dec overflows —
+    # pre-authentication, from a planted file.
+    var big = alloc(SLURP_CAP);
+    var bo2 = _str_into(big, 0, "[player]\nsalt = \"");
+    bo2 = _str_into(big, bo2, hex_encode(blk, SALT_LEN));
+    bo2 = _str_into(big, bo2, "\"\npubkey = \"");
+    z = 0;
+    while (z < 5000) { store8(big + bo2, 97); bo2 = bo2 + 1; z = z + 1; }
+    bo2 = _str_into(big, bo2, "\"\nsig = \"");
+    z = 0;
+    while (z < SIG_LEN * 2) { store8(big + bo2, 48); bo2 = bo2 + 1; z = z + 1; }
+    bo2 = _str_into(big, bo2, "\"\n");
+    _write_record_raw("Crafted", 7, big, bo2);
+    var cs5 = _mk_sess("Crafted", 7);
+    assert_eq(player_auth_load(cs5, "rightpass", 9), 0 - 2,
+              "an over-long pubkey hex is rejected before decode (no overflow)");
+
+    _player_unlink("Crafted", 7);
+
+    # --- THE AGNOS GUARD. No test on this target can distinguish rename from GPU
+    # dispatch, because on x86_64 syscall 82 really IS rename. The source can.
+    assert_eq(_raw_syscalls_in("src/persist.cyr"), 0,
+              "persist.cyr calls NO raw numeric syscall — every one goes through a portable wrapper");
+    assert_eq(_raw_syscalls_in("src/session.cyr"), 0, "...nor does session.cyr");
+    assert_eq(_raw_syscalls_in("src/item.cyr"), 0, "...nor item.cyr");
+    # And the scanner is not vacuous: it finds one when one is there.
+    var probe = alloc(256);
+    var pl = _str_into(probe, 0, "# syscall(82, a, b) in a comment does not count\nfn f() { syscall(87, x); }\n");
+    _write_record_raw("SyscallProbe", 12, probe, pl);
+    _path_for("SyscallProbe", 12, g_persist_path);
+    assert_eq(_raw_syscalls_in(g_persist_path), 1,
+              "...and the scanner counts a real one while ignoring the commented one");
+    _player_unlink("SyscallProbe", 12);
+
+    # --- 1.7.8's other half: the portable mkdir. On this target it takes the
+    # #else (mode) branch; on AGNOS the length branch. Either way a save must be
+    # able to create its shard directory, which is what failed on AGNOS.
+    assert_eq(player_save(s), 1, "a save still creates its shard directory and publishes");
+    assert_eq(player_exists("AllocHero", 9), 1, "...and the record is findable afterwards");
+
+    _player_unlink("AllocHero", 9);
     return 0;
 }
 
