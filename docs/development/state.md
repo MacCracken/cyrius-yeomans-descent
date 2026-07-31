@@ -3,7 +3,7 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-29 (v1.7.6 + an uncommitted fix — the gate re-run returned **DO-NOT-CLOSE**; see roadmap items R-V)
+> **Last refresh**: 2026-07-30 (v1.7.7 — three of the gate re-run's five highs closed; **T and U remain** and are 1.7.8, plus eight new items 1.7.7's own sweep raised)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
@@ -11,19 +11,69 @@
 
 ## Version
 
+**1.7.7** — 2026-07-30. **1118 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build; **17/17 mutations killed**.
+
+**Carry the fixes to the sites they were never applied to.** Two of the four
+findings that returned DO-NOT-CLOSE. Neither was a new defect: both were a rule
+this project had already written down, applied at some sites and not the others,
+with the correct code already in the tree — in one case 230 lines below the broken
+one.
+
+**Both were measured before being fixed, and the numbers held.** `get` of a bag of
+99 while holding 99 landed at **199 against a cap of 100**, because the old guard
+asked "am I at the cap" while `ilist_push` moved the object *and its contents* —
+two different questions. `inventory` lost its prompt at **95 items** (94 fitted),
+which is **under the game's own `MAX_INV` of 100**; `who` at **79 players**, and at
+90 the cut landed on byte `0x80` — mid-UTF-8, the em-dash separator sliced in half.
+
+The class, not the instance: `oi_move_count` is now the single answer to "how much
+does this move move", shared by `get` and `cmd_give`; five listing loops adopted
+`room_line_fits` / `list_append_more`, including the dormant `@who` twin.
+
+**The fix introduced a regression, and the sweep caught it — the seventh time this
+tree has done exactly that.** Making the guard per-item made the old
+abort-the-whole-sweep-on-refusal behaviour wrong: one oversized bag would make
+`get all` take **nothing** for a player carrying nothing, and tell them their hands
+were full. The arm now skips what does not fit and keeps going, exits early only
+when genuinely at the cap, and the refusal message learned to distinguish "you are
+full" from "that one thing is too big" — two different facts, and saying the wrong
+one is a lie the player can see.
+
+**Lessons carried, added this release:**
+
+- *Rationing the echo must never ration the effect.* `drop all` and `get all` are
+  commands, not reports. A fit check around the whole loop body would have passed
+  every prompt assertion in the suite and silently left items in the player's
+  hands; it takes a separate assertion, on the world rather than on the wire, to
+  tell those two fixes apart.
+- *A mutation that fails to fail is a signal about the test* — fourteenth
+  instance. The first `get all` coverage used bare floor items, and for a bare
+  item `oi_move_count` is 1, so the old guard and the new one **are the same
+  function**. The test could not have failed whatever the arm did.
+- *Sweeping the class is what finds the next class.* Neither defect had a second
+  instance — but looking for one turned up eight new items on the **RX** side,
+  where a pre-auth peer drives the server's own reply buffer past `TX_CAP` and
+  **both** of this server's input bounds are structurally blind to it. Roadmap
+  items W–Z.
+
 ## Gate re-run — DO-NOT-CLOSE (2026-07-29)
 
 **The 1.x line does not close.** Four high findings survived adversarial
 refutation and were reproduced by the sweep's judge on the shipped tree; a fifth
-was found alongside and is already fixed but uncommitted. All five are in
-[`roadmap.md`](roadmap.md) as items **R-V** with reproductions.
+was found alongside. All five are in [`roadmap.md`](roadmap.md) as items **R-V**
+with reproductions.
 
-In one line each: `get` of a container ignores its contents (**199 held against a
-cap of 100 from one command; 130 items silently destroyed at 721**); four listing
-verbs still truncate mid-line with no prompt; **AGNOS saves never publish at all**
-because `syscall(82)`/`(87)` are GPU calls there; every login against an existing
-name leaks 2,248 bytes pre-auth; and the account cap stopped enforcing after
-sharding.
+**Three are now closed** — R and S in 1.7.7, V (the account cap) committed. **T
+and U remain and are 1.7.8**: **AGNOS saves never publish at all**, because
+`syscall(82)`/`(87)` are GPU dispatch and blit there rather than rename and
+unlink; and every login against an existing name permanently consumes 2,248 bytes
+**before the passphrase is checked**.
+
+The two that closed, in one line each: `get` of a container ignored its contents
+(**199 held against a cap of 100 from one command; 130 items silently destroyed at
+721**), and four listing verbs truncated mid-line with no prompt (**measured at 95
+inventory items — under the game's own cap — and 79 players online**).
 
 **Three of the four are the same defect the previous sixteen releases kept
 finding — a rule applied at some sites and not the others.** Two are fixes from
@@ -461,7 +511,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (751 assertions, 46 groups)
+  cyrius-yeomans-descent.tcyr   unit suite (1118 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -504,7 +554,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **751** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **1118** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -552,6 +602,14 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
   that actually subtracts HP, loaders publishing only on success, `player_save`
   failures no longer discarded, double-login refusal, template-id round trip,
   audit-chain resume
+- **room-listing / listing-bounds / carry-cap-get** (1.7.6-1.7.7) — the wire is a
+  correctness surface: every listing stops at a whole item with the tail reserve
+  intact and reports what it omitted (`look`'s three sections, `inventory`, `who`,
+  `@who`, and the `drop all` / `get all` receipts), the prompt always reaches the
+  client, and the ACTION completes even when its ECHO is rationed. Plus the carry
+  cap asking about what the transfer actually moves — `oi_move_count`, the
+  skip-don't-abort sweep, and the two refusal messages that are each true in
+  exactly one case
 - **item-verbs** (1.6.7) — the `N.X` ordinal on both scans and end to end,
   `put`/`give`, the equipment verbs' honest answer, signed `toml_int`
 - **reset-bounds / tick-schedule / tick-coalescing / tx-compaction / save-meter
@@ -682,6 +740,10 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
+**Next: 1.7.8** — items T and U (AGNOS saves never publish; every login against an
+existing name permanently consumes 2,248 bytes pre-auth). Then **1.7.9**, the
+RX-side class 1.7.7's sweep raised (roadmap W–Z), then gate re-run #2.
+
 **Next: 1.7.0** — re-derive both per-tick line budgets from the measured worst
 case and land the bench that gates a whole tick pass. Then 1.7.1–1.7.3, a gate
 re-run, and only then 2.0.0 starting with **M14 — ADR 0008 + save schema v2**. Before touching M14, read the critical path in
@@ -719,10 +781,10 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is 1.7.0**, not a milestone: see
-[`roadmap.md`](roadmap.md#open-issues--8) for the 8 open findings and the release
-they are batched into. 2.0.0 (starting with M14) is gated behind 1.7.0, 1.7.1 and
-a clean sweep re-run. Joshua is post-1.0 backlog, not next.
+**Your next work is 1.7.8**, not a milestone: see
+[`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
+is batched into. 2.0.0 (starting with M14) is gated behind 1.7.8, 1.7.9 and a
+clean gate re-run. Joshua is post-1.0 backlog, not next.
 
 ### Before you touch anything
 

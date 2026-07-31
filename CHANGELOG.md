@@ -4,6 +4,126 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.7] — 2026-07-30
+
+**Carry the fixes to the sites they were never applied to.** 1118 assertions
+(was 1048); `cyrius audit` exits 0; 6/6 benches; 17/17 mutations killed.
+
+Two of the four findings that returned **DO-NOT-CLOSE** on the 1.x gate. Neither
+is a new defect. Both are a rule this project had already written down, applied
+at some sites and not at the others — and in both cases the correct code was
+already in the tree, in one instance 230 lines below the broken one.
+
+### Fixed
+
+- **`get` of a container ignored what was inside it, and the next save destroyed
+  the overflow.** `ilist_push` moves an object **and everything hanging off its
+  `OI_CONTENTS`**, but both `get_from` arms asked only `inv_full(s)` — "am I at
+  the cap right now" — which is a different question. Measured on this tree:
+  holding 99, `oi_move_count` of a bag of 99 is 100, and the old guard returned
+  **0 (allow)**. One ordinary `get` therefore landed the player at **199 against
+  a cap of 100**, with the server saying only "You take …". Pushed further by the
+  gate sweep: 721 carried, `_build_record` filling 4048 bytes of `SAVE_CAP` 4096,
+  `player_save` returning **SUCCESS**, and the reload coming back with 591 —
+  **130 items destroyed, silently.**
+
+  The counting now lives in one function, `oi_move_count`, shared by `get` and
+  `cmd_give`. `cmd_give` had computed it correctly since 1.7.3 and it was
+  open-coded there, which is exactly why `get` kept the wrong question for four
+  releases. The 1.7.2 `inv_owns_slot` exemption is unchanged and re-asserted: a
+  move out of your own bag changes no total and must still be allowed at the cap.
+
+- **`get all` no longer abandons the whole sweep because one thing did not fit** —
+  a regression introduced by the fix above and caught by its own class sweep.
+  Aborting on refusal was correct while the only question was "are you full": if
+  you are, nothing else fits either. Once the question became per-item it stopped
+  being correct, and one oversized bag would have made `get all` take **nothing**
+  for a player carrying nothing. The arm now skips what does not fit and keeps
+  going, and still exits early when genuinely at the cap, where walking the rest
+  of an unbounded floor buys nothing.
+
+- **The refusal message learned which of two facts is true.** "Your hands and
+  pockets are full" told to someone carrying nothing — who simply reached for a
+  bag bigger than the cap — is a lie the player can see, and counting contents is
+  what made it reachable. At the cap the message is unchanged; below it the
+  answer is now "You can't carry all of that." Both branches are asserted.
+
+- **`inventory`, `who`, `drop all`, `get all` and `@who` ended mid-line with no
+  prompt.** The defect 1.7.6 shipped a whole release to remove from `look`, at
+  five sibling loops that release did not touch. Each wrote one coloured line per
+  element into the 4 kB queue with no fit check; `session_appendtx` truncates at a
+  **byte** boundary and returns a short count nobody reads, so the reply was cut
+  wherever the buffer ran out — colour never closed, and **no prompt**, which
+  leaves the session looking hung.
+
+  Measured by driving the old loops against the real buffer:
+
+  | listing | last size that worked | first size that lost the prompt |
+  |---|---|---|
+  | `inventory`, longest authored name (30 B) | 94 items, 4063 B | **95 items, 4096 B** |
+  | `who`, 16-char names + Hub room titles | 78 players, 4062 B | **79 players, 4096 B** |
+
+  **95 is under the game's own `MAX_INV` of 100** — a limit the server hands the
+  player rather than one they have to work to reach. At 90 sessions the `who` cut
+  landed on byte `0x80`, a UTF-8 continuation byte: the em-dash separator sliced
+  in half mid-character.
+
+  All five now stop at a whole item with the 512-byte reserve intact and report
+  what they omitted. `@who` is dormant (the `@`-namespace is off unless
+  `YD_ADMIN=1`) and was fixed in the same pass anyway — leaving the sleeping twin
+  of a defect in place is how three of these four findings came to exist.
+
+- **Rationing the echo must never ration the effect.** `drop all` and `get all`
+  are commands, not reports. The fit check wraps only the echo; the move happens
+  either way, so a player who types `drop all` ends up carrying nothing however
+  much of the receipt fits on the wire. Both directions are asserted, and the
+  mutation that pulls the move inside the check is killed by them.
+
+### Changed
+
+- `room_append_more` gained a general form, `list_append_more(s, n, what, tail)`.
+  1.7.6 hard-coded " here.", which is a false statement in `who` — a listing whose
+  entire subject is players who are somewhere else. The three room sections keep
+  their original wording through the old name.
+
+### Notes
+
+- **Why none of this failed a test before.** The suite was green at 1048
+  assertions with both defects present. Neither had a test, so neither could
+  fail. Sixteen releases of mutation-testing each new guard never built the habit
+  of testing the guard's **siblings** — the sites the same rule should have
+  reached.
+
+- **A mutation survived, and the test was what was wrong.** The first version of
+  the `get all` coverage used bare floor items, and for a bare item
+  `oi_move_count` is 1 — so the old guard and the new one are *the same
+  function*. The test looked like it covered the arm and could not have failed
+  whatever the arm did. Discriminating needs a floor container whose contents
+  overflow the cap on their own (50 held + a bag of 99). Fourteenth instance of
+  this project's standing rule: *a mutation that fails to fail is a signal about
+  the test, not about the mutation.*
+
+- **Sweeping the class is what found the next class.** Both defect classes were
+  swept across the whole tree rather than patched at the two named sites, with
+  every candidate adversarially refuted before being recorded. **Neither class had
+  another instance** — the five listing sites and the three cap sites are all of
+  them. What the sweep turned up instead was a *different* unbounded class, on the
+  **RX** side: a pre-auth peer can drive the server's own Telnet reply buffer past
+  `TX_CAP` three bytes at a time, and **both** of this server's input bounds are
+  structurally blind to it (`RX_MAX_LINES` counts completed lines, and a
+  negotiation triple completes none; the 1.7.0 charge window bills only `ed25519_*`
+  and prose bytes, and negotiation costs neither). Eight items, filed as roadmap
+  **W–Z** and *not* fixed here.
+
+- **A correction to the roadmap, not to the code.** That sweep also established
+  that `_restore_inv` enforces no carry cap at all, while the roadmap has recorded
+  issue **E** as closed since 1.7.2. The source made a deliberate and defensible
+  different choice — a record that already holds more than the cap must come back
+  intact, because the cap exists to stop you acquiring, not to destroy what you
+  have — but the roadmap was never corrected to say so. It has therefore claimed a
+  bound that does not exist for five releases: *a comment is not a bound*, one
+  level up from the code.
+
 ## [1.7.6] — 2026-07-29
 
 **A room listing could break the terminal.** 1039 assertions (was 1024).

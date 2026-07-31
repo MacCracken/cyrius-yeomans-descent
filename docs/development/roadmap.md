@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-29 (v1.7.6 + an uncommitted account-count fix — the gate re-run returned DO-NOT-CLOSE with four high findings; 1.7.7 is next)
+> **Last Updated**: 2026-07-30 (v1.7.7 — two of the gate re-run's four highs closed; **1.7.8 is next**, then gate re-run #2)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -28,9 +28,10 @@ ownership and fix size.
 | — | ~~1.7.4~~ | ~~1 of 3~~ | ✅ **Shipped.** Audit-log rotation (ADR 0009 mechanism), incl. the crash window, the prune attestation, and the clobber guard | — |
 | — | ~~1.7.5~~ | ~~1 of 2~~ | ✅ **Shipped.** Ground decay — player-dropped items expire after two zone-reset intervals (30 min). The last item of the 1.6/1.7 audit line | — |
 | — | ~~1.7.6~~ | ~~2~~ | ✅ **Shipped.** The room listing no longer breaks the wire (it ended mid-escape with no prompt at 86 floor objects) · 1.6.12's audit granularity restored | — |
-| 1 | [**1.7.7**](#177--carry-the-fixes-to-the-sites-they-were-never-applied-to) | 2 | **Carry two existing fixes to the sites they were never applied to** — `get` of a container (silent item loss) · four listing verbs that truncate mid-line | **yes** |
-| 2 | [**1.7.8**](#178--agnos-persistence-and-the-pre-auth-parse) | 2 | AGNOS saves never publish · every login against an existing name leaks 2.2 kB pre-auth | **yes** |
-| 3 | [**gate re-run #2**](#the-gate--what-closes-the-1x-line) | — | Re-run after 1.7.7/1.7.8. The first re-run returned **DO-NOT-CLOSE** | **yes** |
+| — | ~~1.7.7~~ | ~~2~~ | ✅ **Shipped.** Carried two existing fixes to the sites they were never applied to — `get` of a container (silent item loss at 199 against a cap of 100) · five listing verbs that truncated mid-line with no prompt | — |
+| 1 | [**1.7.8**](#178--agnos-persistence-and-the-pre-auth-parse) | 2 | AGNOS saves never publish · every login against an existing name leaks 2.2 kB pre-auth | **yes** |
+| 2 | [**1.7.9**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 8 | The **RX-side** unbounded class 1.7.7's sweep found — a pre-auth peer driving the server's own reply buffer past `TX_CAP`, the 2× passphrase mask, and the load-path cap this file wrongly recorded as closed | **yes** |
+| 3 | [**gate re-run #2**](#the-gate--what-closes-the-1x-line) | — | Re-run after 1.7.8/1.7.9. The first re-run returned **DO-NOT-CLOSE** | **yes** |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 
@@ -53,11 +54,11 @@ the release.
 
 ---
 
-## Open issues — 5 high, all raised by the gate re-run (2026-07-29)
+## Open issues — 2 high, from the gate re-run (2026-07-29)
 
-**The gate re-run returned DO-NOT-CLOSE.** Every earlier item is shipped; these
-are new. Four came from the sweep and were reproduced by its judge on the shipped
-tree; the fifth was found alongside it and is already fixed but uncommitted.
+**The gate re-run returned DO-NOT-CLOSE** with five highs. **Three are now
+closed**: R and S in 1.7.7, and V (the account cap) which was fixed in the working
+tree at the time and is committed. **T and U remain, and are 1.7.8.**
 
 **The lesson, stated once because it is the same lesson as the previous sixteen
 releases:** three of the four are *a rule applied at some sites and not the
@@ -70,10 +71,42 @@ From the third (gate) sweep, 2026-07-29, run against 1.6.15. Worst first. Every
 item says what breaks, whether it can happen to a running server today, whose
 code it is, and how big the fix is — in that order, before any label.
 
-### 1.7.7 — carry the fixes to the sites they were never applied to
+### ✅ 1.7.7 — carry the fixes to the sites they were never applied to (SHIPPED)
+
+Items R and S are **closed**. 1118 assertions (was 1048), 17/17 mutations killed,
+`cyrius audit` 0, 6/6 benches.
+
+**Both were confirmed by measurement before being fixed, and the numbers held.**
+`get` of a bag of 99 while holding 99 landed at **199 against a cap of 100** — the
+old guard `inv_full` returned *allow*. `inventory` lost its prompt at **95 items**
+(94 fitted), which is **under the game's own `MAX_INV` of 100**; `who` lost it at
+**79 players** (78 fitted), and at 90 the cut landed on byte `0x80` — mid-UTF-8
+character, the em-dash separator sliced in half.
+
+**The fix was carried to the class, not the instance.** `oi_move_count` is now the
+single answer to "how much does this move move", shared by `get` and `cmd_give`;
+five listing loops adopted `room_line_fits` / `list_append_more`, including the
+dormant `@who` twin. A follow-up sweep of both classes across the whole tree found
+no further instance of either — but did surface a **different** unbounded class on
+the RX side (see below).
+
+**Two things worth keeping from how it went:**
+
+- *Rationing the echo must never ration the effect.* `drop all` and `get all` are
+  commands, not reports. The fit check wraps only the echo. The mutation that
+  pulls the move inside the check is killed by a dedicated assertion, because a
+  fit check around the whole loop body would have passed every prompt assertion
+  and silently left items in the player's hands.
+- *A mutation survived, and the test was what was wrong* — fourteenth instance of
+  this project's standing rule. The first `get all` coverage used bare floor
+  items, and for a bare item `oi_move_count` is 1, so the old guard and the new
+  one are **the same function**. The test could not have failed whatever the arm
+  did. Discriminating needs a floor container that overflows the cap by itself.
+
+### 1.7.7 — the two items (detail, retained)
 
 **R. Picking up a container ignores what is inside it, and the next save destroys
-the overflow.** *(high)*
+the overflow.** *(high — CLOSED in 1.7.7)*
 
 - **What breaks.** `get` moves a container **and its contents**, but the cap check
   asks only how much you are already holding. Hold 99, pick up a bag of 99, and
@@ -99,7 +132,7 @@ the overflow.** *(high)*
   `test_carry_cap_container` only takes items *out of* your own bag.
 
 **S. `inventory`, `who`, `drop all` and `get all` end mid-line with no prompt.**
-*(high)*
+*(high — CLOSED in 1.7.7)*
 
 - **What breaks.** The same defect 1.7.6 shipped a release to remove for `look`.
   Each writes one coloured line per item into the 4 kB queue with no fit check, so
@@ -121,6 +154,104 @@ the overflow.** *(high)*
   [`item.cyr:481`](../../src/item.cyr:481). `render_who`
   [`server.cyr:1064`](../../src/server.cyr:1064) is the same shape but behind
   `YD_ADMIN` (default off) — dormant, fix it in the same pass.
+
+### Raised by 1.7.7's own class sweep (2026-07-30) — 1 high, 3 medium, 4 low
+
+1.7.7 swept both of its defect classes across the whole tree rather than patching
+the two named sites, and had every candidate adversarially refuted before it was
+recorded. **Neither class had another instance** — the five listing sites and the
+three cap sites are all of them. What the sweep found instead was a **different**
+unbounded class, on the RX side, which no previous pass had an instrument for.
+Listed worst first. None is fixed; all are new.
+
+**W. A pre-auth peer can make the server generate its own buffer overflow, three
+bytes at a time.** *(high)*
+
+- **What breaks.** `session_consume_rx_max` ([`session.cyr:1671`](../../src/session.cyr:1671))
+  appends the Telnet layer's reply buffer with an unchecked `session_appendtx`
+  ([`:1693`](../../src/session.cyr:1693)), then `telnet_tx_consume` **unconditionally
+  clears the source** — so whatever the short write dropped is gone. Every option
+  code except ECHO(1) and SGA(3) is untracked, and `telnet_respond_refuse` is
+  **stateless** for untracked options, so `IAC DO 42` repeated 1365 times in one
+  4096-byte write produces 1365 unconditional `IAC WONT 42` replies with no
+  Q-method suppression to damp it.
+- **Why no existing bound catches it.** `RX_MAX_LINES = 8` counts **completed
+  lines**, and a negotiation triple yields `EV_NONE`, so `fired` stays 0. The
+  1.7.0 charge window bills only `ed25519_*` and prose bytes, and negotiation
+  costs neither. **Both of this server's input bounds are structurally blind to
+  it.** That is the finding, more than the site.
+- **Can it happen today? Yes, pre-auth**, from anyone who can open a socket.
+- **The verifier's correction, kept because it matters.** One pass from an empty
+  queue tops out at 1365 × 3 = **4095 bytes against TX_CAP 4096** — one byte
+  short. Overflow needs the queue to be non-empty at the start of the pass, which
+  three ordinary things do: mixed input in the same read (up to 8 command lines
+  may interleave), a slow-reading peer whose unsent remainder `session_drain`
+  compacts and keeps, and the retained-tail resume. So it is real but **not a
+  one-packet kill**, and the honest statement is "reachable in ordinary
+  conditions", not "guaranteed from a single write".
+- **Worse than the 1.7.6/1.7.7 display sites in kind**: the unit being truncated
+  is a 3-byte Telnet escape, not a text line. A bare `IAC WONT` with no option
+  byte makes a conformant client eat the next data byte as the option code.
+- **Whose code.** Ours. **Fix size.** Contained — the same fit-check shape, plus a
+  bound on unsolicited refusals per pass.
+
+**X. The passphrase mask is a 2× amplifier with no bound.** *(medium)*
+
+- `session_push_line_byte` ([`:1592`](../../src/session.cyr:1592)) emits one `*`
+  per printable byte and **three** (`"\b \b"`) per BS/DEL, so an interleave of
+  printable and DEL costs 4 TX bytes per 2 RX bytes: **8192 from one 4096-byte
+  read, twice TX_CAP.** `LINE_CAP` equals `RX_CAP` so it bounds nothing for a
+  single read, and the over-length guard *resets* `SS_LINE_LEN` rather than
+  damping. `PASS_MAX = 64` is a line-dispatch check, never per byte.
+- Reachable **pre-auth** in `PHASE_PASS` / `PHASE_NEWPASS` / `PHASE_CONFIRMPASS`.
+  The lost tail is the over-length notice, the `WONT ECHO` salvo and the prompt —
+  so the client is left echo-suppressed with no prompt.
+
+**Y. The carry cap is not enforced on the load path, and this file said it was.**
+*(medium — and a correction to this document)*
+
+- `_restore_inv` ([`persist.cyr:1607`](../../src/persist.cyr:1607)) has **no
+  counter, no cap and no budget**. The only bound is incidental: `SLURP_CAP`
+  leaves ~7686 bytes of `inv` field, which at the Hub's short ids is on the order
+  of a thousand items — ten times `MAX_INV`.
+- **This is issue E, which this file records as CLOSED in 1.7.2. It is not.**
+  What actually happened is that a *different decision* was taken and written into
+  the source: the comment at [`item.cyr`](../../src/item.cyr) says the cap is
+  "**deliberately NOT enforced on the load path** — a record that already holds
+  more than this must come back intact. The cap stops you ACQUIRING more, it never
+  destroys what you have." That is a defensible call, and refusing to destroy a
+  player's belongings on load is probably the right one. **The defect is that the
+  roadmap was never corrected to say so**, so this document has claimed a bound
+  that does not exist for five releases — the precise failure mode this project
+  has a standing lesson about (*a comment is not a bound*), one level up.
+- **What 1.7.8 owes it:** decide and record — either bound it with an audit line
+  on truncation, or mark E **won't-fix** with the reasoning above. Not both.
+
+**Z. Four smaller unbounded or mis-ordered sites.** *(low)*
+
+- **`session_show_room`'s header** ([`session.cyr:1265`](../../src/session.cyr:1265))
+  writes the authored room prose with a raw `session_appendtx` **ahead of** the
+  three sections 1.7.6 guarded, and can consume the whole 4096 bytes *including*
+  the 512-byte reserve those sections rely on. Authored prose is borrowed
+  uncapped from the CYML buffer. *Note: the previous sweep dropped a room-header
+  finding whose stated mechanism was wrong. This one names a different mechanism
+  and was independently confirmed — it is not a re-proposal of the dropped one,
+  and it should be re-checked on that basis before anyone acts on it.*
+- **`class_send_prompt`** ([`classes.cyr:224`](../../src/classes.cyr:224)) — one
+  unchecked line per class. Safe with the shipped 4 classes; up to 8 bad choices
+  can stack menus in one TX because nothing flushes mid-slice, so an
+  operator-authored `classes.cyml` reaches it.
+- **`mob_swing`** ([`combat.cyr:244`](../../src/combat.cyr:244)) — combat lines per
+  latched mob, unbounded by mobs-per-room.
+- **`drain_pending_rx`'s SS_QUIT arm** ([`server.cyr:502`](../../src/server.cyr:502))
+  consults the charge budget *after* `drop_session`'s unconditional signing save
+  rather than before it, so every pass overshoots by at least one signature.
+  Bounded at one; noted for correctness of the accounting, not as a risk.
+
+**Also confirmed, and deliberately not filed as a defect:** `cmd_put` places no
+limit on a room container's contents. That is roadmap item **Q** (the donation
+bin) and is already 2.0 work; the sweep verified it is no longer a `MAX_INV`
+bypass, because contents of a *carried* container are counted by `inv_count`.
 
 ### 1.7.8 — AGNOS persistence and the pre-auth parse
 

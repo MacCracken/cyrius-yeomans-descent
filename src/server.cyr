@@ -1060,6 +1060,7 @@ fn render_stats(s): i64 {
 fn render_who(s): i64 {
     session_appendtx_cstr(s, "-- connected --\r\n");
     var n = 0;
+    var more = 0;
     var p = g_session_head;
     while (p != 0) {
         # F1 (1.6.11) — bound the index at BOTH ends before room_at.
@@ -1077,17 +1078,29 @@ fn render_who(s): i64 {
         var room = load64(p + SS_ROOM);
         if (room >= 0) {
             if (room < world_room_count()) {
-                session_appendtx_cstr(s, "  ");
-                session_appendtx_prose(s, load64(p + SS_NAME_BUF), load64(p + SS_NAME_LEN));   # M10-C name
-                session_appendtx_cstr(s, " — ");
+                # 1.7.7 — whole lines only; see RoomList in session.cyr. Same
+                # shape as `cmd_who` above and fixed in the same pass on purpose:
+                # this one is DORMANT (the @-namespace is off unless YD_ADMIN=1),
+                # and leaving the dormant twin of a defect in place is how three of
+                # the four findings that reopened the 1.x gate came to exist.
                 var r = room_at(room);
-                session_appendtx(s, room_title_ptr(r), room_title_len(r));
-                session_appendtx_cstr(s, "\r\n");
+                var need = 2 + load64(p + SS_NAME_LEN) * 2                 # prose IAC-doubles
+                + 5 + room_title_len(r) + 2;                               # " — " is 5 bytes, CRLF 2
+                if (room_line_fits(s, need) == 0) {
+                    more = more + 1;
+                } else {
+                    session_appendtx_cstr(s, "  ");
+                    session_appendtx_prose(s, load64(p + SS_NAME_BUF), load64(p + SS_NAME_LEN));   # M10-C name
+                    session_appendtx_cstr(s, " — ");
+                    session_appendtx(s, room_title_ptr(r), room_title_len(r));
+                    session_appendtx_cstr(s, "\r\n");
+                }
                 n = n + 1;
             }
         }
         p = load64(p + SS_NEXT);
     }
+    list_append_more(s, more, "in-world", " not shown.\r\n");
     if (n == 0) { session_appendtx_cstr(s, "  (no one in-world)\r\n"); }
     session_appendtx_cstr(s, "in-world: ");
     session_appendtx_num(s, n);
@@ -1348,29 +1361,54 @@ fn find_player_global(np, nl): i64 {
 }
 
 # `who` — list every logged-in player and the room they are in.
+# 1.7.7 — whole lines only; see RoomList in session.cyr. `who` is the one listing
+# in this set whose length no cap in the game bounds: it is one line per LOGGED-IN
+# SESSION, so it overruns at roughly 90 players online — well inside MAX_SESSIONS —
+# and it does so for every player who types it, at once.
+#
+# `n` counts every session in-world whether or not its line was rendered, because
+# "(N online)" answers a different question than the list does. The omitted count
+# is reported separately.
 fn cmd_who(s): i64 {
     session_appendtx_cstr(s, "-- wanderers of the Under-Grid --\r\n");
     var n = 0;
+    var more = 0;
     var t = g_session_head;
     while (t != 0) {
         if (load64(t + SS_PHASE) == PHASE_CMD) {
-            session_appendtx_cstr(s, "  ");
-            session_appendtx_cstr(s, ansi_actor());
-            session_appendtx_prose(s, load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN));   # M10-C name
-            session_appendtx_cstr(s, ansi_reset());
-            var rm = load64(t + SS_ROOM);
-            if (rm >= 0) {
-                if (rm < world_room_count()) {
-                    session_appendtx_cstr(s, " — ");
-                    var r = room_at(rm);
-                    session_appendtx(s, room_title_ptr(r), room_title_len(r));
+            if (more > 0) {
+                more = more + 1;                 # past the cut: count, do not render
+            } else {
+                var rm = load64(t + SS_ROOM);
+                var titled = 0;
+                if (rm >= 0) {
+                    if (rm < world_room_count()) { titled = 1; }
+                }
+                # The name is costed at 2x because session_appendtx_prose
+                # IAC-doubles, so a name of 0xFF bytes emits twice its length.
+                var need = 2 + strlen(ansi_actor()) + load64(t + SS_NAME_LEN) * 2
+                + strlen(ansi_reset()) + 2;
+                if (titled == 1) { need = need + 5 + room_title_len(room_at(rm)); }   # " — " is 5 bytes
+                if (room_line_fits(s, need) == 0) {
+                    more = 1;
+                } else {
+                    session_appendtx_cstr(s, "  ");
+                    session_appendtx_cstr(s, ansi_actor());
+                    session_appendtx_prose(s, load64(t + SS_NAME_BUF), load64(t + SS_NAME_LEN));   # M10-C name
+                    session_appendtx_cstr(s, ansi_reset());
+                    if (titled == 1) {
+                        session_appendtx_cstr(s, " — ");
+                        var r = room_at(rm);
+                        session_appendtx(s, room_title_ptr(r), room_title_len(r));
+                    }
+                    session_appendtx_cstr(s, "\r\n");
                 }
             }
-            session_appendtx_cstr(s, "\r\n");
             n = n + 1;
         }
         t = load64(t + SS_NEXT);
     }
+    list_append_more(s, more, "online", " not shown.\r\n");
     session_appendtx_cstr(s, "(");
     session_appendtx_num(s, n);
     session_appendtx_cstr(s, " online)\r\n");

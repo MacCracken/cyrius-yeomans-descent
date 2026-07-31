@@ -442,13 +442,66 @@ fn inv_count(s): i64 {
     return n;
 }
 
-# Is this session at the carry cap? Tells the player once, rather than failing
-# their save silently an hour later.
-fn inv_full(s): i64 {
-    if (inv_count(s) < MAX_INV) { return 0; }
-    session_appendtx_cstr(s, "Your hands and pockets are full.\r\n");
+# How many carried slots does moving `o` consume? (1.7.7.)
+#
+# THE POINT OF THIS FUNCTION EXISTING AT ALL: every carry-cap guard in this file
+# must ask the cap about the same quantity the transfer beneath it actually moves.
+# `ilist_push` moves the object AND everything hanging off its OI_CONTENTS, so a
+# guard that counts 1 for a bag of 99 is not a guard. That is the defect this
+# release closes on the `get` path, and it is the SIXTH appearance in this tree of
+# one shape — *a check that asks about a different collection than the mutation
+# below it touches.* The counting now lives in one place so the next site cannot
+# get a different answer.
+#
+# One level, matching `inv_count`'s depth and F11's flatten depth, which is exact
+# because `cmd_put` refuses to nest a non-empty container.
+fn oi_move_count(o): i64 {
+    var n = 1;
+    var inner = oi_contents(o);
+    while (inner != 0) { n = n + 1; inner = oi_next(inner); }
+    return n;
+}
+
+# Would taking on `n` more slots push this session past the carry cap? Pure — the
+# sweeps need to ask this per item without narrating every refusal.
+fn inv_exceeds(s, n): i64 {
+    if (inv_count(s) + n <= MAX_INV) { return 0; }
     return 1;
 }
+
+# Say WHY a take was refused. The two answers are different facts, and giving the
+# wrong one is a lie the player can see: "your hands and pockets are full" told to
+# someone carrying nothing — who simply tried to lift a bag bigger than the cap —
+# is how a bug gets reported against the wrong verb. 1.7.7 made this reachable by
+# counting contents, so the message had to learn the difference.
+fn inv_say_refused(s): i64 {
+    if (inv_count(s) >= MAX_INV) {
+        session_appendtx_cstr(s, "Your hands and pockets are full.\r\n");
+        return 0;
+    }
+    session_appendtx_cstr(s, "You can't carry all of that.\r\n");
+    return 0;
+}
+
+# The predicate plus its explanation — the single-item paths, which refuse once.
+fn inv_would_exceed(s, n): i64 {
+    if (inv_exceeds(s, n) == 0) { return 0; }
+    inv_say_refused(s);
+    return 1;
+}
+
+# Is this session at the carry cap — i.e. would ONE bare item still fit?
+#
+# **IF YOU ARE ABOUT TO MOVE SOMETHING, THIS IS THE WRONG FUNCTION.** Use
+# `inv_would_exceed(s, oi_move_count(o))`. This one answers a question about the
+# session alone; it knows nothing about what you are holding, and a container
+# arrives with its contents. Reaching for the shorter name here is exactly the
+# defect 1.7.7 exists to close, and no acquisition path calls this any more.
+#
+# Kept because "is this session at the cap" is still a real question, and because
+# deleting it would leave the next reader to open-code the comparison — which is
+# how `cmd_give` and `get` came to hold two different answers for four releases.
+fn inv_full(s): i64 { return inv_would_exceed(s, 1); }
 
 # Does `slot` already sit inside this session's possessions? (1.7.2.)
 #
@@ -477,6 +530,8 @@ fn inv_owns_slot(s, slot): i64 {
 fn get_from(s, from_slot, to_slot, qall, np, nl, nth, where): i64 {
     if (qall == 1) {
         var moved = 0;
+        var more = 0;
+        var refused = 0;
         var o = load64(from_slot);
         while (o != 0) {
             var nxt = oi_next(o);
@@ -484,24 +539,67 @@ fn get_from(s, from_slot, to_slot, qall, np, nl, nth, where): i64 {
             if (oi_is_corpse(o) == 1) { take = 0; }                 # never auto-take corpses
             if (nl > 0) { if (kw_matches(np, nl, oi_kw_ptr(o)) == 0) { take = 0; } }
             if (take == 1) {
-                # G1 — stop at the cap mid-sweep rather than silently overfilling.
+                # G1 — never silently overfill.
                 # 1.7.2 — but only for a genuine ACQUISITION. Taking from a
                 # container you already carry leaves your total unchanged.
+                # 1.7.7 — and ask about what this move actually MOVES. `ilist_push`
+                # below carries the object's OI_CONTENTS with it, so a bare
+                # `inv_full` let one `get` of a full bag land 99 items past a cap
+                # it appeared to enforce. See oi_move_count.
+                var fits = 1;
                 if (to_slot == s + SS_INV) {
                     if (inv_owns_slot(s, from_slot) == 0) {
-                        if (inv_full(s) == 1) { o = 0; continue; }
+                        if (inv_exceeds(s, oi_move_count(o)) == 1) { fits = 0; }
                     }
+                }
+                if (fits == 0) {
+                    refused = refused + 1;
+                    # SKIP, do not abort. Before 1.7.7 this arm stopped the whole
+                    # sweep on refusal, which was right when the only question was
+                    # "are you full" — if you are, nothing else fits either. Once
+                    # the question became per-item it stopped being right: one
+                    # oversized bag would make `get all` take NOTHING for a player
+                    # carrying nothing, and tell them their hands were full. A bag
+                    # that does not fit says nothing about the loose item behind it.
+                    #
+                    # The early exit survives for the case that still justifies it:
+                    # at the cap, no remaining item can fit, so walking the rest of
+                    # an unbounded floor buys nothing.
+                    if (inv_count(s) >= MAX_INV) { o = 0; continue; }
+                    o = nxt;
+                    continue;
                 }
                 ilist_remove(from_slot, o);
                 ilist_push(to_slot, o);
-                session_appendtx_cstr(s, "You take ");
-                append_item_name(s, o);
-                session_appendtx_cstr(s, ".\r\n");
+                # 1.7.7 — whole lines only; see RoomList in session.cyr. The MOVE
+                # is deliberately outside this check: rationing the echo must never
+                # ration the effect, or `get all` would silently leave items behind
+                # for no reason the player could see.
+                if (more > 0) {
+                    more = more + 1;
+                } else {
+                    var need = 9 + strlen(ansi_item()) + oi_name_len(o)   # "You take "
+                    + strlen(ansi_reset()) + 3;                           # ".\r\n"
+                    if (room_line_fits(s, need) == 0) {
+                        more = 1;
+                    } else {
+                        session_appendtx_cstr(s, "You take ");
+                        append_item_name(s, o);
+                        session_appendtx_cstr(s, ".\r\n");
+                    }
+                }
                 moved = moved + 1;
             }
             o = nxt;
         }
-        if (moved == 0) { session_appendtx_cstr(s, "There is nothing to take.\r\n"); }
+        list_append_more(s, more, "items", " taken.\r\n");
+        # Once, at the end — a sweep that narrated every refusal would put one
+        # line per floor item on the wire, which is the very failure the fit
+        # checks above exist to prevent.
+        if (refused > 0) { inv_say_refused(s); }
+        if (moved == 0) {
+            if (refused == 0) { session_appendtx_cstr(s, "There is nothing to take.\r\n"); }
+        }
         return 0;
     }
     var o = ilist_find_kw_nth(load64(from_slot), np, nl, nth);
@@ -516,8 +614,8 @@ fn get_from(s, from_slot, to_slot, qall, np, nl, nth, where): i64 {
         return 0;
     }
     if (to_slot == s + SS_INV) {
-        if (inv_owns_slot(s, from_slot) == 0) {   # 1.7.2 — acquisition only
-            if (inv_full(s) == 1) { return 0; }   # G1
+        if (inv_owns_slot(s, from_slot) == 0) {                          # 1.7.2 — acquisition only
+            if (inv_would_exceed(s, oi_move_count(o)) == 1) { return 0; }  # G1 + 1.7.7 contents
         }
     }
     ilist_remove(from_slot, o);
@@ -592,6 +690,7 @@ fn cmd_drop(s, pa): i64 {
 
     if (load64(&kind) == QUAL_ALL) {
         var moved = 0;
+        var more = 0;
         var o = load64(inv_slot);
         while (o != 0) {
             var nxt = oi_next(o);
@@ -601,13 +700,28 @@ fn cmd_drop(s, pa): i64 {
                 ilist_remove(inv_slot, o);
                 ilist_push(room_slot, o);
                 ground_arm(o);                 # 1.7.5
-                session_appendtx_cstr(s, "You drop ");
-                append_item_name(s, o);
-                session_appendtx_cstr(s, ".\r\n");
+                # 1.7.7 — whole lines only; see RoomList in session.cyr. As in
+                # get_from, the DROP happens either way: a player who types
+                # `drop all` at the carry cap must end up carrying nothing, no
+                # matter how much of the receipt fits on the wire.
+                if (more > 0) {
+                    more = more + 1;
+                } else {
+                    var need = 9 + strlen(ansi_item()) + oi_name_len(o)   # "You drop "
+                    + strlen(ansi_reset()) + 3;                           # ".\r\n"
+                    if (room_line_fits(s, need) == 0) {
+                        more = 1;
+                    } else {
+                        session_appendtx_cstr(s, "You drop ");
+                        append_item_name(s, o);
+                        session_appendtx_cstr(s, ".\r\n");
+                    }
+                }
                 moved = moved + 1;
             }
             o = nxt;
         }
+        list_append_more(s, more, "items", " dropped.\r\n");
         if (moved == 0) { session_appendtx_cstr(s, "You have nothing to drop.\r\n"); }
         return 0;
     }
@@ -748,9 +862,11 @@ fn cmd_give(s, pa): i64 {
     #
     # Counted as "would this transfer exceed the cap" rather than "is the target
     # at the cap", because the answer depends on what is being handed over.
-    var moving = 1;
-    var gi = oi_contents(o);
-    while (gi != 0) { moving = moving + 1; gi = oi_next(gi); }
+    #
+    # 1.7.7 — the counting moved into `oi_move_count`, shared with the `get` path.
+    # It was open-coded here and nowhere else, which is precisely why `get` kept
+    # the wrong question for four releases while the right one sat 230 lines above.
+    var moving = oi_move_count(o);
     if (inv_count(target) + moving > MAX_INV) {
         session_appendtx_cstr(s, "They can't carry any more.\r\n");
         return 0;
@@ -774,16 +890,37 @@ fn cmd_give(s, pa): i64 {
 }
 
 # === cmd_inventory — list what the player carries. ===
+#
+# 1.7.7 — whole lines only; see RoomList in session.cyr for the measured failure.
+# This is the same defect 1.7.6 shipped a release to remove from `look`, at a site
+# that release did not touch: one coloured line per item into a 4 kB queue with no
+# fit check, so at the game's OWN carry cap the reply is cut at whatever byte it
+# runs out on — mid-name, colour never closed, and no prompt after it.
+#
+# `inv` is the worst of the four for reachability, because MAX_INV = 100 is a
+# limit the game hands the player rather than one they have to work to reach.
 fn cmd_inventory(s): i64 {
     var o = load64(s + SS_INV);
     if (o == 0) { session_appendtx_cstr(s, "You carry nothing.\r\n"); return 0; }
     session_appendtx_cstr(s, "You are carrying:\r\n");
+    var more = 0;
     while (o != 0) {
-        session_appendtx_cstr(s, "  ");
-        append_item_name(s, o);
-        session_appendtx_cstr(s, "\r\n");
+        if (more > 0) {
+            more = more + 1;                 # past the cut: count, do not render
+        } else {
+            var need = 2 + strlen(ansi_item()) + oi_name_len(o)
+            + strlen(ansi_reset()) + 2;
+            if (room_line_fits(s, need) == 0) {
+                more = 1;
+            } else {
+                session_appendtx_cstr(s, "  ");
+                append_item_name(s, o);
+                session_appendtx_cstr(s, "\r\n");
+            }
+        }
         o = oi_next(o);
     }
+    list_append_more(s, more, "items", " carried.\r\n");
     return 0;
 }
 

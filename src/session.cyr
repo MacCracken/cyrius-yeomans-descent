@@ -1151,19 +1151,29 @@ fn room_line_fits(s, need): i64 {
     return 0;
 }
 
-# "...and N more <what> here." — the honest tail of a truncated section.
+# "...and N more <what><tail>" — the honest tail of any truncated listing.
 #
 # Emitted UNCONDITIONALLY once a section stops: a listing that silently shows
 # fewer things than are present is how a player walks past the thing they came
 # for. The reserve exists so this always fits.
-fn room_append_more(s, n, what): i64 {
+#
+# 1.7.7 — `tail` is a parameter because the listings that adopted this outside a
+# room are not describing things that are *here*. "...and 12 more players here."
+# is a false statement in `who`, whose whole subject is players who are somewhere
+# else. Room sections keep their wording through `room_append_more` below.
+fn list_append_more(s, n, what, tail): i64 {
     if (n <= 0) { return 0; }
     session_appendtx_cstr(s, "...and ");
     session_appendtx_num(s, n);
     session_appendtx_cstr(s, " more ");
     session_appendtx_cstr(s, what);
-    session_appendtx_cstr(s, " here.\r\n");
+    session_appendtx_cstr(s, tail);
     return 1;
+}
+
+# The room-listing spelling: "...and N more <what> here."
+fn room_append_more(s, n, what): i64 {
+    return list_append_more(s, n, what, " here.\r\n");
 }
 
 # Clear all attributes — every coloured span in a room listing closes with this.

@@ -6141,9 +6141,411 @@ fn main() {
     test_audit_rotation();
     test_ground_decay();
     test_room_listing_bounds();
+    test_carry_cap_get_contents();
+    test_listing_bounds();
+
 
     return assert_summary();
 }
 
+# Length of an intrusive object list — used by the 1.7.7 groups to assert that a
+# rationed ECHO still performed the whole EFFECT.
+fn _ilist_len(slot): i64 {
+    var n = 0;
+    var o = load64(slot);
+    while (o != 0) { n = n + 1; o = oi_next(o); }
+    return n;
+}
+
+# === 1.7.7 — `get` asks the cap about what it is actually going to move. ===
+#
+# MEASURED on this tree before the fix: holding 99, `oi_move_count` of a bag
+# containing 99 is 100, and the old guard — a bare `inv_full(s)`, which asks only
+# "am I at the cap right now" — returned 0. One ordinary `get` therefore landed
+# the player at **199 against a cap of 100**, with the server saying only
+# "You take ...". The gate sweep pushed the same shape to 721 carried, where
+# `_build_record` filled 4048 bytes of SAVE_CAP 4096, `player_save` returned
+# SUCCESS, and the reload came back with 591: **130 items destroyed, silently.**
+#
+# This is the SIXTH appearance in this tree of one defect — *a check that asks
+# about a different collection than the mutation below it touches.* The correct
+# version had existed since 1.7.3 in `cmd_give`, 230 lines below in the same file,
+# and was never carried across. Both now go through `oi_move_count`, so there is
+# exactly one answer to "how much does this move move" and no site can hold a
+# different one.
+fn test_carry_cap_get_contents(): i64 {
+    test_group("carry-cap-get");
+
+    if (g_obj_tpl_count == 0) { assert(0, "carry-cap-get: needs object templates"); return 0; }
+    if (world_room_count() == 0) { assert(0, "carry-cap-get: needs a world"); return 0; }
+
+    # --- The shared arithmetic, over its domain. This is the function whose
+    # ABSENCE was the bug, so it is asserted directly rather than only through
+    # its callers.
+    var bare = item_new(ot_at(0));
+    assert_eq(oi_move_count(bare), 1, "a bare item moves one slot");
+    var bag = item_new(ot_at(0));
+    var b = 0;
+    while (b < 49) { ilist_push(bag + OI_CONTENTS, item_new(ot_at(0))); b = b + 1; }
+    assert_eq(oi_move_count(bag), 50,
+              "a bag of 49 moves FIFTY — itself and its contents, which is what ilist_push carries");
+
+    # --- The guard, over the boundary. `inv_would_exceed` is the predicate the
+    # acquisition paths now consult.
+    var g = _freeable_sess();
+    store64(g + SS_INV, 0);
+    var gi = 0;
+    while (gi < MAX_INV - 50) { ilist_push(g + SS_INV, item_new(ot_at(0))); gi = gi + 1; }
+    assert_eq(inv_count(g), MAX_INV - 50, "the fixture carries exactly fifty short of the cap");
+    assert_eq(inv_would_exceed(g, 50), 0, "a move landing EXACTLY on the cap is allowed");
+    assert_eq(inv_would_exceed(g, 51), 1, "...and one slot past it is refused");
+    assert_eq(inv_full(g), 0, "the bare 'is one more OK' question still answers under the cap");
+
+    # --- THE BUG. The old guard and the new one disagree, and the old one is the
+    # one that let 199 happen. Asserting the DISAGREEMENT is what makes this test
+    # discriminating: an assertion only on the new guard would pass against a
+    # reverted fix if the fixture happened to sit at the cap.
+    var s = _freeable_sess();
+    store64(s + SS_INV, 0);
+    var h = 0;
+    while (h < MAX_INV - 1) { ilist_push(s + SS_INV, item_new(ot_at(0))); h = h + 1; }
+    assert_eq(inv_count(s), MAX_INV - 1, "holding one short of the cap");
+
+    var big = item_new(ot_at(2));                  # 'shard' — a distinct keyword
+    var k = 0;
+    while (k < MAX_INV - 1) { ilist_push(big + OI_CONTENTS, item_new(ot_at(0))); k = k + 1; }
+    assert_eq(oi_move_count(big), MAX_INV, "the bag plus its contents is a whole cap's worth");
+    assert_eq(inv_full(s), 0,
+              "the OLD question — 'are you at the cap' — says there is room, and it is wrong");
+    assert_eq(inv_would_exceed(s, oi_move_count(big)), 1,
+              "the NEW question — 'would this MOVE exceed it' — refuses. This is the fix.");
+    assert_eq(inv_count(s) + oi_move_count(big), 199,
+              "...because the old answer landed the player at 199 against a cap of 100");
+
+    # --- End to end through the real parser, exactly as a player types it.
+    var slot = room_at(0) + RM_OBJ_HEAD;
+    var pre = load64(slot);
+    store64(slot, 0);
+    ilist_push(slot, big);
+    store64(s + SS_ROOM, 0);
+    store64(s + SS_PHASE, PHASE_CMD);
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_AUTHED, 1);
+    _tx_reset(s);
+    cmd_on_line(s, "get shard", 9);
+    assert_eq(inv_count(s), MAX_INV - 1, "a typed `get` of the bag leaves the player where they were");
+    assert(inv_count(s) <= MAX_INV, "...and never above the cap");
+    assert_eq(_ilist_len(slot), 1, "...and the bag is still on the floor");
+    var tx = load64(s + SS_TX_BUF);
+    var n = load64(s + SS_TX_LEN);
+    # Told, and told the TRUE thing: this player is at 99 of 100, so they are not
+    # "full" — the bag they reached for is simply bigger than the room left.
+    assert_eq(_contains(tx, n, "You can't carry all of that."), 1,
+              "...and the player is TOLD, rather than silently overfilled");
+    assert_eq(_contains(tx, n, "hands and pockets are full"), 0,
+              "...with the message that is actually true at 99 of 100, not the one that isn't");
+
+    # --- THE `get all` ARM, WHICH IS A SEPARATE GUARD AND NEEDS A SEPARATE TEST.
+    #
+    # This assertion exists because the first version of this group did NOT have
+    # it, and the mutation that reverts the all-arm to a bare `inv_full` SURVIVED.
+    # The reason is worth writing down: the `get all` case above uses bare floor
+    # items, and for a bare item `oi_move_count` is 1, so the old guard and the new
+    # one are the SAME FUNCTION. The test looked like it covered the arm and could
+    # not have failed whatever the arm did.
+    #
+    # Discriminating requires a floor container whose contents push the player past
+    # the cap on their own — 50 held plus a bag of 99 is 150, which the new guard
+    # refuses and the old one waves through.
+    var aslot = room_at(0) + RM_OBJ_HEAD;
+    var apre = load64(aslot);
+    store64(aslot, 0);
+    var abag = item_new(ot_at(2));
+    var ac = 0;
+    while (ac < MAX_INV - 1) { ilist_push(abag + OI_CONTENTS, item_new(ot_at(0))); ac = ac + 1; }
+    ilist_push(aslot, abag);
+
+    var a = _freeable_sess();
+    store64(a + SS_ROOM, 0);
+    store64(a + SS_PHASE, PHASE_CMD);
+    store64(a + SS_FD, 0 - 1);
+    store64(a + SS_AUTHED, 1);
+    store64(a + SS_INV, 0);
+    var ah = 0;
+    while (ah < 50) { ilist_push(a + SS_INV, item_new(ot_at(0))); ah = ah + 1; }
+    assert_eq(inv_count(a), 50, "the sweep fixture holds fifty — HALF the cap, so 'am I full' says no");
+    assert_eq(inv_full(a), 0, "...which is exactly why the old all-arm guard let this through");
+    _tx_reset(a);
+    cmd_on_line(a, "get all", 7);
+    assert_eq(inv_count(a), 50, "`get all` of a bag that would overflow the cap takes nothing");
+    assert(inv_count(a) <= MAX_INV, "...and the player is never above the cap");
+    assert_eq(_ilist_len(aslot), 1, "...and the bag stays on the floor");
+
+    assert_eq(_contains(load64(a + SS_TX_BUF), load64(a + SS_TX_LEN), "carry all of that"), 1,
+              "...and the refusal is HONEST: a player at half the cap is not told their hands are full");
+
+    # A REFUSED ITEM MUST NOT BLOCK THE ONES BEHIND IT. Before this release the
+    # arm aborted the whole sweep on refusal, which was correct while the only
+    # question was "are you full" — if you are, nothing else fits either. Once the
+    # question became per-item that stopped being true, and the abort would have
+    # made `get all` take NOTHING for a player carrying nothing whose floor
+    # happened to start with an oversized bag. A regression introduced BY the fix,
+    # of exactly the shape 1.7.2 shipped and this project keeps rediscovering.
+    _drain_ilist(a + SS_INV); store64(a + SS_INV, 0);
+    _drain_ilist(aslot); store64(aslot, 0);
+    var loose = 0;
+    while (loose < 5) { ilist_push(aslot, item_new(ot_at(0))); loose = loose + 1; }
+    var huge = item_new(ot_at(2));
+    var hc = 0;
+    while (hc < MAX_INV + 50) { ilist_push(huge + OI_CONTENTS, item_new(ot_at(0))); hc = hc + 1; }
+    ilist_push(aslot, huge);                    # pushed last -> scanned FIRST
+    assert(oi_move_count(huge) > MAX_INV, "the bag cannot fit at ANY carried total");
+    assert_eq(inv_count(a), 0, "the player starts carrying nothing at all");
+    _tx_reset(a);
+    cmd_on_line(a, "get all", 7);
+    assert_eq(inv_count(a), 5, "the five loose items behind the un-liftable bag are still taken");
+    assert_eq(_ilist_len(aslot), 1, "...and only the bag is left on the floor");
+    assert_eq(_contains(load64(a + SS_TX_BUF), load64(a + SS_TX_LEN), "carry all of that"), 1,
+              "...and the player is told once why one thing stayed behind");
+
+    # The positive half, so this group cannot pass by refusing everything.
+    _drain_ilist(a + SS_INV); store64(a + SS_INV, 0);
+    _drain_ilist(aslot); store64(aslot, 0);
+    var fits = item_new(ot_at(2));
+    var fc = 0;
+    while (fc < 5) { ilist_push(fits + OI_CONTENTS, item_new(ot_at(0))); fc = fc + 1; }
+    ilist_push(aslot, fits);
+    _tx_reset(a);
+    cmd_on_line(a, "get all", 7);
+    assert_eq(inv_count(a), 6, "a bag that DOES fit is taken whole — itself and its five contents");
+    assert_eq(_ilist_len(aslot), 0, "...and the floor is cleared");
+    assert_eq(_contains(load64(a + SS_TX_BUF), load64(a + SS_TX_LEN), "carry all of that"), 0,
+              "...with no refusal message when nothing was refused");
+
+    # The OTHER branch of the refusal message, so the honest-message logic is
+    # covered in both directions rather than only the one that changed.
+    _drain_ilist(a + SS_INV); store64(a + SS_INV, 0);
+    _drain_ilist(aslot); store64(aslot, 0);
+    var atcap = 0;
+    while (atcap < MAX_INV) { ilist_push(a + SS_INV, item_new(ot_at(0))); atcap = atcap + 1; }
+    ilist_push(aslot, item_new(ot_at(0)));
+    assert_eq(inv_count(a), MAX_INV, "this session is exactly at the cap");
+    _tx_reset(a);
+    cmd_on_line(a, "get all", 7);
+    assert_eq(inv_count(a), MAX_INV, "...so one more bare item is refused");
+    assert_eq(_contains(load64(a + SS_TX_BUF), load64(a + SS_TX_LEN), "hands and pockets are full"), 1,
+              "...and NOW 'your hands and pockets are full' is the true statement");
+
+    _drain_ilist(a + SS_INV); store64(a + SS_INV, 0);
+    _drain_ilist(aslot); store64(aslot, apre);
+    session_free(a);
+
+    # --- The 1.7.2 exemption survives. Counting contents is exactly what made the
+    # cap over-apply last time: moving an item out of a bag you already hold
+    # changes no total, and a player at the cap who cannot reach their own
+    # belongings is a worse bug than the one being fixed here.
+    var own = _freeable_sess();
+    store64(own + SS_ROOM, 0);
+    store64(own + SS_PHASE, PHASE_CMD);
+    store64(own + SS_FD, 0 - 1);
+    store64(own + SS_AUTHED, 1);
+    store64(own + SS_INV, 0);
+    var mybag = item_new(ot_at(2));
+    ilist_push(own + SS_INV, mybag);
+    var m = 0;
+    while (m < MAX_INV - 1) { ilist_push(mybag + OI_CONTENTS, item_new(ot_at(0))); m = m + 1; }
+    assert_eq(inv_count(own), MAX_INV, "this session is AT the cap, all of it inside its own bag");
+    var before_own = inv_count(own);
+    _tx_reset(own);
+    get_from(own, mybag + OI_CONTENTS, own + SS_INV, 0, "scrip", 5, 1, "in there");
+    assert_eq(inv_count(own), before_own,
+              "taking from your OWN bag at the cap is still allowed — it moves nothing net");
+    assert_eq(_ilist_len(own + SS_INV), 2, "...and the item really did move to the top level");
+
+    _drain_ilist(own + SS_INV); store64(own + SS_INV, 0);
+    _drain_ilist(s + SS_INV);   store64(s + SS_INV, 0);
+    _drain_ilist(g + SS_INV);   store64(g + SS_INV, 0);
+    _drain_ilist(slot);         store64(slot, pre);
+    session_free(own); session_free(s); session_free(g);
+    return 0;
+}
+
+# === 1.7.7 — the four listings 1.7.6 did not reach. ===
+#
+# 1.7.6 removed this defect from `look` and wired `room_line_fits` /
+# `room_append_more` into `session_show_room`'s three sections AND NOWHERE ELSE.
+# Four sibling loops kept the original shape: one coloured line per element into
+# the 4 kB queue with no fit check, cut at whatever byte it ran out on, colour
+# never closed, and NO PROMPT after it — the session simply looks hung.
+#
+# MEASURED on this tree, driving the old loops inlined against the real buffer:
+#
+#   | listing | last size that worked | first size that lost the prompt |
+#   |---|---|---|
+#   | `inventory`, longest authored name (30 B) | 94 items, 4063 B | **95 items, 4096 B** |
+#   | `who`, 16-char names + Hub room titles    | 78 players, 4062 B | **79 players, 4096 B** |
+#
+# 95 is UNDER the game's own MAX_INV of 100 — this is a limit the server hands
+# the player, not one they have to work to reach. At 90 sessions the `who` cut
+# landed on byte 0x80, a UTF-8 continuation byte: the em-dash separator sliced in
+# half mid-character.
+#
+# The rule these groups exist to hold: **rationing the ECHO must never ration the
+# EFFECT.** `drop all` and `get all` are commands, not reports — a player who
+# types `drop all` must end up carrying nothing however much of the receipt fits.
+fn test_listing_bounds(): i64 {
+    test_group("listing-bounds");
+
+    if (g_obj_tpl_count == 0) { assert(0, "listing-bounds: needs object templates"); return 0; }
+    if (world_room_count() == 0) { assert(0, "listing-bounds: needs a zone"); return 0; }
+
+    # --- The generalised tail. 1.7.6's helper hard-coded " here.", which is a
+    # false statement in `who` — a listing whose whole subject is players who are
+    # somewhere else.
+    var w = _freeable_sess();
+    _tx_reset(w);
+    assert_eq(list_append_more(w, 0, "items", " carried.\r\n"), 0, "nothing omitted emits nothing");
+    assert_eq(load64(w + SS_TX_LEN), 0, "...and writes no bytes at all");
+    list_append_more(w, 7, "items", " carried.\r\n");
+    assert_eq(_contains(load64(w + SS_TX_BUF), load64(w + SS_TX_LEN), "...and 7 more items carried."), 1,
+              "the tail names the count and the subject, and does not claim they are 'here'");
+    _tx_reset(w);
+    room_append_more(w, 3, "items lie");
+    assert_eq(_contains(load64(w + SS_TX_BUF), load64(w + SS_TX_LEN), "...and 3 more items lie here."), 1,
+              "the room spelling is unchanged — 1.7.6's three sections keep their wording");
+
+    # Longest authored object name: the size at which the measurements above hold.
+    var big = 0; var bl = 0; var t = 0;
+    while (t < g_obj_tpl_count) {
+        if (load64(ot_at(t) + OT_NAME_LEN) > bl) { bl = load64(ot_at(t) + OT_NAME_LEN); big = t; }
+        t = t + 1;
+    }
+    assert_eq(bl, 30, "the Hub's longest object name is 30 bytes — the figure the table above uses");
+
+    # --- INVENTORY. 95 items is the measured break, and it is under MAX_INV.
+    var s = _freeable_sess();
+    store64(s + SS_ROOM, 0);
+    store64(s + SS_PHASE, PHASE_CMD);
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_AUTHED, 1);
+    store64(s + SS_INV, 0);
+    var i = 0;
+    while (i < MAX_INV) { ilist_push(s + SS_INV, item_new(ot_at(big))); i = i + 1; }
+    assert(MAX_INV > 94, "the carry cap really does let a player reach the measured break point");
+    _tx_reset(s);
+    cmd_on_line(s, "inv", 3);
+    var tx = load64(s + SS_TX_BUF);
+    var n = load64(s + SS_TX_LEN);
+    assert(n <= TX_CAP, "the reply stays inside the buffer");
+    assert_eq(_contains(tx, n, "> "), 1,
+              "THE PROMPT REACHES THE CLIENT — the failure this group exists for");
+    assert(n < TX_CAP, "...and the buffer is not run dry, so the prompt was not merely lucky");
+    assert_eq(_contains(tx, n, "more items carried."), 1,
+              "...and the listing says how much of the inventory it did not show");
+    var tail1 = load8(tx + n - 1) & 0xFF;
+    var tail2 = load8(tx + n - 2) & 0xFF;
+    assert(tail1 != 27, "the stream does not end ON an ESC");
+    assert(tail2 != 27, "...nor one byte into an escape sequence");
+
+    # A normal inventory is untouched: no notice, no truncation.
+    _drain_ilist(s + SS_INV); store64(s + SS_INV, 0);
+    i = 0;
+    while (i < 5) { ilist_push(s + SS_INV, item_new(ot_at(big))); i = i + 1; }
+    _tx_reset(s);
+    cmd_on_line(s, "inv", 3);
+    tx = load64(s + SS_TX_BUF); n = load64(s + SS_TX_LEN);
+    assert_eq(_contains(tx, n, "more items carried."), 0, "an ordinary inventory gets no truncation notice");
+    assert_eq(_contains(tx, n, "> "), 1, "...and still gets its prompt");
+
+    # --- drop all / get all: THE EFFECT IS COMPLETE WHILE THE ECHO IS RATIONED.
+    # This is the assertion that distinguishes a correct fix from a lazy one — a
+    # fit check placed around the whole loop body would pass every prompt
+    # assertion above and silently leave items in the player's hands.
+    var slot = room_at(0) + RM_OBJ_HEAD;
+    var pre = load64(slot);
+    store64(slot, 0);
+    _drain_ilist(s + SS_INV); store64(s + SS_INV, 0);
+    var d = 0;
+    while (d < 150) { ilist_push(s + SS_INV, item_new(ot_at(big))); d = d + 1; }
+    assert_eq(inv_count(s), 150, "carrying far more than one reply can describe");
+    _tx_reset(s);
+    cmd_on_line(s, "drop all", 8);
+    tx = load64(s + SS_TX_BUF); n = load64(s + SS_TX_LEN);
+    assert_eq(inv_count(s), 0, "`drop all` DROPS ALL — the effect is not rationed with the echo");
+    assert_eq(_ilist_len(slot), 150, "...every one of them reached the floor");
+    assert_eq(_contains(tx, n, "> "), 1, "...the prompt still arrives");
+    assert_eq(_contains(tx, n, "more items dropped."), 1, "...and the receipt says what it did not list");
+
+    # And back again — `get all` fills to exactly the cap and no further.
+    _tx_reset(s);
+    cmd_on_line(s, "get all", 7);
+    tx = load64(s + SS_TX_BUF); n = load64(s + SS_TX_LEN);
+    assert_eq(inv_count(s), MAX_INV, "`get all` stops at the cap, not one item past it");
+    assert_eq(_ilist_len(slot), 50, "...and leaves the remainder on the floor");
+    assert_eq(_contains(tx, n, "> "), 1, "...the prompt still arrives");
+    assert_eq(_contains(tx, n, "more items taken."), 1, "...and the receipt is honest about the rest");
+
+    _drain_ilist(s + SS_INV); store64(s + SS_INV, 0);
+    _drain_ilist(slot); store64(slot, pre);
+
+    # --- WHO. Measured break at 79 players; MAX_SESSIONS allows far more.
+    var saved_head = g_session_head;
+    g_session_head = 0;
+    var chain = 0;
+    var j = 0;
+    while (j < 100) {
+        var p = _freeable_sess();
+        store64(p + SS_PHASE, PHASE_CMD);
+        store64(p + SS_ROOM, j % world_room_count());
+        memcpy(load64(p + SS_NAME_BUF), "Wanderer00000000", 16);
+        store64(p + SS_NAME_LEN, 16);
+        store64(p + SS_NEXT, chain);
+        chain = p;
+        j = j + 1;
+    }
+    g_session_head = chain;
+    assert(100 > 78, "the fixture population is past the measured break point");
+
+    _tx_reset(w);
+    cmd_who(w);
+    session_appendtx_cstr(w, "> ");                 # the prompt the dispatcher owes
+    var wtx = load64(w + SS_TX_BUF);
+    var wn = load64(w + SS_TX_LEN);
+    assert(wn < TX_CAP, "`who` at 100 players leaves the buffer with room to spare");
+    assert_eq(_contains(wtx, wn, "> "), 1, "...so the prompt reaches the client");
+    assert_eq(_contains(wtx, wn, "more online not shown."), 1, "...and it says how many it omitted");
+    assert_eq(_contains(wtx, wn, "(100 online)"), 1,
+              "...while the COUNT still answers for everyone, listed or not");
+
+    # The admin twin, dormant behind YD_ADMIN and fixed in the same pass —
+    # leaving the sleeping half of a defect in place is how three of the four
+    # findings that reopened the 1.x gate came to exist.
+    _tx_reset(w);
+    render_who(w);
+    session_appendtx_cstr(w, "> ");
+    wtx = load64(w + SS_TX_BUF); wn = load64(w + SS_TX_LEN);
+    assert(wn < TX_CAP, "@who is bounded too");
+    assert_eq(_contains(wtx, wn, "> "), 1, "...and keeps its prompt");
+    assert_eq(_contains(wtx, wn, "more in-world not shown."), 1, "...and reports what it omitted");
+    assert_eq(_contains(wtx, wn, "in-world: 100"), 1, "...while its total still counts everyone");
+
+    # A small population is listed in full, with no notice.
+    var few = chain;
+    var kept = 0;
+    while (kept < 4) { few = load64(few + SS_NEXT); kept = kept + 1; }
+    store64(few + SS_NEXT, 0);
+    _tx_reset(w);
+    cmd_who(w);
+    wtx = load64(w + SS_TX_BUF); wn = load64(w + SS_TX_LEN);
+    assert_eq(_contains(wtx, wn, "more online not shown."), 0, "five players get no truncation notice");
+    assert_eq(_contains(wtx, wn, "(5 online)"), 1, "...and all five are counted");
+
+    g_session_head = saved_head;
+    session_free(s);
+    session_free(w);
+    return 0;
+}
+
 var exit_code = main();
 syscall(60, exit_code);
+
