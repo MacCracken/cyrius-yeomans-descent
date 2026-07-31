@@ -3,13 +3,45 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.13 — AG closed; **only AH/AI (low) remain**, then gate re-run #3)
+> **Last refresh**: 2026-07-31 (v1.7.14 — **every gate re-run #2 finding is closed (AC-AI)**; next is gate re-run #3)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.14** — 2026-07-31. **1310 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build; **9/9 mutations killed**.
+
+**Hygiene — and with it, every finding from gate re-run #2 is closed (AC-AI).**
+
+**Key material outlived the operation that made it.** `ident_derive` left the
+plaintext passphrase and the Ed25519 seed in `alloc`ed scratch that is never
+freed, and each derive overwrote only a PREFIX — so the tail of the longest
+passphrase ever seen persisted for the life of the process. `login_on_confirm`
+separately left a full 64-byte secret key in scratch every session shares. The
+rule was already in force at `sess_cand_clear` and `session_free`; these were the
+third and fourth holders and nobody had looked.
+
+**`sweep_idle` charged unauthenticated reaps against a signature budget** whose
+entire derivation is "every reap is a signature" — untrue for exactly the pre-auth
+reaps `PREAUTH_TIMEOUT_MS` exists to serve, so a slowloris burst could exhaust the
+budget and delay their own eviction. **It does not close slot exhaustion**: a peer
+sending one byte every 29 s holds a slot regardless.
+
+**Lessons carried, added this release:**
+
+- *A test can pin the right constant with the wrong population.* The idle-reap
+  assertion had always used unauthenticated fixtures — the sessions the cap was
+  never about — so it measured `IDLE_REAP_MAX` against work that costs nothing. It
+  failed when the behaviour was corrected, which was the test being right about
+  the wrong thing.
+- *Three releases running have needed a source-level guard.* 1.7.11 (a call site
+  the suite cannot reach), 1.7.12 (a guard needed at N sites, where presence is
+  not enough), and now an ORDERING that no test can observe because the freelist
+  returns blocks unzeroed. That is a finding about the suite's reach, not just
+  three separate workarounds.
 
 **1.7.13** — 2026-07-31. **1295 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build; **7/7 mutations killed**.
@@ -780,7 +812,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (1295 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (1310 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -823,7 +855,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **1295** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **1310** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -1023,9 +1055,12 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
-**Next: 1.7.14** — hygiene, the last two items from gate re-run #2 (roadmap **AH**
-key material in never-wiped globals, three `memset`s; **AI** the idle-reap budget,
-one `if`). Then gate re-run #3 — which must be allowed to **run the suite and
+**Next: gate re-run #3.** Every finding from re-run #2 is closed (AC-AI), and the
+only carried items are **AA** (16 B/connection at accept, needs a `lib/net.cyr`
+decision) and **AB** (the stateless-refusal amplifier) — neither blocking. Two
+process requirements the last run earned: **tag the commit first** (the tree moved
+under re-run #2), and **let it run the suite and the benches** — AF survived only
+because a bench fixture could not reach the code path it measures — which must be allowed to **run the suite and
 the benches**, because AF survived only because a bench fixture could not reach
 the code path it measures.
 
@@ -1065,7 +1100,7 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is 1.7.14** (roadmap items AH and AI), not a milestone: see
+**Your next work is gate re-run #3**, not a milestone: see
 [`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
 is batched into. 2.0.0 (starting with M14) is gated behind a clean gate re-run. Joshua is post-1.0 backlog, not next.
 

@@ -946,10 +946,26 @@ fn sweep_idle(epfd, now_ms): i64 {
         if (budget == 0) { return reaped; }
         var nxt = load64(s + SS_NEXT);
         if (session_is_idle(s, now_ms, g_idle_timeout_ms) == 1) {
+            # 1.7.14 (AI) — spend the budget only on reaps that actually COST one.
+            #
+            # `IDLE_REAP_MAX`'s whole derivation above is "every reap is a
+            # signature", and that has never been true for the unauthenticated
+            # ones — the very reaps `PREAUTH_TIMEOUT_MS` (1.6.13) was added to
+            # serve. `drop_session` saves only what `session_persistable` admits,
+            # so an unauthed reap is a `close` and an unlink from a list: no
+            # `player_save`, no `ed25519_sign`, none of the 1.30 ms this cap exists
+            # to ration. Charging it one anyway meant a burst of slowloris
+            # connections could exhaust the tick's reap budget and DELAY the
+            # eviction of the very sessions the timeout is for.
+            #
+            # Sampled BEFORE the teardown, because `drop_session` frees the
+            # session and the predicate would then be reading freed memory — the
+            # H1 / M12-C shape this tree has a standing lesson about.
+            var costly = session_persistable(s);
             session_appendtx_cstr(s, "\r\nIdle timeout — disconnecting.\r\n");
             session_drain(s);
             drop_session(epfd, s);
-            budget = budget - 1;
+            if (costly == 1) { budget = budget - 1; }
             reaped = reaped + 1;
         }
         s = nxt;

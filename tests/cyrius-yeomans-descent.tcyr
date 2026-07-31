@@ -2805,7 +2805,26 @@ fn test_hex_identity(): i64 {
     var n = IDLE_REAP_MAX + 3;
     var j = 0;
     while (j < n) {
+        # 1.7.14 (AI) — these must be PERSISTABLE to cost a signature at all. This
+        # fixture used to be bare `_freeable_sess()` sessions, i.e. SS_AUTHED = 0,
+        # which since 1.7.14 cost nothing and are therefore not rationed. The old
+        # assertion passed while measuring the wrong population — it was pinning
+        # the cap with sessions the cap was never meant to be about.
         var idl = _freeable_sess();
+        var isalt = alloc(SALT_LEN);
+        var iq = 0;
+        while (iq < SALT_LEN) { store8(isalt + iq, 61 + j + iq); iq = iq + 1; }
+        var iblk = sess_ident(idl);
+        memcpy(iblk, isalt, SALT_LEN);
+        ident_derive(isalt, "reappassphrase", 14, iblk + IDENT_SK, iblk + IDENT_PK);
+        store64(iblk + IDENT_CREATED, 1000000);
+        memcpy(load64(idl + SS_NAME_BUF), "Reaper", 6);
+        store8(load64(idl + SS_NAME_BUF) + 6, 65 + j);
+        store64(idl + SS_NAME_LEN, 7);
+        store64(idl + SS_ROOM, 0 - 1);
+        store64(idl + SS_HP, 5); store64(idl + SS_MAXHP, 5);
+        store64(idl + SS_CLASS, 0);
+        store64(idl + SS_AUTHED, 1);           # ...so drop_session really signs
         store64(idl + SS_LAST_MS, 0);          # long past the idle deadline
         store64(idl + SS_NEXT, g_session_head);
         g_session_head = idl;
@@ -2813,7 +2832,7 @@ fn test_hex_identity(): i64 {
     }
     assert_eq(_sess_list_len(), n, "all of them are on the list");
     assert_eq(sweep_idle(0, g_idle_timeout_ms + 1000000), IDLE_REAP_MAX,
-              "one tick reaps at most IDLE_REAP_MAX sessions");
+              "one tick reaps at most IDLE_REAP_MAX sessions that COST a signature");
     assert_eq(_sess_list_len(), n - IDLE_REAP_MAX, "and the rest are still connected");
     # Not a stall — successive ticks drain the backlog.
     var guard = 0;
@@ -2823,6 +2842,41 @@ fn test_hex_identity(): i64 {
         if (guard > 100) { g_session_head = 0; }
     }
     assert(guard <= 100, "successive ticks reap the whole backlog");
+    var ju = 0;
+    while (ju < n) { _player_unlink("Reaper", 7); ju = ju + 1; }
+
+    # --- AI (1.7.14): an UNAUTHENTICATED reap costs no signature, so it must not
+    # spend the signature budget. `IDLE_REAP_MAX`'s whole derivation is "every
+    # reap is a signature", and that was never true for the pre-auth reaps
+    # PREAUTH_TIMEOUT_MS exists to serve — so charging them meant a burst of
+    # slowloris connections could exhaust the tick's budget and DELAY eviction of
+    # exactly the sessions the timeout is for.
+    g_session_head = 0;
+    var u = 0;
+    while (u < IDLE_REAP_MAX * 3) {
+        var un = _freeable_sess();             # SS_AUTHED = 0 — nothing to save
+        store64(un + SS_LAST_MS, 0);
+        store64(un + SS_NEXT, g_session_head);
+        g_session_head = un;
+        u = u + 1;
+    }
+    assert_eq(sweep_idle(0, g_idle_timeout_ms + 1000000), IDLE_REAP_MAX * 3,
+              "unauthenticated idle sessions are ALL reaped in one tick, uncapped");
+    assert_eq(_sess_list_len(), 0, "...leaving none of them holding a slot");
+
+    # The predicate must be sampled BEFORE the teardown: `drop_session` calls
+    # `session_free`, so reading `SS_AUTHED` afterwards is a use-after-free — the
+    # H1 / M12-C shape this tree has a standing lesson about. No test can SEE it,
+    # because the freelist hands blocks back without zeroing and the stale bytes
+    # read the same; the mutation that moves the sample after the drop passes
+    # every behavioural assertion above. So the ORDER is pinned from the source,
+    # as 1.7.11 and 1.7.12 pin their call sites.
+    var costly_at = _src_offset_of("src/server.cyr", "var costly = session_persistable(s);");
+    var reap_drop_at = _src_offset_of("src/server.cyr", "drop_session(epfd, s);");
+    assert(costly_at > 0, "sweep_idle samples the cost predicate");
+    assert(reap_drop_at > 0, "...and tears the session down");
+    assert(costly_at < reap_drop_at,
+           "...in that ORDER — reading it after session_free is a use-after-free");
     g_session_head = rh;
 
     # --- F5: secret-key material is WIPED before it goes back to the freelist.
@@ -6239,6 +6293,7 @@ fn main() {
     test_tick_and_menu_bounds();
     test_shutdown_and_class_guard();
     test_queue_per_read();
+    test_key_scratch_wiped();
 
 
     return assert_summary();
@@ -7735,6 +7790,102 @@ fn test_queue_per_read(): i64 {
 
     _drain_ilist(slot); store64(slot, pre);
     session_free(s);
+    return 0;
+}
+
+# Count non-zero bytes in [p, p+n) — the shape every key-wipe assertion in this
+# suite uses, because "the block is clear" is the only observable that matters.
+fn _nonzero_in(p, n): i64 {
+    var c = 0;
+    var i = 0;
+    while (i < n) {
+        if ((load8(p + i) & 0xFF) != 0) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+# === 1.7.14 (AH) — key material must not outlive the operation that made it. ===
+#
+# `ident_derive` copied the player's PLAINTEXT PASSPHRASE to `g_ident_scratch + 16`
+# and the Ed25519 SEED — the private key in its most compact form — to `+200`, and
+# wiped neither. That block is `alloc`ed, and the bump allocator has no free, so
+# both sat in the process image for its whole life. Worse than "the last one
+# stays": each derive overwrites only a PREFIX, so the tail of the longest
+# passphrase ever seen persisted indefinitely.
+#
+# `login_on_confirm` separately left a full 64-byte secret key at
+# `g_persist_dec + 160`, in scratch every session shares.
+#
+# There is no wire-reachable disclosure primitive in this tree today — which is
+# why the gate graded this low — but that is a statement about this month's code,
+# and a core dump, a debugger, or a future OOB read is not bound by it. The rule
+# was already applied at `sess_cand_clear` (1.7.3) and `session_free`; these were
+# simply the third and fourth holders of key material and nobody had looked.
+fn test_key_scratch_wiped(): i64 {
+    test_group("key-scratch-wipe");
+    persist_init();
+
+    var salt = alloc(SALT_LEN);
+    var i = 0;
+    while (i < SALT_LEN) { store8(salt + i, 90 + i); i = i + 1; }
+    var sk = alloc(64);
+    var pk = alloc(32);
+
+    # A long, distinctive passphrase, so a surviving copy is unmistakable.
+    ident_derive(salt, "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", 32, sk, pk);
+
+    assert_eq(_nonzero_in(g_ident_scratch, 256), 0,
+              "THE ASSERTION THIS GROUP EXISTS FOR: ident_derive leaves NO trace in its scratch");
+    # The two regions named individually, so a partial wipe cannot pass by
+    # clearing whichever one a future edit happens to remember.
+    assert_eq(_nonzero_in(g_ident_scratch + SALT_LEN, 64), 0,
+              "...not the passphrase copy at [16, 80)");
+    assert_eq(_nonzero_in(g_ident_scratch + 200, 32), 0,
+              "...and not the Ed25519 seed at [200, 232)");
+
+    # ...while the caller's outputs are of course untouched — a wipe that also
+    # cleared the keypair would pass every assertion above and break every login.
+    assert(_nonzero_in(sk, 64) > 0, "the derived secret key still reaches the caller");
+    assert(_nonzero_in(pk, 32) > 0, "...and so does the public key");
+
+    # The derive is still CORRECT after the wipe: same salt + passphrase must give
+    # the same keypair, or the wipe has clobbered something it needed.
+    var sk2 = alloc(64);
+    var pk2 = alloc(32);
+    ident_derive(salt, "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", 32, sk2, pk2);
+    assert_eq(_bytes_eq(pk, pk2, 32), 1, "the derivation is unchanged — same input, same key");
+    assert_eq(_bytes_eq(sk, sk2, 64), 1, "...secret key included");
+
+    # --- The confirm keypair in the SHARED decode scratch. Driven through the
+    # real creation path, and through the MISMATCH branch specifically: that is
+    # the early return an attacker can drive repeatedly, and the branch a wipe
+    # placed after the comparison would miss.
+    _player_unlink("Wipey", 5);
+    var s = _mk_sess("Wipey", 5);
+    store64(s + SS_LINE_BUF, fl_alloc(LINE_CAP));
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_PHASE, PHASE_CONFIRMPASS);
+    var blk = sess_ident(s);
+    var wsalt = alloc(SALT_LEN);
+    var w = 0;
+    while (w < SALT_LEN) { store8(wsalt + w, 17 + w); w = w + 1; }
+    memcpy(blk, wsalt, SALT_LEN);
+    ident_derive(wsalt, "wipeypassphrase", 15, blk + IDENT_SK, blk + IDENT_PK);
+    _tx_reset(s);
+    login_on_confirm(s, "totallywrongphrase", 18);          # the MISMATCH path
+    assert_eq(_nonzero_in(g_persist_dec + 128, 96), 0,
+              "a WRONG confirm leaves no derived keypair in the shared decode scratch");
+
+    # And the matching path, which commits and must also leave nothing behind.
+    store64(s + SS_PHASE, PHASE_CONFIRMPASS);
+    _tx_reset(s);
+    login_on_confirm(s, "wipeypassphrase", 15);
+    assert_eq(_nonzero_in(g_persist_dec + 128, 96), 0,
+              "...and neither does a CORRECT one");
+    assert_eq(load64(s + SS_PHASE), PHASE_CLASS,
+              "...while the correct confirm still gets the player to class selection");
+    _player_unlink("Wipey", 5);
     return 0;
 }
 

@@ -1277,6 +1277,24 @@ fn ident_derive(salt, pass, passlen, sk_out, pk_out): i64 {
     sha256(msg, SALT_LEN + n, seed);
     g_charge_derives = g_charge_derives + 1;   # 1.7.0 — counted, not predicted
     ed25519_keypair(seed, sk_out, pk_out);
+    # 1.7.14 (AH) — WIPE THE SCRATCH. Until now this function left the player's
+    # plaintext passphrase at [16, 16+n) and the Ed25519 SEED — which is the
+    # private key in its most compact form — at [200, 232), and neither was ever
+    # cleared. `g_ident_scratch` is `alloc`ed, and the bump allocator has no free,
+    # so both sat in the process image for its whole life; every subsequent derive
+    # merely overwrote a PREFIX, so the tail of the longest passphrase yet seen
+    # persisted indefinitely.
+    #
+    # There is no wire-reachable disclosure primitive in this tree today — which is
+    # why the gate graded it low — but "no primitive today" is a statement about
+    # this month's code, and a core dump, a debugger, or a future OOB read is not.
+    # The rule is already applied at `sess_cand_clear` and `session_free`; this is
+    # the third holder of key material and it was simply missed.
+    #
+    # The WHOLE block, not the two live regions: it costs a 256-byte memset against
+    # a ~1 ms derive, and it cannot be wrong about an offset the way a pair of
+    # targeted wipes can.
+    memset(g_ident_scratch, 0, 256);
     return 0;
 }
 
@@ -2370,7 +2388,19 @@ fn login_on_confirm(s, buf, len): i64 {
     var pk2 = g_persist_dec + 128;
     var sk2 = g_persist_dec + 160;
     ident_derive(blk, buf, len, sk2, pk2);
-    if (_bytes_eq(pk2, blk + IDENT_PK, PK_LEN) == 0) {
+    var confirm_ok = _bytes_eq(pk2, blk + IDENT_PK, PK_LEN);
+    # 1.7.14 (AH) — wipe the derived confirm keypair before branching, so BOTH the
+    # match and mismatch paths leave it clear. `g_persist_dec` is bump memory that
+    # is never freed and is SHARED by every session's decode work, so a full
+    # 64-byte secret key left at +160 outlives the session that made it and is
+    # visible to whatever reads that scratch next.
+    #
+    # Before the branch on purpose: an early `return _confirm_mismatch(s)` is
+    # exactly the path a wrong confirm takes, and it is the one an attacker can
+    # drive repeatedly. chpass's twin needs no equivalent — it derives into the
+    # per-session candidate block, which `sess_cand_clear` has wiped since 1.7.3.
+    memset(g_persist_dec + 128, 0, 96);
+    if (confirm_ok == 0) {
         return _confirm_mismatch(s);
     }
     # E4 (1.6.10) — the same character must not be created twice concurrently.

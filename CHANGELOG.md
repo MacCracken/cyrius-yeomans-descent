@@ -42,6 +42,73 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 allowed to run the suite and the benches.**
 
 
+## [1.7.14] — 2026-07-31
+
+**Hygiene — the last two items from gate re-run #2.** 1310 assertions (was 1295);
+`cyrius audit` exits 0; 6/6 benches; both targets build; **9/9 mutations killed**.
+Both were graded low, and both are the kind of thing that only ever gets fixed in
+a release that has nothing more urgent in it.
+
+**Every finding from gate re-run #2 is now closed** (AC–AI).
+
+### Fixed
+
+- **Key material outlived the operation that made it (AH).** `ident_derive`
+  copied the player's **plaintext passphrase** to `g_ident_scratch + 16` and the
+  **Ed25519 seed** — the private key in its most compact form — to `+200`, and
+  wiped neither. That block is `alloc`ed and the bump allocator has no free, so
+  both sat in the process image for its whole life. Worse than "the last one
+  stays": each derive overwrites only a **prefix**, so the tail of the longest
+  passphrase ever seen persisted indefinitely.
+
+  `login_on_confirm` separately left a full 64-byte secret key at
+  `g_persist_dec + 160`, in scratch that every session shares. Its wipe is placed
+  **before** the match/mismatch branch on purpose — the mismatch path is the early
+  return an attacker can drive repeatedly. `chpass` needed no equivalent: it
+  derives into the per-session candidate block, which `sess_cand_clear` has wiped
+  since 1.7.3.
+
+  There is no wire-reachable disclosure primitive in this tree today, which is why
+  the gate graded it low — but that is a statement about this month's code, and a
+  core dump, a debugger or a future OOB read is not bound by it. The rule was
+  already in force at `sess_cand_clear` and `session_free`; these were simply the
+  third and fourth holders of key material and nobody had looked.
+
+- **`sweep_idle` charged unauthenticated reaps against a signature budget (AI).**
+  `IDLE_REAP_MAX`'s entire derivation is *"every reap is a signature"*, and that
+  was never true for the pre-auth reaps `PREAUTH_TIMEOUT_MS` (1.6.13) exists to
+  serve. `drop_session` saves only what `session_persistable` admits, so an
+  unauthed reap is a `close` and a list unlink — none of the 1.30 ms this cap
+  exists to ration. Charging it one anyway meant **a burst of slowloris
+  connections could exhaust the tick's reap budget and delay eviction of exactly
+  the sessions the timeout is for.**
+
+  The predicate is sampled **before** the teardown, because `drop_session` calls
+  `session_free` and reading `SS_AUTHED` afterwards is a use-after-free — the
+  H1 / M12-C shape.
+
+### Notes
+
+- **Honest scope on AI:** this does not close slot exhaustion. A peer sending one
+  byte every 29 seconds keeps a session non-idle and holds its slot regardless of
+  how the reap budget is spent. What this fixes is the reap budget being consumed
+  by work that costs nothing.
+
+- **A test that pinned the cap with the wrong population.** The existing
+  idle-reap assertion built its fixtures with bare `_freeable_sess()` — i.e.
+  `SS_AUTHED = 0` — so after AI they cost nothing and are no longer rationed, and
+  the assertion failed. It was not wrong to fail: it had been pinning
+  `IDLE_REAP_MAX` with exactly the sessions the cap was never about. It now
+  asserts both halves — the cap holds for reaps that cost a signature, and
+  unauthenticated ones are reaped uncapped.
+
+- **A third guard that only the source can hold.** Sampling `session_persistable`
+  after the teardown is a use-after-free that **no test can see**: the freelist
+  hands blocks back without zeroing, so the stale bytes read the same and the
+  mutation passes every behavioural assertion. The ORDER is pinned from the
+  source, as 1.7.11 and 1.7.12 pin their call sites. Three releases running have
+  needed that technique, which is itself worth noticing.
+
 ## [1.7.13] — 2026-07-31
 
 **The reserve is per-command; the queue is per-read.** 1295 assertions (was

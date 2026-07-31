@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.13 — AG closed; **only AH/AI (low) remain**, then gate re-run #3)
+> **Last Updated**: 2026-07-31 (v1.7.14 — **every gate re-run #2 finding is closed (AC-AI)**; next is gate re-run #3)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -36,8 +36,8 @@ ownership and fix size.
 | — | ~~1.7.11~~ | ~~2~~ | ✅ **Shipped.** **AC** shutdown now saves every live session (verified against a running server) · **AD** closed at all three points — the disconnect gate, the login heal for records already on disk, and a fatal boot on an empty class table | — |
 | — | ~~1.7.12~~ | ~~2~~ | ✅ **Shipped.** **AE** the refused duplicate now disowns the record · **AF** both batch loops charge the teardown — and `bench_tick_budget` gained the arm that could not fire, which now FAILS at 118% of the drift allowance when reverted | — |
 | — | ~~1.7.13~~ | ~~1~~ | ✅ **Shipped.** **AG** both altitudes — `examine`'s borrowed bodies now share one clamp with the room header, and the header/exits decline whole so accumulation across a read cannot run the queue dry | — |
-| 4 | [**1.7.14**](#1714--hygiene) | 2 | **AH** key material in never-wiped globals · **AI** the idle-reap budget | — |
-| 5 | [**gate re-run #3**](#the-gate--what-closes-the-1x-line) | — | And it must be allowed to **run the suite and the benches** — AF survived only because a bench fixture could not reach the code path | **yes** |
+| — | ~~1.7.14~~ | ~~2~~ | ✅ **Shipped.** **AH** `ident_derive` and the confirm path now wipe their key scratch · **AI** the reap budget is spent only on reaps that cost a signature | — |
+| 1 | [**gate re-run #3**](#the-gate--what-closes-the-1x-line) | — | **Next, and everything else is closed.** It must run against a **tagged commit** and be allowed to **run the suite and the benches** — AF survived only because a bench fixture could not reach the code path | **yes** |
 | 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
@@ -239,9 +239,31 @@ borrows, so a loader cap saves no memory and only adds a second place to be wron
 - **Fix size.** Clamp both `examine` arms, cap `MT_DESC`/`OT_DESC` at the loader,
   and either flush between lines or re-arm the reserve per dispatch.
 
-### 1.7.14 — hygiene
+### ✅ 1.7.14 — hygiene (SHIPPED)
 
-**AH. Key material sits in never-wiped globals.** *(low)* — `ident_derive`
+Items AH and AI are **closed**, and with them **every finding from gate re-run #2
+(AC-AI)**. 1310 assertions (was 1295), 9/9 mutations killed.
+
+**AH was worse than "the last one stays":** each `ident_derive` overwrote only a
+PREFIX of its scratch, so the tail of the longest passphrase ever seen persisted
+for the life of the process. The confirm-path wipe sits BEFORE the match/mismatch
+branch, because the mismatch return is the path an attacker drives repeatedly.
+
+**AI does NOT close slot exhaustion**, and should not be recorded as if it did: a
+peer sending one byte every 29 s keeps a session non-idle and holds its slot
+whatever the reap budget does. What it fixes is the budget being spent on work
+that costs nothing — which could delay eviction of exactly the slowloris sessions
+`PREAUTH_TIMEOUT_MS` exists for.
+
+**Third release running to need a source-level guard.** Sampling the cost
+predicate after the teardown is a use-after-free that no test can see (the
+freelist returns blocks unzeroed, so the stale bytes read the same). The order is
+pinned from the source, as 1.7.11 and 1.7.12 pin their call sites. That three
+consecutive releases have needed this is itself a finding about the suite's reach.
+
+### 1.7.14 — the two items (detail, retained)
+
+**AH. Key material sits in never-wiped globals.** *(low — CLOSED in 1.7.14)* — `ident_derive`
 ([`persist.cyr:1265`](../../src/persist.cyr:1265)) leaves the passphrase at
 `g_ident_scratch + 16` and the Ed25519 seed at `+200`; `login_on_confirm` leaves a
 full 64-byte secret key at `g_persist_dec + 160`. Bump memory, never freed. No
@@ -249,7 +271,7 @@ wire-reachable disclosure primitive, so low — but the tree already applies thi
 rule at `sess_cand_clear` and `session_free`. **Three `memset`s.**
 
 **AI. `sweep_idle` charges unauthenticated reaps against a signature budget.**
-*(low)* — the decrement at [`server.cyr:894`](../../src/server.cyr:894) is
+*(low — CLOSED in 1.7.14)* — the decrement at [`server.cyr:894`](../../src/server.cyr:894) is
 unconditional while `IDLE_REAP_MAX`'s derivation says "every reap is a signature",
 which is untrue for exactly the pre-auth reaps `PREAUTH_TIMEOUT_MS` exists to
 serve. **One `if`.** Note this does *not* close slot exhaustion: a peer sending one
