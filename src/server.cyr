@@ -1709,6 +1709,34 @@ fn cmd_serve(port): i64 {
             println("world: no objects loaded (code below)");
             print_num(oc);
             println("");
+            # === 1.7.15 (AJ) — FATAL, exactly as the class table is below. ===
+            #
+            # This arm used to print the diagnostic and CARRY ON, and that is
+            # silent, irreversible, playerbase-wide data loss: `world_load_objs`
+            # unpublishes the whole table on any failure (H9/F6), so every saved
+            # inventory id then fails to resolve, `_restore_inv` drops the lot,
+            # and `drop_session` writes the emptied inventory back. Measured by
+            # gate re-run #3 against a live server: a ONE-CHARACTER edit
+            # (`kind = "obj"` -> `"objj"`) and a player who connects once and is
+            # RST-closed **while typing nothing** loses everything. Repairing the
+            # file does not bring it back — records are signed with a key derived
+            # from the player's passphrase, which the server never holds (ADR 0004).
+            #
+            # 1.7.11 made exactly this fatal for `data/classes.cyml` THIRTY-FIVE
+            # LINES BELOW, in this same function, for exactly this reason. The
+            # class table got the guard and the object table did not: the fifth
+            # consecutive sweep to find a rule applied at one site and not its
+            # sibling, and the second time it was a sibling of this line's own fix.
+            #
+            # Keyed on the RETURN CODE, not on `g_obj_tpl_count == 0` the way the
+            # class check is. A zone that authors no objects at all is legitimate
+            # and loads successfully with a count of zero; only a REJECTED file is
+            # the catastrophe. The two tests are not interchangeable here.
+            println("world: FATAL — the object table was rejected. Refusing to start:");
+            println("  every saved inventory id would fail to resolve, and the");
+            println("  next disconnect would write the emptied inventory back.");
+            println("  Fix data/zones/hub.objs.cyml and restart.");
+            return 1;
         }
         var mc = world_load_mobs(DP_MOBS);
         if (mc >= 0) {

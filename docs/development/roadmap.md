@@ -1,6 +1,6 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.14 — **every gate re-run #2 finding is closed (AC-AI)**; next is gate re-run #3)
+> **Last Updated**: 2026-07-31 (v1.7.15 — AJ/AN/AO closed; **3 high + 3 medium + 7 low remain** from gate re-run #3. Next is 1.7.16)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -37,7 +37,11 @@ ownership and fix size.
 | — | ~~1.7.12~~ | ~~2~~ | ✅ **Shipped.** **AE** the refused duplicate now disowns the record · **AF** both batch loops charge the teardown — and `bench_tick_budget` gained the arm that could not fire, which now FAILS at 118% of the drift allowance when reverted | — |
 | — | ~~1.7.13~~ | ~~1~~ | ✅ **Shipped.** **AG** both altitudes — `examine`'s borrowed bodies now share one clamp with the room header, and the header/exits decline whole so accumulation across a read cannot run the queue dry | — |
 | — | ~~1.7.14~~ | ~~2~~ | ✅ **Shipped.** **AH** `ident_derive` and the confirm path now wipe their key scratch · **AI** the reap budget is spent only on reaps that cost a signature | — |
-| 1 | [**gate re-run #3**](#the-gate--what-closes-the-1x-line) | — | **Next, and everything else is closed.** It must run against a **tagged commit** and be allowed to **run the suite and the benches** — AF survived only because a bench fixture could not reach the code path | **yes** |
+| — | ~~gate re-run #3~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **4 high**, 5 medium, 7 low. Finders could BUILD AND RUN this time; three of the four highs were demonstrated against a live server | — |
+| — | ~~1.7.15~~ | ~~3~~ | ✅ **Shipped.** **AJ** a rejected objects table is now fatal (exit 1), and a dropped id is counted, audited and reported · **AN** `class` by stable id, both forms read · **AO** a healed character keeps its room | — |
+| 2 | [**1.7.16**](#1716--reachable-by-a-peer-today) | 3 | **AK** `passwd` mid-fight = permanent immunity · **AM** unlimited duplication of unique artifacts · **AL** the account cap burns 436 phantom slots/s unauthenticated | **yes** |
+| 3 | [**1.7.17**](#1717--mechanics-and-instruments) | 10 | **AP** mobs cannot kill an unengaged player · **AQ** the fuzz gate is a no-op on half its iterations · plus the low tail (AR-AY), including **two benches that cannot fail** | **yes** |
+| 4 | [**gate re-run #4**](#the-gate--what-closes-the-1x-line) | — | Build the **offline-population conservation harness** and the **phase × tick matrix** first — see "no instrument for" above | **yes** |
 | 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
@@ -58,6 +62,178 @@ behind the headline was loose in the same way as the comment it indicted.
 **The minimum credible 2.0 is M14 + M15 + M16** — the contract, the content
 ceiling, and progression. Everything from M17 on can slip without embarrassing
 the release.
+
+---
+
+## Open issues — gate re-run #3 returned DO-NOT-CLOSE (2026-07-31)
+
+**Ruling: DO-NOT-CLOSE. Critical 0, high 4, medium 5, low 7** — 16 distinct
+defects from 19 candidates (two were each found twice); one refuted. Run against
+a **clean tree at `84c9a3a`**.
+
+**The change that made this run different: the finders could BUILD AND RUN.**
+Re-run #2 executed nothing, and said so in its own limits. This one gave every
+finder an isolated git worktree and told it to measure rather than estimate —
+whereupon three of the four highs were demonstrated **against a live server over
+TCP**, not inferred from source. The main repo was untouched; every probe stayed
+in its worktree.
+
+**The pattern, for the fifth consecutive sweep, and it is now unmistakable:**
+three of the four highs are *a rule applied at one site and not its sibling*, and
+**two of them are siblings of fixes this very release line shipped.**
+
+### ✅ 1.7.15 — the operator-edit blast radius (SHIPPED)
+
+Items AJ, AN and AO are **closed**. 1340 assertions (was 1310), 9/9 mutations
+killed. AJ was re-verified live: the one-character typo now makes the server
+**exit 1** instead of carrying on and emptying every inventory.
+
+**AJ's boot guard is keyed on the loader's RETURN CODE**, not on
+`g_obj_tpl_count == 0` the way the class guard is — a zone that authors no objects
+is legitimate and loads successfully with a count of zero, so the two tests are
+not interchangeable. Worth recording, because copying the class guard verbatim
+would have been wrong.
+
+**AN migrates lazily and reads BOTH forms.** ADR 0004 means there is no offline
+migration and cannot be, so old records load by index and are rewritten by id at
+their next save. No schema bump.
+
+**One near-miss worth keeping:** the new audit key was first added as
+`AK_LOAD_INV_DROP = 21` against `AK_NKEYS = 20`. Nothing crashes — the guard in
+`audit_keyed` catches an out-of-range key and falls through to a verbatim
+`audit_event` — but every occurrence then costs **1944 permanent bytes**, which is
+the 1.7.1 defect reintroduced one key at a time. The comment at that guard
+predicts this exact mistake, and predicting it is not the same as checking it.
+
+### 1.7.15 — the three items (detail, retained)
+
+**AJ. One typo in a zone objects file silently and irreversibly empties every
+player's inventory.** *(high — CLOSED in 1.7.15)*
+
+- **What breaks.** `world_load_objs` unpublishes the whole table on any failure,
+  and [`server.cyr:1709`](../../src/server.cyr:1709) prints a diagnostic and
+  **carries on**. With the table empty, `_restore_inv`
+  ([`persist.cyr:1760`](../../src/persist.cyr:1760)) silently drops every id that
+  will not resolve — no count, no audit line — and `drop_session` then saves the
+  emptied inventory. **Irreversible**: records are signed with a key derived from
+  the player's passphrase (ADR 0004), so no operator repair exists.
+- **Measured live.** A **one-character** edit (`kind = "obj"` → `"objj"` on one of
+  ten entries): a player who connects once and is RST-closed **typing nothing**
+  loses everything; a player who never connects keeps their items; repairing the
+  file does not bring the first player's back.
+- **This is verbatim the shape 1.7.11 made fatal for `data/classes.cyml` —
+  35 lines below, in the same function**, under a comment explaining exactly why
+  carrying on is catastrophic. The class table got the guard; the object table
+  did not. Fixing the instance and not the class, in this line's own code.
+- **Fix size.** ~10 lines: make a rejected objs file fatal as
+  [`:1746`](../../src/server.cyr:1746) already does, and/or refuse to SAVE an
+  inventory whose ids failed to resolve. Count and audit the drop either way.
+
+**AN. `class` is persisted as a positional index into `data/classes.cyml`.**
+*(medium — CLOSED in 1.7.15)* — adding or removing a class silently re-assigns every existing
+character. `room` is stored as a stable id string **four lines away**
+([`persist.cyr:1498`](../../src/persist.cyr:1498)), and ADR 0006 states the rule
+in the same sentence that lists `class`. Reproduced: prepend one entry and a
+Chaplain logs in as a Courier — `patch` answers "You don't know how to patch."
+
+**AO. The 1.7.11 classless-record heal throws away the loaded room.**
+*(medium — CLOSED in 1.7.15)* — the heal returns without
+resuming, so `login_on_class` runs `session_enter_world` and the player is
+silently moved to the start room, permanently. Reproduced: `hub.flagon` →
+`hub.gate`. **Fix: the heal must call `session_resume_world`.**
+
+### 1.7.16 — reachable by a peer today
+
+**AK. Typing `passwd` mid-fight makes you permanently immune to the mob you are
+fighting.** *(high)*
+
+- `combat_tick_all` gates the whole round on `SS_PHASE == PHASE_CMD`
+  ([`server.cyr:1383`](../../src/server.cyr:1383)); `mob_tick_all`
+  ([`mob.cyr:782`](../../src/mob.cyr:782)) has **no phase check at all**, so the
+  two disagree about what a phase means. `PHASE_CHPASS_NEW` re-prompts forever on
+  any line under `PASS_MIN` and refreshes `SS_LAST_MS` each time, so the idle
+  reaper never fires either.
+- **Measured live** at the authored 2.5 s tick: engaged and idle → 8 combat lines
+  in 10 s; engaged in `PHASE_CHPASS_NEW` → **0 combat lines in 40 s**, no idle
+  reap; re-key completed → combat resumes on the same engagement. At 1 HP this is
+  unbounded invulnerability from two shipped verbs.
+
+**AM. An object is duplicated on every logout/reset cycle.** *(high — filed
+medium, re-rated up on the evidence)*
+
+- `_obj_id_world_count` ([`item.cyr:994`](../../src/item.cyr:994)) sums room
+  contents plus **online** sessions — and `maybe_zone_reset` defers while any
+  player is in-world, so the session term is **provably always zero** on that
+  path. The server has no view of objects held by players who are offline, and
+  `_restore_inv` mints with no ceiling.
+- **Measured:** `get` / `quit` / wait one reset / log back in, six times →
+  `inv = "notice,notice,notice,notice,notice,notice,notice"` against an authored
+  ceiling of 2. **On the unique authored artifact: `relic` → five copies.** A
+  player can mint unlimited copies of a one-of-a-kind item.
+
+**AL. The account cap counts sealed identities, not records.** *(high)*
+
+- `g_account_count` is incremented when the identity is sealed
+  ([`persist.cyr:2451`](../../src/persist.cyr:2451)) and **there is no decrement
+  anywhere in the tree** — the record is not written until class selection.
+- **Measured:** **200 slots burned in 0.46 s (436/s)** from one reused name and a
+  27-byte payload, unauthenticated, with **zero records on disk**; a genuine
+  player is then refused with "This world is not accepting new characters."
+- **1.7.11 widened this.** Before that release, abandoning at the class menu still
+  wrote a classless record, so the burn was at least backed by a real account.
+  `session_persistable` correctly stops that write — and thereby made the phantom
+  count permanent until restart. *(Reasoned from the code, not separately
+  measured; the judge measured the current behaviour.)*
+- Off by default, which is the only thing keeping it below critical.
+  `docs/guides/running.md:94-97` documents behaviour the code does not have.
+
+### 1.7.17 — mechanics and instruments
+
+**AP. A mob cannot kill you unless you have engaged it.** *(medium)* —
+`classes_upkeep` treats `SS_TARGET == 0` as "out of combat" and regenerates
+([`classes.cyr:381`](../../src/classes.cyr:381)), but a mob that assists or leashes
+onto you sets **its** target, not yours. Measured live: **70 incoming swings in
+60 s, 24 of them hits, HP never below 36/40** and back to full every tick.
+
+**AQ. The M2-F fuzz gate is a no-op on half its iterations.** *(medium)* —
+`fuzz/parser_fuzz.fcyr:74` feeds a **negative length on 49,585 of 100,000
+iterations**; the longest input ever fed is **319 bytes**, `PA_NORM_LEN` never
+exceeds **289 of NORM_CAP 4096**, and the `pa_emit_byte` cap branch — where F3
+(1.6.11) lived — **has never executed**. Reproduced by replicating the shipped
+seed and generator byte-for-byte.
+
+**Low, as filed:** **AR** `parse_uint` wraps silently so a 20-digit `N.X` ordinal
+resolves to a real object; **AS** the preposition split starts at token 1, so a
+noun spelled like a preposition can never be a direct object; **AT** `player_died`
+changes persistent state without setting `SS_SAVE_DIRTY`; **AU** the hidden-roll
+RNG is seeded from host uptime in ms; **AV** the `sig` hex-length guard is the one
+member of its trio with no test — and neutering it yields a *demonstrated*
+record-content-driven arbitrary file write; **AW** two of the six benches in the
+audit gate **cannot fail** (`bench_telnet` has no budget constant and returns 0
+unconditionally; `tests/*.bcyr` is an explicit no-op), so `cyrius audit` reports
+6/6 while 2 are decoration; **AX** the fuzzer covers one source file and neither
+the CYML loaders nor the record parser; **AY** the `MAX_SESSIONS` cap survives
+deletion — the test named for it asserts something else.
+
+### What this sweep had no instrument for
+
+1. **Two players interacting *under a tick*.** Nothing here or in any prior sweep
+   constructed a contended interleaving — both `get` the same object on the tick a
+   corpse decays; A `give`s to B while B's `drop_session` is mid-save. The
+   object-conservation defects confirmed above live in exactly that accounting.
+2. **The whole offline population.** AJ, AL and AM all trace to one absent
+   concept: nothing in the tree reads `data/players/` and checks it against the
+   live world. **A conservation harness — for every authored id,
+   `world_count + offline_record_count == authored_count` — would have caught AM
+   four sweeps ago.** It does not exist as a test, a bench, or a fuzz target.
+3. **Phase × tick, as a matrix.** AK is one cell of a **56-cell table** (8 phases ×
+   7 tick consumers) that nobody has enumerated. Two cells are known-wrong;
+   `save_sweep` ([`server.cyr:249`](../../src/server.cyr:249)) is a suspected
+   third.
+4. **The loaders' error arms as a class.** AJ, AN and AO are all "an operator edits
+   a data file and the server runs on with a half-published table". `cyrius fuzz`
+   includes exactly one project file; the CYML loaders and the record parse — this
+   project's own designated untrusted inputs — have **no fuzz coverage at all**.
 
 ---
 

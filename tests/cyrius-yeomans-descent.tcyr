@@ -6294,6 +6294,7 @@ fn main() {
     test_shutdown_and_class_guard();
     test_queue_per_read();
     test_key_scratch_wiped();
+    test_operator_edit_blast();
 
 
     return assert_summary();
@@ -7886,6 +7887,291 @@ fn test_key_scratch_wiped(): i64 {
     assert_eq(load64(s + SS_PHASE), PHASE_CLASS,
               "...while the correct confirm still gets the player to class selection");
     _player_unlink("Wipey", 5);
+    return 0;
+}
+
+# === 1.7.15 — the operator-edit blast radius (gate re-run #3: AJ, AN, AO). ===
+#
+# Three defects with one trigger: an operator edits a data file, and the server
+# runs on with a half-published table or a positional reference that has moved.
+#
+# **AJ** — a rejected `hub.objs.cyml` was NON-FATAL. With the table unpublished
+# every saved inventory id fails to resolve, `_restore_inv` dropped the lot in
+# silence, and `drop_session` wrote the emptied inventory back. Measured by the
+# sweep against a live server: a ONE-CHARACTER edit, and a player who connects
+# once and is RST-closed **while typing nothing** loses everything, irreversibly —
+# records are signed with a key derived from the passphrase (ADR 0004).
+# 1.7.11 made exactly this fatal for `data/classes.cyml` THIRTY-FIVE LINES BELOW,
+# in the same function. The class table got the guard; the object table did not.
+#
+# **AN** — `class` was persisted as an INDEX into `data/classes.cyml`, so adding
+# or removing a class silently re-assigned every character. `room` is a stable id
+# string one line away, and ADR 0006 states the rule in the same sentence.
+#
+# **AO** — 1.7.11's classless heal sent the player back to the menu, and the
+# menu's exit path then called `session_enter_world`, throwing away the room
+# `player_auth_load` had just restored. A defect inside this line's own fix.
+fn test_operator_edit_blast(): i64 {
+    test_group("operator-edit-blast");
+    persist_init();
+    if (g_class_count == 0) { assert(0, "operator-edit-blast: needs classes"); return 0; }
+    if (g_obj_tpl_count == 0) { assert(0, "operator-edit-blast: needs object templates"); return 0; }
+    if (world_room_count() == 0) { assert(0, "operator-edit-blast: needs a zone"); return 0; }
+
+    _player_unlink("Blast", 5);
+    _player_unlink("Legacy", 6);
+    _player_unlink("Healed", 6);
+
+    # --- AJ, the boot guard. The suite cannot run `cmd_serve` (it parks in
+    # epoll_wait), so the guard is asserted from the source — the technique
+    # 1.7.11/1.7.12/1.7.14 established for exactly this. Verified live alongside
+    # this release: the typo makes the server exit 1 instead of carrying on.
+    var objs_at  = _src_offset_of("src/server.cyr", "world_load_objs(DP_OBJS)");
+    var objs_fatal_at = _src_offset_of("src/server.cyr", "world: FATAL — the object table was rejected.");
+    var cls_fatal_at  = _src_offset_of("src/server.cyr", "world: FATAL — no player classes.");
+    assert(objs_at > 0, "cmd_serve loads the object table where we think it does");
+    assert(objs_fatal_at > objs_at, "...and refuses to start when that load FAILED");
+    assert(cls_fatal_at > objs_fatal_at,
+           "...and the class guard 1.7.11 added is still below it — both arms, not one");
+
+    # --- AJ, the silent drop. This is the residual case the boot guard does NOT
+    # cover: an operator legitimately removes ONE authored object, and everyone
+    # holding it loses it at their next login. Losing it may be right; losing it
+    # invisibly is not.
+    var d = _freeable_sess();
+    store64(d + SS_INV, 0);
+    assert_eq(_restore_inv(d, "scrip,nosuchobject,cell", 23), 1,
+              "_restore_inv REPORTS the id it could not resolve");
+    assert_eq(inv_count(d), 2, "...while still restoring the two that did resolve");
+    store64(d + SS_INV, 0);
+    assert_eq(_restore_inv(d, "scrip,cell", 10), 0, "a fully-resolvable list reports no loss");
+    assert_eq(inv_count(d), 2, "...and restores both");
+
+    # AN's lookup is EXACT, not a prefix match. `class_by_input` accepts prefixes
+    # because a human types it at the menu; a record is not a human, and a prefix
+    # would make a truncated id resolve to whatever class sorts first — the same
+    # positional fragility this change removes.
+    var c0 = cl_at(0);
+    var full = load64(c0 + CL_ID_LEN);
+    assert(full > 1, "the first class id is long enough to truncate");
+    assert_eq(_class_index_by_id(c0 + CL_ID, full), 0, "an exact id resolves");
+    assert_eq(_class_index_by_id(c0 + CL_ID, full - 1), 0 - 1,
+              "...and a PREFIX of it resolves to nothing");
+    _drain_ilist(d + SS_INV); store64(d + SS_INV, 0);
+    session_free(d);
+
+    # AJ end to end: a record naming an object that no longer exists must SAY so.
+    # Counting the loss is not enough if nobody is told — the whole defect was
+    # that it happened in silence, and the next save makes it permanent.
+    _player_unlink("Lossy", 5);
+    var lyblk = alloc(IDENT_LEN);
+    memset(lyblk, 0, IDENT_LEN);
+    var lysalt = alloc(SALT_LEN);
+    var yq = 0;
+    while (yq < SALT_LEN) { store8(lysalt + yq, 33 + yq); yq = yq + 1; }
+    memcpy(lyblk, lysalt, SALT_LEN);
+    ident_derive(lysalt, "lossyphrase", 11, lyblk + IDENT_SK, lyblk + IDENT_PK);
+    var lyrec = alloc(SLURP_CAP);
+    var yo = _str_into(lyrec, 0, "schema = 1\nname = \"Lossy\"\nsalt = \"");
+    yo = _str_into(lyrec, yo, hex_encode(lyblk, SALT_LEN));
+    yo = _str_into(lyrec, yo, "\"\npubkey = \"");
+    yo = _str_into(lyrec, yo, hex_encode(lyblk + IDENT_PK, PK_LEN));
+    yo = _str_into(lyrec, yo, "\"\nclass = 0\nroom = \"\"\nhp = 9\nmaxhp = 9\ninv = \"scrip,nosuchobject\"\n");
+    store8(lyrec + yo, 0);
+    _sign_record_as("Lossy", 5, lyblk, lyrec);
+    var ly = _mk_sess("Lossy", 5);
+    store64(ly + SS_FD, 0 - 1);
+    _tx_reset(ly);
+    var lybase = g_audit_emitted;
+    assert_eq(player_auth_load(ly, "lossyphrase", 11), 1, "the record loads");
+    assert_eq(inv_count(ly), 1, "...restoring only the id that still resolves");
+    assert_eq(_contains(load64(ly + SS_TX_BUF), load64(ly + SS_TX_LEN),
+                        "no longer part of this world"), 1,
+              "...and the PLAYER is told something of theirs is gone");
+    assert(g_audit_emitted > lybase, "...and the operator gets an audit entry for it");
+    _drain_ilist(ly + SS_INV); store64(ly + SS_INV, 0);
+    _player_unlink("Lossy", 5);
+
+    # --- AN. Round-trip a character and prove the record names its class by a
+    # STABLE ID, not by position.
+    var s = _mk_sess("Blast", 5);
+    var blk = sess_ident(s);
+    var salt = alloc(SALT_LEN);
+    var q = 0;
+    while (q < SALT_LEN) { store8(salt + q, 41 + q); q = q + 1; }
+    memcpy(blk, salt, SALT_LEN);
+    ident_derive(salt, "blastphrase", 11, blk + IDENT_SK, blk + IDENT_PK);
+    store64(blk + IDENT_CREATED, 1);
+    store64(s + SS_FD, 0 - 1);
+    store64(s + SS_ROOM, 0 - 1);
+    store64(s + SS_HP, 12); store64(s + SS_MAXHP, 12);
+    store64(s + SS_AUTHED, 1);
+    var chosen = g_class_count - 1;                 # the LAST class — position matters most here
+    store64(s + SS_CLASS, chosen);
+    assert_eq(player_save(s), 1, "a character with a class saves");
+
+    _path_for("Blast", 5, g_persist_path);
+    var n = file_read_all(g_persist_path, g_persist_slurp, SLURP_CAP - 1);
+    var cc = cl_at(chosen);
+    assert_eq(_contains(g_persist_slurp, n, "class = \""), 1,
+              "the record writes `class` as a QUOTED ID, not a bare integer");
+    var idbuf = alloc(64);
+    memcpy(idbuf, cc + CL_ID, load64(cc + CL_ID_LEN));
+    store8(idbuf + load64(cc + CL_ID_LEN), 0);
+    assert_eq(_contains(g_persist_slurp, n, idbuf), 1, "...and the id is the class's own");
+
+    # THE ASSERTION AN EXISTS FOR: move the class table under the record, exactly
+    # as adding or removing an entry in classes.cyml does, and the character must
+    # still be who they were. With the old positional form this is where a
+    # Chaplain became a Courier.
+    # Copy the id BYTES before the swap: `cl_at` returns a pointer INTO the table,
+    # so holding `cc` across the swap would compare the entry against itself and
+    # pass no matter what. (It did, on the first run — got 0, expected 1.)
+    var want_id = alloc(64);
+    var want_len = load64(cc + CL_ID_LEN);
+    memcpy(want_id, cc + CL_ID, want_len);
+    var tmp = alloc(CL_SIZE);
+    memcpy(tmp, cl_at(0), CL_SIZE);
+    memcpy(cl_at(0), cl_at(chosen), CL_SIZE);
+    memcpy(cl_at(chosen), tmp, CL_SIZE);            # swap first and last
+    var back = _mk_sess("Blast", 5);
+    assert_eq(player_auth_load(back, "blastphrase", 11), 1, "the record still loads");
+    assert_eq(load64(back + SS_CLASS), 0,
+              "...and the character follows their CLASS to its new index, not the index");
+    var nc = cl_at(load64(back + SS_CLASS));
+    assert_eq(load64(nc + CL_ID_LEN), want_len, "...the class it landed on has that id's length");
+    assert_eq(_bytes_eq(nc + CL_ID, want_id, want_len), 1,
+              "...which is to say: the same class id they chose");
+    # restore the table before anything else uses it
+    memcpy(tmp, cl_at(0), CL_SIZE);
+    memcpy(cl_at(0), cl_at(chosen), CL_SIZE);
+    memcpy(cl_at(chosen), tmp, CL_SIZE);
+    _player_unlink("Blast", 5);
+
+    # --- AN, BACK-COMPAT. Every record written before 1.7.15 carries the integer.
+    # There is no offline migration and there cannot be (ADR 0004), so the read
+    # path must accept both forms and let the next save migrate it.
+    var lrec = alloc(SLURP_CAP);
+    var lblk = alloc(IDENT_LEN);
+    memset(lblk, 0, IDENT_LEN);
+    var lsalt = alloc(SALT_LEN);
+    var lq = 0;
+    while (lq < SALT_LEN) { store8(lsalt + lq, 77 + lq); lq = lq + 1; }
+    memcpy(lblk, lsalt, SALT_LEN);
+    ident_derive(lsalt, "legacyphrase", 12, lblk + IDENT_SK, lblk + IDENT_PK);
+    # salt and pubkey are not optional — without them the load is -2 before it
+    # ever reaches the `class` field, and this would assert nothing about AN.
+    var lo = _str_into(lrec, 0, "schema = 1\nname = \"Legacy\"\nsalt = \"");
+    lo = _str_into(lrec, lo, hex_encode(lblk, SALT_LEN));
+    lo = _str_into(lrec, lo, "\"\npubkey = \"");
+    lo = _str_into(lrec, lo, hex_encode(lblk + IDENT_PK, PK_LEN));
+    lo = _str_into(lrec, lo, "\"\nclass = 2\nroom = \"\"\nhp = 9\nmaxhp = 9\n");
+    store8(lrec + lo, 0);
+    _sign_record_as("Legacy", 6, lblk, lrec);
+    var lg = _mk_sess("Legacy", 6);
+    assert_eq(player_auth_load(lg, "legacyphrase", 12), 1, "a PRE-1.7.15 record still loads");
+    assert_eq(load64(lg + SS_CLASS), 2,
+              "...and its positional `class = 2` is still honoured, so nobody is demoted");
+    _player_unlink("Legacy", 6);
+
+    # --- AO. A session that reached the class menu through the 1.7.11 heal has a
+    # room already restored; choosing a class must not throw it away.
+    var target_room = 3;
+    if (target_room >= world_room_count()) { target_room = world_room_count() - 1; }
+    var h = _freeable_sess();
+    store64(h + SS_FD, 0 - 1);
+    store64(h + SS_AUTHED, 1);
+    store64(h + SS_PHASE, PHASE_CLASS);
+    store64(h + SS_CLASS, 0 - 1);
+    store64(h + SS_ROOM, target_room);              # what player_auth_load restored
+    memcpy(load64(h + SS_NAME_BUF), "Healed", 6);
+    store64(h + SS_NAME_LEN, 6);
+    var hblk = sess_ident(h);
+    var hsalt = alloc(SALT_LEN);
+    var hq = 0;
+    while (hq < SALT_LEN) { store8(hsalt + hq, 5 + hq); hq = hq + 1; }
+    memcpy(hblk, hsalt, SALT_LEN);
+    ident_derive(hsalt, "healedphrase", 12, hblk + IDENT_SK, hblk + IDENT_PK);
+    store64(hblk + IDENT_CREATED, 1);
+    # An observer already standing in that room. `room_broadcast` EXCLUDES the
+    # arriving session, so the arrival prose is only ever visible to someone else
+    # — asserting it on `h` itself tested nothing and passed nothing.
+    var obs = _freeable_sess();
+    store64(obs + SS_FD, 0 - 1);
+    store64(obs + SS_PHASE, PHASE_CMD);
+    store64(obs + SS_AUTHED, 1);
+    store64(obs + SS_ROOM, target_room);
+    memcpy(load64(obs + SS_NAME_BUF), "Watcher", 7);
+    store64(obs + SS_NAME_LEN, 7);
+    var ohead = g_session_head;
+    store64(obs + SS_NEXT, 0);
+    g_session_head = obs;
+    _tx_reset(obs);
+    _tx_reset(h);
+    login_on_class(h, "1", 1);
+    assert_eq(load64(h + SS_ROOM), target_room,
+              "THE ASSERTION AO EXISTS FOR: a healed character keeps the room it was loaded into");
+    assert_eq(load64(h + SS_PHASE), PHASE_CMD, "...and still reaches the command prompt");
+    assert_eq(_contains(load64(obs + SS_TX_BUF), load64(obs + SS_TX_LEN), "re-materializes"), 1,
+              "...and the room sees a RETURNING player arrive, not a new one");
+    g_session_head = ohead;
+    session_free(obs);
+
+    # A genuinely new character still starts where new characters start — the fix
+    # must not send everyone to whatever SS_ROOM happens to hold.
+    var fresh = _freeable_sess();
+    store64(fresh + SS_FD, 0 - 1);
+    store64(fresh + SS_AUTHED, 1);
+    store64(fresh + SS_PHASE, PHASE_CLASS);
+    store64(fresh + SS_CLASS, 0 - 1);
+    store64(fresh + SS_ROOM, 0 - 1);                # session_new's value
+    memcpy(load64(fresh + SS_NAME_BUF), "Fresh", 5);
+    store64(fresh + SS_NAME_LEN, 5);
+    var fblk = sess_ident(fresh);
+    memcpy(fblk, hsalt, SALT_LEN);
+    ident_derive(hsalt, "freshphrase", 11, fblk + IDENT_SK, fblk + IDENT_PK);
+    store64(fblk + IDENT_CREATED, 1);
+    _tx_reset(fresh);
+    login_on_class(fresh, "1", 1);
+    assert_eq(load64(fresh + SS_ROOM), world_start_room(),
+              "a NEW character still enters at the start room");
+    # ...and READS as new. Landing in the right room is not enough: always
+    # resuming would put a fresh character in the start room too (SS_ROOM is -1,
+    # and session_resume_world falls back), so only the arrival prose separates
+    # the two paths — and it is visible to onlookers, never to the arriver.
+    var fobs = _freeable_sess();
+    store64(fobs + SS_FD, 0 - 1);
+    store64(fobs + SS_PHASE, PHASE_CMD);
+    store64(fobs + SS_AUTHED, 1);
+    store64(fobs + SS_ROOM, world_start_room());
+    memcpy(load64(fobs + SS_NAME_BUF), "Bystander", 9);
+    store64(fobs + SS_NAME_LEN, 9);
+    var fhead = g_session_head;
+    store64(fobs + SS_NEXT, 0);
+    g_session_head = fobs;
+    var fresh2 = _freeable_sess();
+    store64(fresh2 + SS_FD, 0 - 1);
+    store64(fresh2 + SS_AUTHED, 1);
+    store64(fresh2 + SS_PHASE, PHASE_CLASS);
+    store64(fresh2 + SS_CLASS, 0 - 1);
+    store64(fresh2 + SS_ROOM, 0 - 1);
+    memcpy(load64(fresh2 + SS_NAME_BUF), "Newbie", 6);
+    store64(fresh2 + SS_NAME_LEN, 6);
+    var f2blk = sess_ident(fresh2);
+    memcpy(f2blk, hsalt, SALT_LEN);
+    ident_derive(hsalt, "newbiephrase", 12, f2blk + IDENT_SK, f2blk + IDENT_PK);
+    store64(f2blk + IDENT_CREATED, 1);
+    _tx_reset(fobs);
+    login_on_class(fresh2, "1", 1);
+    assert_eq(_contains(load64(fobs + SS_TX_BUF), load64(fobs + SS_TX_LEN), "flickers into being"), 1,
+              "...and the room sees a NEW arrival, not a returning one");
+    g_session_head = fhead;
+    _player_unlink("Newbie", 6);
+    session_free(fobs); session_free(fresh2);
+
+    _player_unlink("Healed", 6);
+    _player_unlink("Fresh", 5);
+    session_free(h); session_free(fresh);
     return 0;
 }
 

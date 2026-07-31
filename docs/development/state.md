@@ -3,13 +3,49 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.14 — **every gate re-run #2 finding is closed (AC-AI)**; next is gate re-run #3)
+> **Last refresh**: 2026-07-31 (v1.7.15 — AJ/AN/AO closed; **3 high + 3 medium + 7 low remain** from gate re-run #3. Next is 1.7.16)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.15** — 2026-07-31. **1340 assertions**; `cyrius audit` exits 0; 6/6 benches;
+both targets build; **9/9 mutations killed**.
+
+**The operator-edit blast radius** — the first three findings of gate re-run #3,
+sharing one trigger: an operator edits a data file and the server runs on with a
+half-published table or a positional reference that has moved.
+
+**A rejected `hub.objs.cyml` was non-fatal**, so every saved inventory id failed
+to resolve, `_restore_inv` dropped the lot in silence, and the next disconnect
+wrote the emptied inventory back — irreversibly, since records are signed with a
+key the server never holds. Re-verified live: a one-character typo, and the server
+now exits 1. **1.7.11 made exactly this fatal for the class table thirty-five
+lines below, in the same function.**
+
+**`class` was a positional index** into `classes.cyml`, so adding a class
+re-assigned every character; `room` has been a stable id one line away all along.
+**And 1.7.11's own classless heal threw away the room it had just restored**,
+because the class menu's exit path always called `session_enter_world`.
+
+**Lessons carried, added this release:**
+
+- *Copying a guard is not the same as porting it.* AJ's boot check keys on the
+  loader's RETURN CODE, not on a zero count the way the class guard does — a zone
+  with no authored objects is legitimate and loads with a count of zero. The
+  obvious copy-paste would have refused to start on a valid world.
+- *An enum bump is part of adding an enum value.* The new audit key was first
+  added past `AK_NKEYS`, where the range guard silently downgrades it to an
+  unrolled event costing 1944 permanent bytes per occurrence — the 1.7.1 defect,
+  one key at a time. The comment at that guard predicts the mistake; a prediction
+  is not a check.
+- *Three test bugs, each of a kind this file already names.* `cl_at` returns a
+  POINTER into the table, so holding it across a swap compares an entry with
+  itself; a hand-built "legacy" record without salt/pubkey fails at -2 long before
+  the field under test; and `room_broadcast` EXCLUDES the arriving session, so an
+  arrival-prose assertion must watch an onlooker.
 
 **1.7.14** — 2026-07-31. **1310 assertions**; `cyrius audit` exits 0; 6/6 benches;
 both targets build; **9/9 mutations killed**.
@@ -316,6 +352,39 @@ one is a lie the player can see.
   where a pre-auth peer drives the server's own reply buffer past `TX_CAP` and
   **both** of this server's input bounds are structurally blind to it. Roadmap
   items W–Z.
+
+## Gate re-run #3 — DO-NOT-CLOSE (2026-07-31)
+
+**The 1.x line does not close.** 0 critical, **4 high**, 5 medium, 7 low — 16
+distinct defects, roadmap items **AJ-AY**. Run against a clean tree at `84c9a3a`.
+
+**The one change that mattered: this time the finders could BUILD AND RUN.**
+Re-run #2 executed nothing and said so in its own limits; this run gave each
+finder an isolated git worktree and told it to measure rather than estimate.
+Three of the four highs were then demonstrated **against a live server over TCP**
+rather than inferred. The main repo was never touched.
+
+**Fifth consecutive sweep to find the same pattern, and it is no longer a
+coincidence: three of the four highs are a rule applied at one site and not its
+sibling — and TWO of them are siblings of fixes shipped in this very release
+line.** A rejected `data/classes.cyml` is fatal at boot (1.7.11, AD); a rejected
+`hub.objs.cyml` **35 lines above, in the same function** prints a warning and
+carries on — and then silently, irreversibly empties every player's inventory.
+The 1.7.11 classless-record heal loses the player's room. 1.7.11's
+`session_persistable` gate made the account-cap phantom permanent.
+
+**The single highest-value thing the next pass could build**, named by the judge
+and worth repeating here: **an offline-population conservation harness** — for
+every authored id, `world_count + offline_record_count == authored_count`. Nothing
+in this tree reads `data/players/` and checks it against the live world, and three
+of the four highs trace to that absent concept. It would have caught the
+duplication defect four sweeps ago.
+
+**Two of the six benches in the audit gate cannot fail.** `bench_telnet` has no
+budget constant and returns 0 unconditionally; `tests/*.bcyr` is an explicit
+no-op. `cyrius audit` has been reporting 6/6 while 2 of the 6 are decoration —
+which is the 1.7.12 lesson (*a bench that cannot reach the path reports a budget
+that is met and tells you nothing*) recurring one level up, in the gate itself.
 
 ## Gate re-run #2 — DO-NOT-CLOSE (2026-07-31)
 
@@ -812,7 +881,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (1310 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (1340 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -855,7 +924,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **1310** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **1340** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -1055,12 +1124,11 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
-**Next: gate re-run #3.** Every finding from re-run #2 is closed (AC-AI), and the
-only carried items are **AA** (16 B/connection at accept, needs a `lib/net.cyr`
-decision) and **AB** (the stateless-refusal amplifier) — neither blocking. Two
-process requirements the last run earned: **tag the commit first** (the tree moved
-under re-run #2), and **let it run the suite and the benches** — AF survived only
-because a bench fixture could not reach the code path it measures — which must be allowed to **run the suite and
+**Next: 1.7.16** — the peer-reachable highs (roadmap **AK** `passwd` mid-fight
+grants permanent immunity; **AM** unlimited duplication of unique artifacts;
+**AL** the account cap burns 436 phantom slots/s unauthenticated). Then 1.7.17
+(mechanics and instruments), then gate re-run #4 — which should first build the
+offline-population conservation harness and the phase x tick matrix — which must be allowed to **run the suite and
 the benches**, because AF survived only because a bench fixture could not reach
 the code path it measures.
 
@@ -1100,7 +1168,7 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is gate re-run #3**, not a milestone: see
+**Your next work is 1.7.16** (roadmap items AK, AM, AL), not a milestone: see
 [`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
 is batched into. 2.0.0 (starting with M14) is gated behind a clean gate re-run. Joshua is post-1.0 backlog, not next.
 

@@ -4,6 +4,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Gate re-run #3 — DO-NOT-CLOSE (2026-07-31)
+
+Run against a clean tree at `84c9a3a`. **0 critical, 4 high, 5 medium, 7 low** —
+16 distinct defects from 19 candidates, one refuted. Recorded as roadmap items
+**AJ-AY**; no code changed in this entry.
+
+**This run could BUILD AND RUN.** Re-run #2 executed nothing and named that as its
+own worst limit. Every finder here got an isolated git worktree and was told to
+measure rather than estimate, and three of the four highs were demonstrated
+against a **live server over TCP**: `passwd` mid-fight leaves a player permanently
+immune (0 combat lines in 40 s while engaged); an unauthenticated peer burns
+**200 account slots in 0.46 s** with zero records written; and one **one-character**
+typo in `hub.objs.cyml` silently and irreversibly empties the inventory of every
+player who connects during the outage.
+
+**Three of the four highs are a rule applied at one site and not its sibling, and
+two are siblings of fixes this release line shipped.** A rejected class table is
+fatal at boot (1.7.11); a rejected objects table **35 lines above in the same
+function** carries on. The 1.7.11 classless heal loses the player's room.
+1.7.11's `session_persistable` gate made the account-cap phantom permanent.
+
+**Two of the six benches in the audit gate cannot fail** — `bench_telnet` has no
+budget constant and returns 0 unconditionally, and `tests/*.bcyr` is an explicit
+no-op. `cyrius audit` has reported 6/6 throughout while 2 of the 6 were
+decoration.
+
+
 ### Gate re-run #2 — DO-NOT-CLOSE (2026-07-31)
 
 Run against 1.7.10. Five independent finders over distinct surfaces; every
@@ -41,6 +68,84 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 `SS_AUTHED = 0` so the arm it would measure cannot fire. **Gate re-run #3 must be
 allowed to run the suite and the benches.**
 
+
+## [1.7.15] — 2026-07-31
+
+**The operator-edit blast radius.** 1340 assertions (was 1310); `cyrius audit`
+exits 0; 6/6 benches; both targets build; **9/9 mutations killed**.
+
+The first three findings of gate re-run #3 (**AJ**, **AN**, **AO**). One trigger
+between them: an operator edits a data file, and the server runs on with a
+half-published table or a positional reference that has moved.
+
+### Fixed
+
+- **One typo in a zone objects file silently and irreversibly emptied every
+  player's inventory (AJ, high).** `world_load_objs` unpublishes the whole table
+  on any failure, and `cmd_serve` printed a diagnostic and **carried on**. With
+  the table empty every saved inventory id failed to resolve, `_restore_inv`
+  dropped the lot in silence, and `drop_session` wrote the emptied inventory back.
+  Irreversible — records are signed with a key derived from the player's
+  passphrase, which the server never holds (ADR 0004).
+
+  Measured by the sweep against a live server and re-verified here: a
+  **one-character** edit (`kind = "obj"` → `"objj"`), and a player who connects
+  once and is RST-closed **while typing nothing** loses everything. The server now
+  refuses to start, **exit code 1**.
+
+  **1.7.11 made exactly this fatal for `data/classes.cyml` thirty-five lines
+  below, in the same function**, under a comment explaining precisely why carrying
+  on is catastrophic. The class table got the guard; the object table did not.
+
+  Keyed on the loader's **return code**, not on `g_obj_tpl_count == 0` the way the
+  class check is: a zone that authors no objects is legitimate and loads
+  successfully with a count of zero, so the two tests are not interchangeable.
+
+- **The silent half of AJ, which the boot guard does not cover.** An operator who
+  legitimately removes one authored object still costs every holder that item at
+  their next login. That is arguably correct — it no longer exists — but it must
+  not be invisible. `_restore_inv` now returns the number of ids it could not
+  resolve; the player is told, and an audit entry records it.
+
+- **`class` was persisted as a positional index into `data/classes.cyml`
+  (AN, medium).** Adding or removing a class silently re-assigned every existing
+  character — a Chaplain logs in as a Courier. `room` is stored as a stable id
+  string **one line away**, and ADR 0006 states the rule in the same sentence that
+  lists `class`. Now written by id, with the read path accepting **both** forms so
+  existing records migrate the first time they save. No schema bump — which
+  matters, because ADR 0004 means there is no offline migration and cannot be.
+
+- **1.7.11's classless-record heal threw away the player's room (AO, medium).**
+  The heal correctly sent the player back to the class menu; the menu's exit path
+  then called `session_enter_world`, which **overwrites `SS_ROOM` with the start
+  room**. Silent, permanent relocation. A defect inside this line's own fix, and
+  the shape this project keeps finding: 1.7.11 did not ask what the menu's exit
+  would do to the state it had just restored.
+
+### Notes
+
+- **`AK_NKEYS` was bumped with the new audit key, on the second attempt.** The
+  first cut added `AK_LOAD_INV_DROP = 21` against `AK_NKEYS = 20`. The guard in
+  `audit_keyed` catches an out-of-range key and falls through to a verbatim
+  `audit_event` — so nothing crashes, and every occurrence quietly costs **1944
+  permanent bytes**, which is the 1.7.1 defect reintroduced one key at a time. The
+  comment at that guard predicted this exact mistake; a comment saying so is not
+  the same as a check, and this one was caught by reading rather than by a test.
+
+- **Three of this release's own test bugs, each of a named kind.** `cl_at` returns
+  a **pointer into** the class table, so holding it across a swap compared an entry
+  with itself and would have passed no matter what. A hand-built "legacy" record
+  omitted `salt` and `pubkey` and so returned -2 long before reaching the `class`
+  field it existed to test. And `room_broadcast` **excludes the arriving session**,
+  so the arrival-prose assertion was watching the one observer that can never see
+  it — the fix needed a second session standing in the room.
+
+- **A guard that survives deletion is not a guard.** Mutation testing showed the
+  audit entry, the exact-match requirement in the id lookup, and the new/returning
+  distinction each survived being removed. The first two had no assertion at all;
+  the third is behaviourally identical except for the arrival prose, because
+  `session_resume_world` falls back to the start room when `SS_ROOM` is -1 — so
+  only an onlooker can tell the paths apart, and now one does.
 
 ## [1.7.14] — 2026-07-31
 

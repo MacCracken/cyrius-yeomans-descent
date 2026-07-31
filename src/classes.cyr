@@ -323,7 +323,27 @@ fn login_on_class(s, buf, len): i64 {
     session_appendtx(s, class_name_ptr(idx), class_name_len(idx));
     session_appendtx_cstr(s, ".\r\n");
     session_appendtx_cstr(s, "Type \"help\" for commands.\r\n");
-    session_enter_world(s);
+    # === 1.7.15 (AO) — RESUME a character that already has a room. ===
+    #
+    # This called `session_enter_world` unconditionally, which OVERWRITES SS_ROOM
+    # with the start room. For a brand-new character that is right. For one that
+    # reached this menu through 1.7.11's classless-record heal it is silent,
+    # permanent relocation: `player_auth_load` had already restored their real
+    # room, and choosing a class threw it away. Reproduced by gate re-run #3 —
+    # `hub.flagon` became `hub.gate` and the next save made it permanent.
+    #
+    # A defect inside this line's own fix, which is the shape this project keeps
+    # finding: 1.7.11 correctly sent the player back to the menu and did not ask
+    # what the menu's exit path would then do to the state it had just restored.
+    #
+    # `SS_ROOM` is the discriminator and needs no new field: `session_new` sets it
+    # to -1 and only a successful load makes it >= 0. The two paths keep their own
+    # arrival prose — "flickers into being" for a new character, "re-materializes
+    # from the grid" for one coming back — though note that prose reaches only
+    # ONLOOKERS: `room_broadcast` excludes the arriving session, so a test must
+    # watch a second session in the room to see it.
+    if (load64(s + SS_ROOM) < 0) { session_enter_world(s); }
+    else { session_resume_world(s); }
     # H10 (1.6.5) — the character's FIRST record. Failing silently here means a
     # player finishes creation, plays, and finds nothing to log back in to.
     if (player_save(s) != 1) {

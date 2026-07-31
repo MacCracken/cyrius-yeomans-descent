@@ -425,7 +425,14 @@ enum AuditKeys {
     AK_AUDIT_ROTATE     = 17;
     AK_AUDIT_PRUNE      = 18;
     AK_AUDIT_ROTFAIL    = 19;
-    AK_NKEYS            = 20;
+    # 1.7.15 (AJ). Added WITH the AK_NKEYS bump below, deliberately: the guard at
+    # audit_keyed refuses any key >= AK_NKEYS and falls through to a verbatim
+    # audit_event, so a key added without the bump silently loses its rollup and
+    # costs 1944 permanent bytes per occurrence — the 1.7.1 defect, reintroduced
+    # one key at a time. This comment exists because that is exactly the mistake
+    # this change made on its first attempt.
+    AK_LOAD_INV_DROP    = 20;   # ids in a record that no longer resolve on load
+    AK_NKEYS            = 21;
 }
 
 # One table entry. Byte offsets, matching the house SS_* / g_persist_* style.
@@ -1491,7 +1498,30 @@ fn _build_record(s): i64 {
     off = _fstr(off, "name", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));
     off = _fhex(off, "salt",   blk, SALT_LEN);                    # H17 — no alloc
     off = _fhex(off, "pubkey", blk + IDENT_PK, PK_LEN);           # H17 — no alloc
-    off = _fint(off, "class", load64(s + SS_CLASS));
+    # === 1.7.15 (AN) — `class` by STABLE ID, not by position. ===
+    #
+    # This wrote the class as its INDEX into `data/classes.cyml`, so adding or
+    # removing a class silently re-assigned every existing character. Reproduced
+    # by gate re-run #3: prepend one entry and a Chaplain logs in as a Courier —
+    # `patch` answers "You don't know how to patch.", `sneak` works, and the
+    # record still reads `class = 3`.
+    #
+    # `room` is stored as a stable id string ON THE VERY NEXT LINE, and ADR 0006
+    # states the rule in the same sentence that lists `class`. The index form was
+    # simply never revisited. Reading it back is written to accept BOTH forms, so
+    # existing records migrate the first time they save — no schema bump, which
+    # matters because ADR 0004 means there is no offline migration and cannot be.
+    var cli = load64(s + SS_CLASS);
+    if (cli >= 0) {
+        if (cli < g_class_count) {
+            var cc = cl_at(cli);
+            off = _fstr(off, "class", cc + CL_ID, load64(cc + CL_ID_LEN));
+        } else {
+            off = _fstr(off, "class", "", 0);
+        }
+    } else {
+        off = _fstr(off, "class", "", 0);
+    }
     var room = load64(s + SS_ROOM);
     if (room >= 0) {
         var r = room_at(room);
@@ -1745,8 +1775,29 @@ fn _scan_kv(buf, n, key, out_len): i64 {
     return 0;
 }
 
+# 1.7.15 (AN) — index of the class whose stable id is buf[0..len), or -1.
+#
+# Deliberately exact-match rather than reusing `class_by_input`: that one accepts
+# a NUMBER or a case-insensitive PREFIX because it serves the login menu, where a
+# human is typing. A record is not a human, and a prefix match would make
+# "chap" resolve to whatever class happened to sort first — which is the same
+# class of positional fragility this change exists to remove.
+fn _class_index_by_id(buf, len): i64 {
+    if (len <= 0) { return 0 - 1; }
+    var i = 0;
+    while (i < g_class_count) {
+        var c = cl_at(i);
+        if (load64(c + CL_ID_LEN) == len) {
+            if (_bytes_eq(c + CL_ID, buf, len) == 1) { return i; }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
 # Re-instantiate inventory from a comma-separated template-id list.
 fn _restore_inv(s, ids, len): i64 {
+    var dropped = 0;
     var i = 0;
     while (i < len) {
         var start = i;
@@ -1758,10 +1809,19 @@ fn _restore_inv(s, ids, len): i64 {
         if (idlen > 0) {
             var tpl = obj_tpl_by_id(ids + start, idlen);
             if (tpl != 0) { ilist_push(s + SS_INV, item_new(tpl)); }
+            else { dropped = dropped + 1; }
         }
         if (i < len) { i = i + 1; }
     }
-    return 0;
+    # 1.7.15 (AJ) — RETURN THE LOSS COUNT. This dropped unresolvable ids in
+    # silence: no count, no message, no audit line. The catastrophic case (a
+    # rejected objs table, so EVERY id fails) is now a fatal boot error — but the
+    # residual case is ordinary and permanent: an operator legitimately removes
+    # one authored object, and every player holding it loses it at their next
+    # login, with the loss written back on disconnect. That is arguably correct
+    # behaviour — the object no longer exists in the world — but it must not be
+    # INVISIBLE. The caller audits it.
+    return dropped;
 }
 
 # Verify the passphrase against the stored record and, on success, restore
@@ -2046,9 +2106,24 @@ fn player_auth_load(s, pass, passlen): i64 {
     # record with any numbers. So validate every loaded field. The class index
     # feeds class_name_ptr() pointer math (`g_classes + cls*CL_SIZE`) → OOB read
     # if unbounded; ndice feeds the roll() loop → DoS. Clamp them all.
-    var cls = toml_int(pairs, "class", 0 - 1);
-    if (cls < 0) { cls = 0 - 1; }
-    if (cls >= g_class_count) { cls = 0 - 1; }   # out-of-range → classless, not OOB
+    # 1.7.15 (AN) — accept BOTH forms. A record written by 1.7.15 or later carries
+    # the stable id; everything older carries the positional index. Trying the id
+    # first is what makes the migration lazy and one-way: an old record loads by
+    # index and is rewritten by id at its next save.
+    #
+    # The out-of-range clamp is unchanged and still load-bearing for the index
+    # path — a player owns their signing key (ADR 0004), so `class` is an
+    # attacker-chosen integer and feeds `g_classes + cls * CL_SIZE` pointer math.
+    var cls = 0 - 1;
+    var clsv = toml_get(pairs, "class");
+    if (clsv != 0) {
+        if (str_len(clsv) > 0) { cls = _class_index_by_id(str_data(clsv), str_len(clsv)); }
+        if (cls < 0) {
+            cls = toml_int(pairs, "class", 0 - 1);     # legacy positional index
+            if (cls < 0) { cls = 0 - 1; }
+            if (cls >= g_class_count) { cls = 0 - 1; }   # out-of-range → classless, not OOB
+        }
+    }
     store64(s + SS_CLASS, cls);
     store64(s + SS_HP,    _clamp(toml_int(pairs, "hp", PC_HP), 0, 1000000));
     store64(s + SS_MAXHP, _clamp(toml_int(pairs, "maxhp", PC_HP), 1, 1000000));
@@ -2086,7 +2161,16 @@ fn player_auth_load(s, pass, passlen): i64 {
     store64(s + SS_ROOM, ridx);
 
     var invv = toml_get(pairs, "inv");
-    if (invv != 0) { _restore_inv(s, str_data(invv), str_len(invv)); }
+    if (invv != 0) {
+        var lost = _restore_inv(s, str_data(invv), str_len(invv));
+        # 1.7.15 (AJ) — an inventory that shrank on load is a fact an operator
+        # needs, and it is about to be made permanent by the next save. SEV_WARNING
+        # rather than SEV_INFO: this is data leaving the world, not a routine load.
+        if (lost > 0) {
+            audit_keyed(AK_LOAD_INV_DROP, SEV_WARNING, "load.inv.drop", nm, nl, clock_now_ms());
+            session_appendtx_cstr(s, "\r\nSome of what you carried is no longer part of this world.\r\n");
+        }
+    }
 
     g_loaded_last_login = toml_int(pairs, "last_login", 0);   # 0.8.1 greeting
     store64(s + SS_AUTHED, 1);
