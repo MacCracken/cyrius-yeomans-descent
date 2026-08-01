@@ -142,8 +142,18 @@ fn mi_name_len(m): i64    { return mt_name_len(mi_tpl(m)); }
 fn toml_int(pairs, key, def): i64 {
     var v = toml_get(pairs, key);
     if (v == 0) { return def; }
-    var p = str_data(v);
-    var len = str_len(v);
+    return _int_from_bytes(str_data(v), str_len(v), def);
+}
+
+# 1.7.20 (BB) — the numeric core, factored out so it has exactly ONE
+# implementation.
+#
+# `toml_int` above reads a bayan str; `_rv_int` (persist.cyr) reads the same
+# field straight out of the raw record. Writing the trim-and-parse twice would be
+# the defect class this project keeps finding — a rule applied at one site and
+# not its sibling — and the two readers MUST agree on every value or the record
+# means different things depending on which path loaded it.
+fn _int_from_bytes(p, len, def): i64 {
     # G3 (1.6.13) — trim ASCII whitespace before parsing.
     #
     # A value with a trailing CR (any file saved with CRLF endings) was

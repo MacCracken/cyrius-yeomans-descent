@@ -123,6 +123,86 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 allowed to run the suite and the benches.**
 
 
+## [1.7.20] — 2026-07-31
+
+**The login parse** — the last item of gate re-run #4 (**BB**, filed as item U's
+second arm). **With this, every finding from that run (AZ-BH) is closed.**
+1476 assertions (was 1436); `cyrius audit` exits 0; 6/6 benches; 2/2 fuzz
+targets; both targets build.
+
+### Fixed
+
+- **BB — every successful login permanently burned 2,248 bytes.** 1.7.8 (item U)
+  removed the pre-authentication `toml_parse` by scanning `salt` and `pubkey` out
+  of the raw record and returning early on a wrong passphrase. **A right
+  passphrase fell straight through that early return into the same untouched
+  parse** and paid the full cost, on every login, forever — the bump allocator has
+  no free and `alloc_reset` is called nowhere in `src/`. Gate re-run #4 measured
+  2,265 B/login across 15,000 and 19,167 logins, dead linear: **883 MB/hour from
+  one sequential socket**, at the server's own ed25519 ceiling rather than the
+  client's, with unlimited registration by default and no login rate limit
+  anywhere.
+
+  **Measured this release: 2,332 → 84 bytes per login, a 96% cut.** The remainder
+  is genuinely the audit chain, which 1.7.1 already coalesces.
+
+### The shape of the fix
+
+The obvious version — a second copy of the field-restore block reading from the
+scanner — is exactly the defect class this project keeps finding, and it would
+have put the two copies in the one function where they must never disagree.
+Instead there is **one restore path** reading through a view that is either
+bayan-backed or scanner-backed, and the numeric core (`_int_from_bytes`) is
+factored out of `toml_int` so both readers parse a value identically.
+
+1.7.8 was careful to say the scanner must never be an authority, because it read
+two fields raw while everything else came from bayan — two views that could be
+made to disagree, hence its differential check. **`_scan_canonical` removes the
+premise instead of policing it:** it vouches for a record only if *every* line is
+canonical `key = "value"` or `key = <bare integer>`, a shape with exactly one
+parse. Anything it cannot account for — CRLF, an indent, a comment, a second
+section, a quote in a value — falls through to bayan exactly as today. The fast
+path still runs only after the passphrase has proved itself, and the signature
+still gates every field restore.
+
+**`_fint` writes integers UNQUOTED**, and the scanner was quoted-only. A
+canonical-form test that knew just one shape would have vouched for records whose
+every integer the scanner then failed to find — **silently substituting every
+default, which is precisely how 1.7.19's BE destroyed `created`.** Both shapes are
+now read, and the two readers are asserted to agree field by field.
+
+The **pre-authentication** reader (`_kv_at`) stayed quoted-only and unchanged, so
+nothing an unauthenticated peer can reach moved.
+
+### Changed
+
+- **`bench_persist`'s login arm now has a real ceiling: 256 bytes/op, was
+  `999999`.** The old comment justified the non-budget on the grounds that the
+  path was "dominated by the same libro/str allocations as the save" and that
+  pinning a number "would just encode today's libro version". That was wrong, and
+  its being wrong is why item U survived its own fix for twelve releases: the
+  2,248 bytes were not libro's, they were `toml_parse` of the record — ours, and
+  removable with no upstream anything. **Verified both ways for this release:
+  disabling the fix takes the arm to 2,332 B/op, `RESULT: FAIL`, and `cyrius
+  bench` exits 1.**
+
+### Lessons carried, added this release
+
+- ***An unfalsifiable budget is not a budget.*** This arm printed
+  `bump: 2330 bytes/op (max 999999)` through eleven releases while a peer burned
+  883 MB/hour through it, and reported PASS every time. That is the same failure
+  as 1.7.17's item AW (two benches that could not fail), one release later, in a
+  bench that AW's sweep had already read.
+- *A justification can outlive its truth and take the instrument with it.* The
+  `999999` was not an oversight — it had a written rationale, and the rationale
+  was wrong about whose allocation it was. Nobody re-derived it, because a comment
+  that explains a gap reads like a closed question.
+- *When one reader becomes two, assert they agree — do not reason that they do.*
+  The differential test compares every field of a real record across both
+  backends, including a negative value, a zero, an absent key and two genuine
+  epoch seconds. It is the cheapest possible check and it is what makes the
+  scanner safe to trust.
+
 ## [1.7.19] — 2026-07-31
 
 **Sessions in unusual states** — the second batch of gate re-run #4 (items **BC,

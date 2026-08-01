@@ -1,8 +1,8 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.19 — **BC, BD, BF and BG are closed**, the
-> second of three batches from gate re-run #4. **BB is the only one left**, and it
-> is 1.7.20; then gate re-run #5)
+> **Last Updated**: 2026-07-31 (v1.7.20 — **every finding from gate re-run #4 is
+> closed (AZ-BH)**. Next is gate re-run #5 — and see its note: five of #4's six
+> surfaces are spent, and **AGNOS has never been executed by any sweep**)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -46,8 +46,8 @@ ownership and fix size.
 | — | ~~gate re-run #4~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **3 high**, 3 medium, 3 low. Twelve reports collapsed to **nine distinct defects** (AZ-BH); one refuted. **Nine of nine are a rule applied at one site and not its sibling — and six are siblings of fixes from 1.7.15/16/17, one from the head commit itself** | — |
 | — | ~~1.7.18~~ | ~~4~~ | ✅ **Shipped.** **BE** the ordinal bound moved out of the shared reader — `parse_uint` now closes AR's wrap by exact i64 arithmetic, and `created` survives a login · **AZ** the boot spawn runs after the census is seeded (measured 13/13/13/13 → 13/12/12/12) · **BA** a rejected rooms table is fatal, so AJ's guard is reachable at last · **BH** `WL_ERR_NOSTART` | — |
 | — | ~~1.7.19~~ | ~~4~~ | ✅ **Shipped.** Sessions that are not a normal logged-in player — **BC** the refused duplicate poisons the census · **BD** `classes_upkeep` frozen in a peer-held menu (AK's other half) · **BF** the classless heal double-counts an account · **BG** the class-menu squatter's deadline (a new 90 s tier) | — |
-| 1 | [**1.7.20**](#1720--the-login-parse-item-us-second-arm) | 1 | **Next.** **BB** — the post-auth `toml_parse`, 2,248 B on every successful login, 883 MB/h from one socket. Item **U**'s second arm: 1.7.8 removed the pre-auth half and left this one | **yes** |
-| 2 | [**gate re-run #5**](#the-gate--what-closes-the-1x-line) | — | After 1.7.20. Same protocol as #4 (worktrees, build-and-run, paired skeptics) — but see the note there: five of the six surfaces #4 swept are now spent, and **AGNOS has never been executed by any sweep** | **yes** |
+| — | ~~1.7.20~~ | ~~1~~ | ✅ **Shipped.** **BB** — the post-auth `toml_parse`, 2,248 B on every successful login, 883 MB/h from one socket. **2,332 → 84 bytes per login (96%)**, and the bench arm that could not fail now gates at 256 and exits 1 when reverted. **Every finding from gate re-run #4 is now closed** | — |
+| 1 | [**gate re-run #5**](#the-gate--what-closes-the-1x-line) | — | **Next, and everything from re-run #4 is closed.** Same protocol as #4 (worktrees, build-and-run, paired skeptics) — but see the note there: five of the six surfaces #4 swept are now spent, and **AGNOS has never been executed by any sweep** | **yes** |
 | 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
@@ -428,7 +428,23 @@ the 30-second slowloris deadline.** *(low)*
   lines — and consider a middle deadline (60–90 s) rather than the bare pre-auth
   one.
 
-### 1.7.20 — the login parse (item U's second arm)
+### ✅ 1.7.20 — the login parse (item U's second arm) (SHIPPED)
+
+**Item BB is CLOSED, and with it every finding from gate re-run #4.**
+1476 assertions (was 1436). **Measured 2,332 → 84 bytes per login, a 96% cut.**
+
+**The instrument is the durable part.** `bench_persist`'s login arm had ceiling
+`999999` — ungated — with a written rationale that the path was "dominated by the
+same libro/str allocations as the save". That rationale was wrong about whose
+allocation it was, and it is why item U survived its own fix for twelve releases.
+The arm now gates at 256 and was **verified to FAIL (exit 1) at 2,332 B/op when
+the fix is disabled**.
+
+**`_fint` writes integers UNQUOTED and the scanner was quoted-only** — a
+canonical-form test that knew one shape would have vouched for records whose every
+integer then read as its default, which is 1.7.19's BE exactly. Caught because
+`_scan_canonical` is strict-or-fall-through: it refused every real record until
+both shapes were handled, rather than silently half-reading them.
 
 **Item BB alone.** *(1 high.)* The largest single fix in the batch and the only
 one that is a rewrite rather than a correction, which is why it gets its own

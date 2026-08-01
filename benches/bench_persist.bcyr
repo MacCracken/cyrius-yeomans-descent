@@ -181,11 +181,25 @@ fn main(): i64 {
     }
     var auth_ns = clock_now_ns() - t2;
     var auth_by = alloc_used() - b2;
-    # No bump ceiling asserted on the login path yet: it is dominated by the same
-    # libro/str allocations as the save, and pinning a number before the upstream
-    # fix lands would just encode today's libro version. Printed, not gated.
+    # === 1.7.20 (BB) — THE CEILING THIS ARM EXISTS FOR. ===
+    #
+    # This was `999999`, i.e. ungated, on the reasoning that the login path was
+    # "dominated by the same libro/str allocations as the save, and pinning a
+    # number before the upstream fix lands would just encode today's libro
+    # version". That reasoning was wrong, and its being wrong is why item U
+    # survived its own fix for twelve releases: the 2,248 bytes were not libro's,
+    # they were `toml_parse` of the record — OURS, and removable without any
+    # upstream anything. **An unfalsifiable budget is not a budget**, and this arm
+    # printed a number nobody could fail while a peer burned 883 MB/hour through
+    # it.
+    #
+    # Measured: 2,332 B/op before, 84 B/op after — a 96% cut, and the remainder is
+    # genuinely the audit chain (coalesced by 1.7.1, measured separately below).
+    # The gate is 256: far enough above 84 to absorb a libro point release,
+    # far enough below 2,332 that restoring the `toml_parse` FAILS this bench
+    # rather than quietly re-arming the leak. Verified both ways for this release.
     report_op("player_auth_load (derive keypair + verify signature)",
-              auth_ns, auth_by, NAUTH, AUTH_BUDGET_US, 999999);
+              auth_ns, auth_by, NAUTH, AUTH_BUDGET_US, 256);
 
     # --- The audit rollup window (1.7.1). ===
     #

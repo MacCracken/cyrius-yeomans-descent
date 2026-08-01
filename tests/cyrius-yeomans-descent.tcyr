@@ -6359,6 +6359,7 @@ fn main() {
     test_mechanics_and_instruments();
     test_boot_sequence();
     test_unusual_session_states();
+    test_login_parse();
 
 
     return assert_summary();
@@ -8935,6 +8936,120 @@ fn test_unusual_session_states(): i64 {
     # the budget to `session_persistable` and left the deadline on SS_AUTHED.
     assert(_src_count("src/session.cyr", "session_persistable(s) == 0") >= 1,
            "the idle deadline keys on the same predicate as AI's reap budget");
+    return 0;
+}
+
+# A canonical record in exactly the shape `_build_record` writes: `[player]` on
+# line 1, quoted strings from _fstr/_fhex, BARE integers from _fint.
+fn _bb_record(): i64 {
+    return "[player]\nschema = 1\nname = \"Scan\"\nsalt = \"b755354829f315d1e93f044ea507c5f3\"\nclass = \"pikeman\"\nroom = \"hub.gate\"\nhp = 24\nmaxhp = 30\nac = -3\ndmod = 0\ncreated = 1785543497\nlast_login = 1785569192\ninv = \"scrip,cell\"\n";
+}
+
+# === 1.7.20 — the login parse (gate re-run #4, item BB / item U's second arm). ===
+fn test_login_parse(): i64 {
+    test_group("login-parse");
+    var rec = _bb_record();
+    var rn = _slen(rec);
+
+    # --- `_scan_canonical` vouches for the real shape, and only for it.
+    assert_eq(_scan_canonical(rec, rn), 1, "the canonical record shape is vouched for");
+    assert_eq(_scan_canonical("x = 1\n", 6), 0, "...but not one missing the [player] header");
+    assert_eq(_scan_canonical("[player]\n  hp = 1\n", 18), 0, "...nor an indented key");
+    assert_eq(_scan_canonical("[player]\nhp=1\n", 14), 0, "...nor a key with no spaces round the '='");
+    assert_eq(_scan_canonical("[player]\nhp = 1\r\n", 17), 0, "...nor CRLF endings");
+    assert_eq(_scan_canonical("[player]\n# a comment\n", 21), 0, "...nor a comment");
+    assert_eq(_scan_canonical("[player]\nhp = 1\n[other]\n", 24), 0, "...nor a second section");
+    assert_eq(_scan_canonical("[player]\nname = \"a\nb\"\n", 22), 0, "...nor a newline inside a value");
+    assert_eq(_scan_canonical("[player]\nhp = 1x\n", 17), 0, "...nor a bare value that is not an integer");
+    assert_eq(_scan_canonical("[player]\nhp = \n", 15), 0, "...nor an empty bare value");
+    assert_eq(_scan_canonical("[player]\nhp = 1", 15), 0, "...nor a record whose last line is unterminated");
+
+    # --- THE ASSERTION BB EXISTS FOR: the two readers agree on EVERY field.
+    #
+    # This is the whole safety argument. The scanner is sole reader on the fast
+    # path, so any field it reads differently from bayan — or fails to find at
+    # all — is a silently wrong character. 1.7.19's BE is what that looks like
+    # when it happens: a value quietly replaced by its default.
+    var secs = toml_parse(str_new(rec, rn));
+    assert(vec_len(secs) > 0, "the fixture parses under bayan too");
+    var pairs = toml_section_pairs(vec_get(secs, 0));
+
+    var rvb = _rv();
+    _rv_set_bayan(rvb, pairs);
+    var ib_schema = _rv_int(rvb, "schema", 0 - 99);
+    var ib_hp     = _rv_int(rvb, "hp", 0 - 99);
+    var ib_maxhp  = _rv_int(rvb, "maxhp", 0 - 99);
+    var ib_ac     = _rv_int(rvb, "ac", 0 - 99);
+    var ib_dmod   = _rv_int(rvb, "dmod", 0 - 99);
+    var ib_created = _rv_int(rvb, "created", 0 - 99);
+    var ib_last    = _rv_int(rvb, "last_login", 0 - 99);
+    var ib_absent  = _rv_int(rvb, "nosuchfield", 4242);
+    var bl[8];
+    var b_name = _rv_raw(rvb, "name", &bl);   var b_namelen = load64(&bl);
+    var b_room = _rv_raw(rvb, "room", &bl);   var b_roomlen = load64(&bl);
+    var b_inv  = _rv_raw(rvb, "inv", &bl);    var b_invlen  = load64(&bl);
+    var b_cls  = _rv_raw(rvb, "class", &bl);  var b_clslen  = load64(&bl);
+    var b_schema_v = _rv_schema(rvb);
+
+    var rvs = _rv();
+    _rv_set_scan(rvs, rec, rn);
+    assert_eq(_rv_int(rvs, "schema", 0 - 99), ib_schema, "scan and bayan agree: schema");
+    assert_eq(_rv_int(rvs, "hp", 0 - 99),     ib_hp,     "scan and bayan agree: hp");
+    assert_eq(_rv_int(rvs, "maxhp", 0 - 99),  ib_maxhp,  "scan and bayan agree: maxhp");
+    assert_eq(_rv_int(rvs, "ac", 0 - 99),     ib_ac,     "scan and bayan agree: a NEGATIVE value");
+    assert_eq(_rv_int(rvs, "dmod", 0 - 99),   ib_dmod,   "scan and bayan agree: zero is not the default");
+    assert_eq(_rv_int(rvs, "nosuchfield", 4242), ib_absent, "scan and bayan agree: an absent key takes the default");
+    assert_eq(_rv_schema(rvs), b_schema_v, "scan and bayan agree: the schema stamp");
+
+    # The BE interaction, and it is not hypothetical: `created` and `last_login`
+    # are genuine epoch seconds, ~1,780x the ordinal bound 1.7.17 briefly put
+    # inside `parse_uint`. A SECOND reader for the same field is a second chance
+    # to make that mistake, so both are pinned by value, not just by agreement.
+    assert_eq(_rv_int(rvs, "created", 0 - 99), ib_created, "scan and bayan agree: created");
+    assert_eq(_rv_int(rvs, "created", 0 - 99), 1785543497, "...and it is the real epoch second, not a default");
+    assert_eq(_rv_int(rvs, "last_login", 0 - 99), ib_last, "scan and bayan agree: last_login");
+    assert_eq(_rv_int(rvs, "last_login", 0 - 99), 1785569192, "...also a real epoch second");
+
+    var sl[8];
+    var s_name = _rv_raw(rvs, "name", &sl);
+    assert_eq(load64(&sl), b_namelen, "scan and bayan agree: name length");
+    assert_eq(_bytes_eq(s_name, b_name, b_namelen), 1, "...and name bytes");
+    var s_room = _rv_raw(rvs, "room", &sl);
+    assert_eq(load64(&sl), b_roomlen, "scan and bayan agree: room length");
+    assert_eq(_bytes_eq(s_room, b_room, b_roomlen), 1, "...and room bytes");
+    var s_inv = _rv_raw(rvs, "inv", &sl);
+    assert_eq(load64(&sl), b_invlen, "scan and bayan agree: inv length");
+    assert_eq(_bytes_eq(s_inv, b_inv, b_invlen), 1, "...and inv bytes");
+    var s_cls = _rv_raw(rvs, "class", &sl);
+    assert_eq(load64(&sl), b_clslen, "scan and bayan agree: class length");
+    assert_eq(_bytes_eq(s_cls, b_cls, b_clslen), 1, "...and class bytes");
+    assert_eq(_rv_raw(rvs, "nosuchfield", &sl), 0, "scan reports an absent field as absent");
+
+    # A quoted field must not be found by the bare reader, or vice versa —
+    # otherwise `_rv_raw`'s two-step lookup could return a value with the quotes
+    # still on it.
+    assert_eq(_scan_kv_bare(rec, rn, "name", &sl), 0, "the bare reader declines a quoted value");
+    assert_eq(_scan_kv(rec, rn, "hp", &sl), 0, "the quoted reader declines a bare value");
+    assert(_scan_kv(rec, rn, "name", &sl) != 0, "...and each finds its own shape");
+    assert(_scan_kv_bare(rec, rn, "hp", &sl) != 0, "...both ways");
+
+    # The control byte guard (M11-C) reads raw bytes now, so it must still see
+    # what it used to see through a bayan str.
+    assert_eq(_rv_ctrl(rvs, "name"), 0, "a clean name carries no control byte");
+    assert_eq(_rv_ctrl(rvs, "nosuchfield"), 0, "an absent field is clean, not suspicious");
+
+    # --- The fast path is gated on AUTHENTICATION, not merely on shape. A
+    # record's canonical form must never be what decides whether to parse it, or
+    # 1.7.8's whole auth-order argument is undone from the other side.
+    assert(_src_count("src/persist.cyr", "if (authed == 1) {") >= 1,
+           "the scan path is entered only after the passphrase has proved itself");
+
+    # --- The pre-auth reader stayed strict. `_kv_at` is what an unauthenticated
+    # peer reaches (1.7.8's salt/pubkey scan), and it must still refuse anything
+    # but a quoted value.
+    var pl[8];
+    assert_eq(_kv_at("salt = 41\n", 10, "salt", 4, &pl), 0,
+              "the PRE-AUTH reader still refuses a bare value — 1.7.20 changed nothing a peer can reach");
     return 0;
 }
 

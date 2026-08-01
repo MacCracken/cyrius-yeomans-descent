@@ -3,15 +3,50 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.19 — **gate re-run #4 returned DO-NOT-CLOSE**
-> (0/3/3/3, items AZ-BH); **eight of its nine are closed**. Only **BB** is left,
-> and it is 1.7.20; then gate re-run #5)
+> **Last refresh**: 2026-07-31 (v1.7.20 — **every finding from gate re-run #4 is
+> closed (AZ-BH)**. Next is gate re-run #5)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.20** — 2026-07-31. **1476 assertions**; `cyrius audit` exits 0; 6/6 benches;
+**2/2 fuzz targets**; both targets build.
+
+**The login parse** — the last item of gate re-run #4, and with it **every
+finding from that run (AZ-BH) is closed**.
+
+**Every successful login permanently burned 2,248 bytes.** 1.7.8 (item U) removed
+the *pre-authentication* parse; a *right* passphrase fell through that early
+return into the same untouched `toml_parse`. That is 883 MB/hour from one
+sequential socket, with unlimited registration by default and no login rate limit
+anywhere. **Measured 2,332 → 84 bytes per login, a 96% cut.**
+
+**The scanner may now be sole reader, which 1.7.8 was careful to forbid** — the
+difference is `_scan_canonical`, which removes the premise instead of policing
+it: a record is vouched for only if every line has exactly one possible parse.
+Anything else falls through to bayan unchanged, and the pre-auth reader stayed
+quoted-only, so nothing an unauthenticated peer reaches moved.
+
+**Lessons carried, added this release:**
+
+- ***An unfalsifiable budget is not a budget.*** `bench_persist`'s login arm
+  printed `max 999999` for eleven releases and reported PASS while a peer burned
+  883 MB/hour through it. Same failure as 1.7.17's item AW, one release later, in
+  a bench AW's own sweep had already read. It now gates at 256 and was verified to
+  FAIL at 2,332 B/op with the fix disabled.
+- *A justification can outlive its truth and take the instrument with it.* The
+  `999999` had a written rationale — "dominated by the same libro/str allocations
+  as the save" — and the rationale was wrong about whose allocation it was.
+  **A comment that explains a gap reads like a closed question**, so nobody
+  re-derived it.
+- *When one reader becomes two, assert they agree — do not reason that they do.*
+  `_fint` writes integers UNQUOTED and the scanner was quoted-only; a
+  canonical-form test that knew one shape would have made every integer read as
+  its default, which is 1.7.19's BE exactly. The differential test now compares
+  every field across both backends.
 
 **1.7.19** — 2026-07-31. **1436 assertions**; `cyrius audit` exits 0; 6/6 benches;
 **2/2 fuzz targets**; both targets build.

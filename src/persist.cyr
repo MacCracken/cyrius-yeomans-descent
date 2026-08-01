@@ -1738,10 +1738,11 @@ fn _find_sig_offset(buf, n): i64 {
 # two parsers gets built, and `player_auth_load` closes that hole a second way by
 # re-checking both values against the parsed record once it does parse.
 
-# Match `<key> = "<value>"` at `p`. Returns the value pointer (length via out_len)
-# or 0. `rest` bounds every read to the slurp buffer.
-fn _kv_at(p, rest, key, klen, out_len): i64 {
-    if (rest < klen + 5) { return 0; }
+# Match `<key> = ` at `p` and return the offset of the value (past the space),
+# or 0. ONE implementation of the key match, shared by the quoted and bare
+# readers below so they cannot drift about what a key is.
+fn _kv_key_at(p, rest, key, klen): i64 {
+    if (rest < klen + 4) { return 0; }
     var k = 0;
     while (k < klen) {
         if ((load8(p + k) & 0xFF) != (load8(key + k) & 0xFF)) { return 0; }
@@ -1751,15 +1752,65 @@ fn _kv_at(p, rest, key, klen, out_len): i64 {
     if ((load8(q) & 0xFF) != 32)     { return 0; }   # ' '
     if ((load8(q + 1) & 0xFF) != 61) { return 0; }   # '='
     if ((load8(q + 2) & 0xFF) != 32) { return 0; }   # ' '
-    if ((load8(q + 3) & 0xFF) != 34) { return 0; }   # '"'
-    var v = q + 4;
-    var lim = rest - (klen + 4);
+    return klen + 3;
+}
+
+# Match `<key> = "<value>"` at `p`. Returns the value pointer (length via out_len)
+# or 0. `rest` bounds every read to the slurp buffer.
+#
+# QUOTED ONLY, and deliberately so: this is the reader the PRE-AUTHENTICATION
+# salt/pubkey scan uses (1.7.8), and `_fhex` has only ever written them quoted.
+# Keeping it strict means 1.7.20 changed nothing an unauthenticated peer can
+# reach.
+fn _kv_at(p, rest, key, klen, out_len): i64 {
+    var off = _kv_key_at(p, rest, key, klen);
+    if (off == 0) { return 0; }
+    if (rest < off + 2) { return 0; }
+    if ((load8(p + off) & 0xFF) != 34) { return 0; }   # '"'
+    var v = p + off + 1;
+    var lim = rest - (off + 1);
     var m = 0;
     while (m < lim) {
         var c = load8(v + m) & 0xFF;
         if (c == 34) { store64(out_len, m); return v; }   # closing quote
         if (c == 10) { return 0; }                        # newline first — malformed
         m = m + 1;
+    }
+    return 0;
+}
+
+# 1.7.20 (BB) — match `<key> = <bare>` to end of line.
+#
+# `_fint` writes integers UNQUOTED (`hp = 0`, `created = 1785543497`), so a
+# quoted-only scanner finds no integer field at all. That distinction is the
+# whole reason `_scan_canonical` had to learn both shapes rather than assuming
+# one: a scanner that silently missed every integer would have substituted every
+# default, which is precisely how 1.7.19's BE destroyed `created`.
+fn _kv_bare_at(p, rest, key, klen, out_len): i64 {
+    var off = _kv_key_at(p, rest, key, klen);
+    if (off == 0) { return 0; }
+    if (rest < off + 1) { return 0; }
+    if ((load8(p + off) & 0xFF) == 34) { return 0; }   # quoted — not our shape
+    var v = p + off;
+    var lim = rest - off;
+    var m = 0;
+    while (m < lim) {
+        if ((load8(v + m) & 0xFF) == 10) { store64(out_len, m); return v; }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# The bare-value counterpart of `_scan_kv`.
+fn _scan_kv_bare(buf, n, key, out_len): i64 {
+    var klen = strlen(key);
+    var i = 0;
+    while (i < n) {
+        if ((load8(buf + i) & 0xFF) == 10) {          # '\n'
+            var r = _kv_bare_at(buf + i + 1, n - (i + 1), key, klen, out_len);
+            if (r != 0) { return r; }
+        }
+        i = i + 1;
     }
     return 0;
 }
@@ -1777,6 +1828,202 @@ fn _scan_kv(buf, n, key, out_len): i64 {
         i = i + 1;
     }
     return 0;
+}
+
+# === 1.7.20 (BB) — reading an authenticated record without allocating. ===
+#
+# Item U's SECOND ARM. 1.7.8 removed the ~2,248-byte `toml_parse` from the
+# WRONG-passphrase path by scanning `salt` and `pubkey` out of the raw buffer and
+# returning before the parse. A RIGHT passphrase falls straight through that
+# early return into the same untouched `toml_parse` and pays the full cost — on
+# every login, forever, because the bump allocator has no free and `alloc_reset`
+# is called nowhere in `src/`.
+#
+# Measured twice independently by gate re-run #4: 2,265 B/login across 15,000 and
+# 19,167 logins, dead linear, no plateau. That is 883 MB/hour from ONE sequential
+# socket, at the server's own ed25519 ceiling rather than the client's — and
+# registration is unlimited by default with no login rate limit anywhere.
+#
+# THE SHAPE OF THE FIX. The obvious version — a second copy of the field-restore
+# block that reads from the scanner — is exactly the defect class this project
+# keeps finding, and it would put the two copies in the one function where they
+# must never disagree. Instead there is ONE restore path reading through a view
+# that is either bayan-backed or scanner-backed.
+#
+# WHY THE SCANNER MAY BE SOLE AUTHORITY HERE, when 1.7.8 was careful to say it
+# must never be. 1.7.8's fast path read two fields raw while every other field
+# came from bayan, so the two readers could be made to disagree — hence the
+# differential check. `_scan_canonical` below removes the premise instead of
+# policing it: it accepts the record only if EVERY line is canonical
+# `key = "value"`, which has exactly one parse, so there is no second view to
+# differ from. Anything it cannot account for falls through to bayan unchanged.
+#
+# The fast path remains an OPTIMISATION, NEVER AN AUTHORITY: it runs only after
+# the passphrase has proved itself, and the signature still gates every restore.
+enum RvConst {
+    RV_MODE  = 0;    # RV_BAYAN | RV_SCAN
+    RV_PAIRS = 8;    # bayan pairs vec       (RV_BAYAN)
+    RV_BUF   = 16;   # raw slurp buffer      (RV_SCAN)
+    RV_N     = 24;   # raw length            (RV_SCAN)
+    RV_SIZE  = 32;
+}
+enum RvMode { RV_BAYAN = 0; RV_SCAN = 1; }
+
+var g_rv = 0;
+
+# The single view instance. One login runs at a time on this single-threaded
+# loop (ADR 0003) and the view never outlives the call, so one is enough.
+fn _rv(): i64 {
+    if (g_rv == 0) { g_rv = alloc(RV_SIZE); }
+    return g_rv;
+}
+fn _rv_set_bayan(rv, pairs): i64 {
+    store64(rv + RV_MODE, RV_BAYAN);
+    store64(rv + RV_PAIRS, pairs);
+    return 0;
+}
+fn _rv_set_scan(rv, buf, n): i64 {
+    store64(rv + RV_MODE, RV_SCAN);
+    store64(rv + RV_BUF, buf);
+    store64(rv + RV_N, n);
+    return 0;
+}
+
+# A field's bytes, length via out_len. Returns 0 when the field is absent —
+# the same "absent" every caller below already understands.
+fn _rv_raw(rv, key, out_len): i64 {
+    if (load64(rv + RV_MODE) == RV_SCAN) {
+        var b = load64(rv + RV_BUF);
+        var nn = load64(rv + RV_N);
+        # Strings first, then bare integers. `_build_record` writes each field in
+        # exactly one of the two shapes, so at most one can match — and
+        # `_scan_canonical` has already refused any record where a line is
+        # neither.
+        var q = _scan_kv(b, nn, key, out_len);
+        if (q != 0) { return q; }
+        return _scan_kv_bare(b, nn, key, out_len);
+    }
+    var v = toml_get(load64(rv + RV_PAIRS), key);
+    if (v == 0) { return 0; }
+    store64(out_len, str_len(v));
+    return str_data(v);
+}
+
+# A field as an integer, or `def`. Both modes route through `_int_from_bytes`
+# (mob.cyr), so the two readers cannot disagree about what a value means.
+fn _rv_int(rv, key, def): i64 {
+    var vl[8];
+    var p = _rv_raw(rv, key, &vl);
+    if (p == 0) { return def; }
+    return _int_from_bytes(p, load64(&vl), def);
+}
+
+# M11-A — the schema stamp, pinned to v1 when absent rather than to
+# SCHEMA_VERSION. Mirrors `_record_schema` for the view; both call the one
+# numeric core, so a record cannot be v1 to one reader and v2 to the other.
+fn _rv_schema(rv): i64 {
+    var v = _rv_int(rv, "schema", SCHEMA_V1);
+    if (v < SCHEMA_V1) { return SCHEMA_V1; }
+    return v;
+}
+
+# The M11-C signed-prefix guard, against raw bytes rather than a bayan str.
+fn _rv_ctrl(rv, key): i64 {
+    var cl[8];
+    var p = _rv_raw(rv, key, &cl);
+    if (p == 0) { return 0; }
+    var n = load64(&cl);
+    var i = 0;
+    while (i < n) {
+        if ((load8(p + i) & 0xFF) < 32) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Is this record EXACTLY the canonical shape `_build_record` writes — `[player]`
+# on line 1, then nothing but `key = "value"` lines?
+#
+# This is the whole safety argument for letting the scanner be sole reader. It is
+# not "does the scanner find what it is looking for" (which would let a shape it
+# SKIPS carry a field bayan would have found — silently substituting a default,
+# which is precisely how 1.7.19's BE destroyed `created`). It is the stronger
+# claim: every byte of the record is accounted for by a line the scanner reads
+# the same way bayan does.
+#
+# Keys are newline-preceded throughout, which is `_scan_kv`'s own precondition:
+# the header ends in \n and every accepted line ends in \n.
+#
+# Deliberately strict. A record with CRLF endings, an indent, a bare key, a
+# comment, a second section, or a value containing a quote is REFUSED here and
+# loads through bayan exactly as it does today. Strictness costs a parse on a
+# record no `_fhex`/`_fint`/`_fstr` has ever produced; looseness would cost
+# correctness.
+fn _scan_canonical(buf, n): i64 {
+    if (n < 9) { return 0; }
+    if (_bytes_eq(buf, "[player]\n", 9) == 0) { return 0; }
+    var i = 9;
+    var ok = 1;
+    while (i < n) {
+        # --- key: one or more of [a-z_] , terminated by ' '
+        var ks = i;
+        var scanning = 1;
+        while (scanning == 1) {
+            if (i >= n) { ok = 0; scanning = 0; continue; }
+            var c = load8(buf + i) & 0xFF;
+            if (c == 32) { scanning = 0; continue; }
+            if (c == 95) { i = i + 1; continue; }        # '_'
+            if (c < 97)  { ok = 0; scanning = 0; continue; }
+            if (c > 122) { ok = 0; scanning = 0; continue; }
+            i = i + 1;
+        }
+        if (ok == 0) { return 0; }
+        if (i == ks) { return 0; }                       # empty key
+        # --- separator: ` = "`  (exactly what _fhex/_fint/_fstr emit)
+        if (i + 3 >= n) { return 0; }
+        if ((load8(buf + i) & 0xFF) != 32)     { return 0; }
+        if ((load8(buf + i + 1) & 0xFF) != 61) { return 0; }   # '='
+        if ((load8(buf + i + 2) & 0xFF) != 32) { return 0; }
+        i = i + 3;
+        # --- value: EITHER "quoted" (_fstr / _fhex) OR bare to EOL (_fint).
+        # Both shapes are written by this server and both must be accounted for;
+        # a canonical-form test that knew only one would vouch for a record whose
+        # every integer the scanner then failed to find.
+        var closed = 0;
+        if ((load8(buf + i) & 0xFF) == 34) {                   # '"'
+            i = i + 1;
+            var reading = 1;
+            while (reading == 1) {
+                if (i >= n) { reading = 0; continue; }
+                var v = load8(buf + i) & 0xFF;
+                if (v == 34) { closed = 1; i = i + 1; reading = 0; continue; }
+                if (v == 10) { reading = 0; continue; }
+                i = i + 1;
+            }
+        } else {
+            # Bare: digits and an optional leading '-', nothing else. Anything
+            # richer is a shape this server does not write, so it goes to bayan.
+            var vs = i;
+            if ((load8(buf + i) & 0xFF) == 45) { i = i + 1; }  # '-'
+            var digits = 1;
+            while (digits == 1) {
+                if (i >= n) { digits = 0; continue; }
+                var d = load8(buf + i) & 0xFF;
+                if (d == 10) { digits = 0; continue; }
+                if (d < 48) { return 0; }
+                if (d > 57) { return 0; }
+                i = i + 1;
+            }
+            if (i == vs) { return 0; }                          # empty value
+            closed = 1;
+        }
+        if (closed == 0) { return 0; }
+        # --- and the line ends here
+        if (i >= n) { return 0; }
+        if ((load8(buf + i) & 0xFF) != 10) { return 0; }
+        i = i + 1;
+    }
+    return 1;
 }
 
 # 1.7.15 (AN) — index of the class whose stable id is buf[0..len), or -1.
@@ -2116,17 +2363,38 @@ fn player_auth_load(s, pass, passlen): i64 {
         authed = 1;
     }
 
-    # The record is a single [player] section; toml_parse returns a vec of
-    # sections (mirror world.cyr's zone-header read).
-    var secs = toml_parse(str_new(g_persist_slurp, n));
-    if (vec_len(secs) == 0) { return 0 - 2; }
-    var pairs = toml_section_pairs(vec_get(secs, 0));
-    var saltv = toml_get(pairs, "salt");
-    var pkv   = toml_get(pairs, "pubkey");
-    var sigv  = toml_get(pairs, "sig");
-    if (saltv == 0) { return 0 - 2; }
-    if (pkv == 0)   { return 0 - 2; }
-    if (sigv == 0)  { return 0 - 2; }
+    # === 1.7.20 (BB) — an AUTHENTICATED login need not allocate either. ===
+    #
+    # 1.7.8 stopped the wrong-passphrase path here. The right-passphrase path fell
+    # through into the parse below and paid 2,248 bytes of never-reclaimed arena
+    # on every single login — 883 MB/hour from one sequential socket, and there is
+    # no login rate limit anywhere in the tree.
+    #
+    # The scanner may be sole reader ONLY when `_scan_canonical` accounts for the
+    # whole record, which is what makes a second view impossible rather than
+    # merely policed; and only for a caller who has already proved the key. A
+    # record it will not vouch for parses exactly as it does today.
+    var rv = _rv();
+    var scanned = 0;
+    if (authed == 1) {
+        if (_scan_canonical(g_persist_slurp, n) == 1) { scanned = 1; }
+    }
+    if (scanned == 1) {
+        _rv_set_scan(rv, g_persist_slurp, n);
+    } else {
+        # The record is a single [player] section; toml_parse returns a vec of
+        # sections (mirror world.cyr's zone-header read).
+        var secs = toml_parse(str_new(g_persist_slurp, n));
+        if (vec_len(secs) == 0) { return 0 - 2; }
+        _rv_set_bayan(rv, toml_section_pairs(vec_get(secs, 0)));
+    }
+    var saltl[8]; var pkl[8]; var sigl[8];
+    var saltd = _rv_raw(rv, "salt", &saltl);
+    var pkd   = _rv_raw(rv, "pubkey", &pkl);
+    var sigd  = _rv_raw(rv, "sig", &sigl);
+    if (saltd == 0) { return 0 - 2; }
+    if (pkd == 0)   { return 0 - 2; }
+    if (sigd == 0)  { return 0 - 2; }
 
     # NO PARSER DIFFERENTIAL. Two readers now look at one record, and a record
     # they disagree about is a record this server refuses — full stop. Without
@@ -2149,28 +2417,38 @@ fn player_auth_load(s, pass, passlen): i64 {
     # These run BEFORE the differential comparison below, deliberately: they are
     # what bounds its memcmp inside bayan's string. Both sides are then known to
     # be exactly SALT_LEN*2 / PK_LEN*2.
-    if (str_len(saltv) != SALT_LEN * 2) { return 0 - 2; }
-    if (str_len(pkv)   != PK_LEN * 2)   { return 0 - 2; }
-    if (str_len(sigv)  != SIG_LEN * 2)  { return 0 - 2; }
+    if (load64(&saltl) != SALT_LEN * 2) { return 0 - 2; }
+    if (load64(&pkl)   != PK_LEN * 2)   { return 0 - 2; }
+    if (load64(&sigl)  != SIG_LEN * 2)  { return 0 - 2; }
 
     if (fast == 1) {
-        # LOAD-BEARING, and mutation-verified: the SALT comparison. The early-out
-        # above decided "this passphrase belongs to this record" from the raw
-        # scan, and `blk` is committed from the PARSED salt further down. A record
-        # the two readers disagree about would authenticate against one salt and
-        # commit another, so it is refused outright.
-        if (_bytes_eq(str_data(saltv), saltraw, SALT_LEN * 2) == 0) { return 0 - 2; }
-        # Kept, and honestly NOT independently mutation-killable: a pubkey
-        # differential is already fatal, because `filepk` is re-decoded from the
-        # PARSED pubkey below and the signature must verify under it. Retained
-        # because it fails at the cause rather than three steps later as a
-        # "tampered" verdict, and because relying on that subsumption is a fact
-        # about today's ordering rather than an invariant anyone declared.
-        if (_bytes_eq(str_data(pkv), pkraw, PK_LEN * 2) == 0) { return 0 - 2; }
+        # 1.7.20 (BB) — only when the two readers ACTUALLY DIFFER. On the scanned
+        # path `saltd`/`pkd` and `saltraw`/`pkraw` are the same scan of the same
+        # bytes, so this compares a pointer with itself; the differential it
+        # guards against cannot exist there, because `_scan_canonical` refused any
+        # record with a second possible parse. It is still exactly as
+        # load-bearing on the bayan path, which is where it always applied.
+        if (scanned == 0) {
+            # LOAD-BEARING, and mutation-verified: the SALT comparison. The
+            # early-out above decided "this passphrase belongs to this record"
+            # from the raw scan, and `blk` is committed from the PARSED salt
+            # further down. A record the two readers disagree about would
+            # authenticate against one salt and commit another, so it is refused
+            # outright.
+            if (_bytes_eq(saltd, saltraw, SALT_LEN * 2) == 0) { return 0 - 2; }
+            # Kept, and honestly NOT independently mutation-killable: a pubkey
+            # differential is already fatal, because `filepk` is re-decoded from
+            # the PARSED pubkey below and the signature must verify under it.
+            # Retained because it fails at the cause rather than three steps later
+            # as a "tampered" verdict, and because relying on that subsumption is
+            # a fact about today's ordering rather than an invariant anyone
+            # declared.
+            if (_bytes_eq(pkd, pkraw, PK_LEN * 2) == 0) { return 0 - 2; }
+        }
     }
-    if (hex_decode_into(str_data(saltv), str_len(saltv), salt) == 0) { return 0 - 2; }
-    if (hex_decode_into(str_data(pkv), str_len(pkv), filepk) == 0)   { return 0 - 2; }
-    if (hex_decode_into(str_data(sigv), str_len(sigv), filesig) == 0) { return 0 - 2; }
+    if (hex_decode_into(saltd, load64(&saltl), salt) == 0)    { return 0 - 2; }
+    if (hex_decode_into(pkd, load64(&pkl), filepk) == 0)      { return 0 - 2; }
+    if (hex_decode_into(sigd, load64(&sigl), filesig) == 0)   { return 0 - 2; }
 
     # The slow path still owes the authentication the fast path already did. Same
     # conjunction, same order relative to the verify — 1.7.0's reorder is intact;
@@ -2190,9 +2468,9 @@ fn player_auth_load(s, pass, passlen): i64 {
     # ids come from authored CYML), which is why this has never been reachable —
     # but the check has to exist BEFORE 2.0 adds a free-text field, not after.
     # Cheap and unconditional: no legitimate value holds a control byte.
-    if (_has_ctrl(toml_get(pairs, "name")) == 1) { return 0 - 2; }
-    if (_has_ctrl(toml_get(pairs, "room")) == 1) { return 0 - 2; }
-    if (_has_ctrl(toml_get(pairs, "inv")) == 1)  { return 0 - 2; }
+    if (_rv_ctrl(rv, "name") == 1) { return 0 - 2; }
+    if (_rv_ctrl(rv, "room") == 1) { return 0 - 2; }
+    if (_rv_ctrl(rv, "inv") == 1)  { return 0 - 2; }
 
     # === Authentication BEFORE integrity (1.7.0), and before ALLOCATION (1.7.8). ===
     #
@@ -2266,7 +2544,7 @@ fn player_auth_load(s, pass, passlen): i64 {
     # attacked, and wrote a SEV_SECURITY entry into the audit chain for what is
     # an operator versioning event. It still refuses the session: a downgraded
     # server must never half-load a record whose fields it does not understand.
-    if (_record_schema(pairs) > g_schema_max) {
+    if (_rv_schema(rv) > g_schema_max) {
         return PL_ERR_SCHEMA;
     }
 
@@ -2277,7 +2555,7 @@ fn player_auth_load(s, pass, passlen): i64 {
     # point — that is scratch the next login overwrites and session_free wipes;
     # the salt and the created stamp are what make the block authoritative.)
     memcpy(blk, salt, SALT_LEN);
-    store64(blk + IDENT_CREATED, toml_int(pairs, "created", get_epoch_secs()));
+    store64(blk + IDENT_CREATED, _rv_int(rv, "created", get_epoch_secs()));
 
     # Restore state. SECURITY (0.9.0): the Ed25519 signature proves the record's
     # AUTHOR, not its field values — a player owns their key and can re-sign a
@@ -2293,18 +2571,19 @@ fn player_auth_load(s, pass, passlen): i64 {
     # path — a player owns their signing key (ADR 0004), so `class` is an
     # attacker-chosen integer and feeds `g_classes + cls * CL_SIZE` pointer math.
     var cls = 0 - 1;
-    var clsv = toml_get(pairs, "class");
-    if (clsv != 0) {
-        if (str_len(clsv) > 0) { cls = _class_index_by_id(str_data(clsv), str_len(clsv)); }
+    var clsl[8];
+    var clsd = _rv_raw(rv, "class", &clsl);
+    if (clsd != 0) {
+        if (load64(&clsl) > 0) { cls = _class_index_by_id(clsd, load64(&clsl)); }
         if (cls < 0) {
-            cls = toml_int(pairs, "class", 0 - 1);     # legacy positional index
+            cls = _rv_int(rv, "class", 0 - 1);         # legacy positional index
             if (cls < 0) { cls = 0 - 1; }
             if (cls >= g_class_count) { cls = 0 - 1; }   # out-of-range → classless, not OOB
         }
     }
     store64(s + SS_CLASS, cls);
-    store64(s + SS_HP,    _clamp(toml_int(pairs, "hp", PC_HP), 0, 1000000));
-    store64(s + SS_MAXHP, _clamp(toml_int(pairs, "maxhp", PC_HP), 1, 1000000));
+    store64(s + SS_HP,    _clamp(_rv_int(rv, "hp", PC_HP), 0, 1000000));
+    store64(s + SS_MAXHP, _clamp(_rv_int(rv, "maxhp", PC_HP), 1, 1000000));
     # H3 — hp and maxhp were each clamped to an absolute range but never
     # against EACH OTHER, and nothing downstream ever pulls hp back down:
     # classes_upkeep only regenerates while `hp < max`, ability_heal caps on the
@@ -2317,30 +2596,32 @@ fn player_auth_load(s, pass, passlen): i64 {
     # too, not just per-field ranges. Load-side only; no schema change.
     var mh = load64(s + SS_MAXHP);
     if (load64(s + SS_HP) > mh) { store64(s + SS_HP, mh); }
-    store64(s + SS_AC,    _clamp(toml_int(pairs, "ac", PC_AC), 0 - 100, 100));
-    store64(s + SS_HIT,   _clamp(toml_int(pairs, "hit", PC_HIT), 0 - 100, 1000));
-    store64(s + SS_NDICE, _clamp(toml_int(pairs, "ndice", PC_NDICE), 1, 100));
-    store64(s + SS_DSIZE, _clamp(toml_int(pairs, "dsize", PC_DSIZE), 1, 1000));
-    store64(s + SS_DMOD,  _clamp(toml_int(pairs, "dmod", PC_DMOD), 0 - 1000, 10000));
-    store64(s + SS_STR, _clamp(toml_int(pairs, "str", 10), 1, 1000));
-    store64(s + SS_DEX, _clamp(toml_int(pairs, "dex", 10), 1, 1000));
-    store64(s + SS_CON, _clamp(toml_int(pairs, "con", 10), 1, 1000));
-    store64(s + SS_TEC, _clamp(toml_int(pairs, "tec", 10), 1, 1000));
-    store64(s + SS_ENERGY,    _clamp(toml_int(pairs, "energy", 0), 0, 1000000));
-    store64(s + SS_MAXENERGY, _clamp(toml_int(pairs, "maxenergy", 0), 0, 1000000));
+    store64(s + SS_AC,    _clamp(_rv_int(rv, "ac", PC_AC), 0 - 100, 100));
+    store64(s + SS_HIT,   _clamp(_rv_int(rv, "hit", PC_HIT), 0 - 100, 1000));
+    store64(s + SS_NDICE, _clamp(_rv_int(rv, "ndice", PC_NDICE), 1, 100));
+    store64(s + SS_DSIZE, _clamp(_rv_int(rv, "dsize", PC_DSIZE), 1, 1000));
+    store64(s + SS_DMOD,  _clamp(_rv_int(rv, "dmod", PC_DMOD), 0 - 1000, 10000));
+    store64(s + SS_STR, _clamp(_rv_int(rv, "str", 10), 1, 1000));
+    store64(s + SS_DEX, _clamp(_rv_int(rv, "dex", 10), 1, 1000));
+    store64(s + SS_CON, _clamp(_rv_int(rv, "con", 10), 1, 1000));
+    store64(s + SS_TEC, _clamp(_rv_int(rv, "tec", 10), 1, 1000));
+    store64(s + SS_ENERGY,    _clamp(_rv_int(rv, "energy", 0), 0, 1000000));
+    store64(s + SS_MAXENERGY, _clamp(_rv_int(rv, "maxenergy", 0), 0, 1000000));
     store64(s + SS_TARGET, 0);
 
-    var roomv = toml_get(pairs, "room");
+    var rooml[8];
+    var roomd = _rv_raw(rv, "room", &rooml);
     var ridx = 0 - 1;
-    if (roomv != 0) {
-        if (str_len(roomv) > 0) { ridx = room_index_by_id(str_data(roomv), str_len(roomv)); }
+    if (roomd != 0) {
+        if (load64(&rooml) > 0) { ridx = room_index_by_id(roomd, load64(&rooml)); }
     }
     if (ridx < 0) { ridx = world_start_room(); }
     store64(s + SS_ROOM, ridx);
 
-    var invv = toml_get(pairs, "inv");
-    if (invv != 0) {
-        var lost = _restore_inv(s, str_data(invv), str_len(invv));
+    var invl[8];
+    var invd = _rv_raw(rv, "inv", &invl);
+    if (invd != 0) {
+        var lost = _restore_inv(s, invd, load64(&invl));
         # 1.7.15 (AJ) — an inventory that shrank on load is a fact an operator
         # needs, and it is about to be made permanent by the next save. SEV_WARNING
         # rather than SEV_INFO: this is data leaving the world, not a routine load.
@@ -2350,7 +2631,7 @@ fn player_auth_load(s, pass, passlen): i64 {
         }
     }
 
-    g_loaded_last_login = toml_int(pairs, "last_login", 0);   # 0.8.1 greeting
+    g_loaded_last_login = _rv_int(rv, "last_login", 0);   # 0.8.1 greeting
     store64(s + SS_AUTHED, 1);
     store64(s + SS_SAVE_DIRTY, 0);
     audit_keyed(AK_LOGIN_OK, SEV_INFO, "login.ok", nm, nl, clock_now_ms());
