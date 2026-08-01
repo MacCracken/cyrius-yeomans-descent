@@ -63,8 +63,11 @@ enum PaCap {
     NORM_CAP   = 4096;
     PA_MAX_TOKENS = 64;
     # 1.7.17 (AR) — the largest ordinal `N.X` will accept. Far above anything the
-    # game can present (MAX_INV is 100) and far below where i64 arithmetic wraps,
-    # so the check costs nothing real and closes the wrap.
+    # game can present (MAX_INV is 100).
+    #
+    # 1.7.18 (BE) — this is an ORDINAL bound and it is enforced in `qual_parse`,
+    # the only caller that has an ordinal. It was briefly enforced inside
+    # `parse_uint` itself, which is shared with `toml_int`; see the note there.
     PA_ORDINAL_MAX = 1000000;
 }
 
@@ -645,27 +648,44 @@ fn is_word_all(buf, len): i64 {
 }
 
 # Parse buf[0..len) as a positive integer if every byte is a digit.
-# Returns the value (>= 0), or -1 if empty or any byte is non-digit.
+# Returns the value (>= 0), or -1 if empty, any byte is non-digit, or the value
+# does not fit in an i64.
+#
+# THIS FUNCTION HAS TWO CALLERS AND THEY HAVE DIFFERENT DOMAINS. `qual_parse`
+# ([`parser.cyr`], ordinals) and `toml_int` (`mob.cyr:174,178`, every integer in
+# every zone header, class entry and save record). Anything domain-specific
+# belongs at the caller; this function owns exactly one thing — the arithmetic.
+#
+# 1.7.17 (AR) REFUSED rather than wrapped, which was right: `v * 10` on an i64
+# overflows silently, so a 20-digit ordinal wrapped to some small positive number
+# and `N.X` resolved to a REAL object — a player typing
+# `get 18446744073709551617.sword` got whichever sword the wrap landed on.
+#
+# 1.7.18 (BE) — but AR spent an ORDINAL bound (1e6) to buy it, HERE, in the shared
+# reader. `toml_int` reads -1 as "unparseable" and substitutes its caller's
+# DEFAULT, so every authored or persisted integer above 1e6 was silently
+# discarded and replaced. The worst of it: `created` is read with a default of
+# `get_epoch_secs()`, so every player's creation date was overwritten with the
+# login moment on every login and written straight back — and epoch seconds are
+# ~1,780x the bound. The bound now lives in `qual_parse` where the ordinal is,
+# and the wrap is closed here by exact arithmetic instead.
 fn parse_uint(buf, len): i64 {
     if (len <= 0) { return 0 - 1; }
     var v = 0;
     var i = 0;
+    # 9223372036854775807 / 10 = 922337203685477580. Any `v` strictly above that
+    # overflows on the next `* 10`; at exactly that value the product is
+    # ...5800, leaving room for a final digit of at most 7. Both arms are
+    # needed — `patra.cyr:3692` uses the same cutoff but omits the second, which
+    # admits a two-past-max result on a trailing 8 or 9.
+    var limit = 922337203685477580;
     while (i < len) {
         var c = load8(buf + i) & 0xFF;
         if (c < 48) { return 0 - 1; }
         if (c > 57) { return 0 - 1; }
+        if (v > limit) { return 0 - 1; }
+        if (v == limit) { if ((c - 48) > 7) { return 0 - 1; } }
         v = v * 10 + (c - 48);
-        # 1.7.17 (AR) — REFUSE rather than wrap. `v * 10` on an i64 overflows
-        # silently, so a 20-digit ordinal wrapped to some small positive number
-        # and `N.X` then resolved to a REAL object — a player typing
-        # `get 18446744073709551617.sword` got whichever sword the wrap landed on.
-        #
-        # Bailing at a domain bound rather than doing exact overflow arithmetic:
-        # this is an ORDINAL, "the Nth thing you can see", and nothing in this game
-        # can present a million of anything (MAX_INV is 100). Anything above the
-        # bound is not a number that lost precision, it is not an ordinal at all,
-        # and -1 is what the caller already understands as "not a qualifier".
-        if (v > PA_ORDINAL_MAX) { return 0 - 1; }
         i = i + 1;
     }
     return v;
@@ -718,6 +738,13 @@ fn qual_parse(pa, ti, out_kind, out_n, out_ptr, out_len): i64 {
     }
 
     var nv = parse_uint(p, dot);
+    # 1.7.18 (BE) — the ORDINAL domain bound, at the only caller that has an
+    # ordinal. Nothing in this game can present a million of anything (MAX_INV is
+    # 100), so a prefix above the bound is not a number that lost precision — it
+    # is not an ordinal at all. Falling through to QUAL_NONE (the whole token as
+    # a noun, which then matches nothing) is byte-for-byte what 1.7.17 produced
+    # for the same input; the only thing that moved is where the bound lives.
+    if (nv > PA_ORDINAL_MAX) { nv = 0 - 1; }
     if (nv >= 1) {
         store64(out_kind, QUAL_NTH);
         store64(out_n, nv);

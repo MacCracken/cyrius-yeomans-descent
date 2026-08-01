@@ -1691,70 +1691,102 @@ fn cmd_serve(port): i64 {
     signal_ignore(SIGPIPE);
     apply_idle_env();
     obs_init();
-    # Load the starter zone. A failure is non-fatal — the server still
-    # runs, with the verbs answering their no-zone placeholders.
+    # Load the starter zone.
+    #
+    # === 1.7.18 (BA) — a REJECTED ROOM TABLE IS FATAL, and this arm is now the
+    #     first thing the function does with `wl`, not the fallthrough. ===
+    #
+    # This used to print "running roomless" and carry on, with the ENTIRE object /
+    # mob / spawn block nested inside the success arm. That nesting is what made it
+    # catastrophic rather than merely useless: `world_load_objs` below was never
+    # CALLED on this path, so `g_obj_tpl_count` stayed 0 — and that is byte-for-byte
+    # the state AJ (1.7.15) declared unsurvivable one arm down. Every saved
+    # inventory id then fails to resolve, `_restore_inv` drops the lot, and
+    # `drop_session` writes the emptied inventory back, signed and unrepairable
+    # (ADR 0004).
+    #
+    # AJ's guard is keyed on `world_load_objs`'s RETURN CODE, which is correct and
+    # which is exactly why it could not fire here: a guard on the return value of a
+    # function that is never called is unreachable. **AJ's own note warns that
+    # copying a guard verbatim can be wrong; the inverse — that a correctly-keyed
+    # guard can be unreachable — is the warning that was missing.** Gate re-run #4
+    # measured it: a one-character rooms edit, a player who connects once and types
+    # nothing, and the record reads `inv = ""`.
+    #
+    # Six one-edit routes reach a rooms rejection (dangling exit, missing `kind`,
+    # no id, NUL/oversized id, >MAX_ENTRIES, empty/moved file), and
+    # `hub.rooms.cyml` is the largest and most frequently edited file in the zone
+    # set — so this is MORE likely to fire than AJ was. The "roomless" affordance
+    # bought nothing: a server with no rooms cannot run the game, and its only
+    # observable effect was emptying inventories.
     var wl = world_load_rooms(DP_ROOMS);
-    if (wl == WL_OK) {
-        println("world: loaded zone");
-        print_num(world_room_count());
-        println(" rooms");
-        # Object + mob templates, then spawn mobs into rooms (M4).
-        var oc = world_load_objs(DP_OBJS);
-        if (oc >= 0) { print_num(oc); println(" object templates"); }
-        else {
-            # H9 (1.6.5) — a rejected objs file used to produce NO diagnostic at
-            # all: there was no else arm, and zone_reset_objs below was gated on
-            # the MOB result, not this one. A malformed hub.objs.cyml therefore
-            # gave a completely clean-looking boot.
-            println("world: no objects loaded (code below)");
-            print_num(oc);
-            println("");
-            # === 1.7.15 (AJ) — FATAL, exactly as the class table is below. ===
-            #
-            # This arm used to print the diagnostic and CARRY ON, and that is
-            # silent, irreversible, playerbase-wide data loss: `world_load_objs`
-            # unpublishes the whole table on any failure (H9/F6), so every saved
-            # inventory id then fails to resolve, `_restore_inv` drops the lot,
-            # and `drop_session` writes the emptied inventory back. Measured by
-            # gate re-run #3 against a live server: a ONE-CHARACTER edit
-            # (`kind = "obj"` -> `"objj"`) and a player who connects once and is
-            # RST-closed **while typing nothing** loses everything. Repairing the
-            # file does not bring it back — records are signed with a key derived
-            # from the player's passphrase, which the server never holds (ADR 0004).
-            #
-            # 1.7.11 made exactly this fatal for `data/classes.cyml` THIRTY-FIVE
-            # LINES BELOW, in this same function, for exactly this reason. The
-            # class table got the guard and the object table did not: the fifth
-            # consecutive sweep to find a rule applied at one site and not its
-            # sibling, and the second time it was a sibling of this line's own fix.
-            #
-            # Keyed on the RETURN CODE, not on `g_obj_tpl_count == 0` the way the
-            # class check is. A zone that authors no objects at all is legitimate
-            # and loads successfully with a count of zero; only a REJECTED file is
-            # the catastrophe. The two tests are not interchangeable here.
-            println("world: FATAL — the object table was rejected. Refusing to start:");
-            println("  every saved inventory id would fail to resolve, and the");
-            println("  next disconnect would write the emptied inventory back.");
-            println("  Fix data/zones/hub.objs.cyml and restart.");
-            return 1;
-        }
-        var mc = world_load_mobs(DP_MOBS);
-        if (mc >= 0) {
-            var sp = world_spawn_all();
-            # H9 — gated on the OBJECT result; it was reading mc.
-            var so = 0;
-            if (oc >= 0) { so = zone_reset_objs(); }   # M7-D: place authored room objects
-            print_num(mc); print(" mob templates, ", 16);
-            print_num(sp); print(" mobs, ", 7);
-            print_num(so); println(" objs spawned");
-        } else {
-            println("world: no mobs loaded (code below)");
-            print_num(mc); println("");
-        }
-    } else {
-        println("world: no zone loaded (code below) — running roomless");
+    if (wl != WL_OK) {
+        println("world: no zone loaded (code below)");
         print_num(wl);
         println("");
+        println("world: FATAL — the room table was rejected. Refusing to start:");
+        println("  a roomless server never loads the object table, so every saved");
+        println("  inventory id would fail to resolve, and the next disconnect");
+        println("  would write the emptied inventory back.");
+        println("  Fix data/zones/hub.rooms.cyml and restart.");
+        return 1;
+    }
+    println("world: loaded zone");
+    print_num(world_room_count());
+    println(" rooms");
+    # Object + mob templates, then spawn mobs into rooms (M4).
+    var oc = world_load_objs(DP_OBJS);
+    if (oc >= 0) { print_num(oc); println(" object templates"); }
+    else {
+        # H9 (1.6.5) — a rejected objs file used to produce NO diagnostic at
+        # all: there was no else arm, and zone_reset_objs below was gated on
+        # the MOB result, not this one. A malformed hub.objs.cyml therefore
+        # gave a completely clean-looking boot.
+        println("world: no objects loaded (code below)");
+        print_num(oc);
+        println("");
+        # === 1.7.15 (AJ) — FATAL, exactly as the class table is below. ===
+        #
+        # This arm used to print the diagnostic and CARRY ON, and that is
+        # silent, irreversible, playerbase-wide data loss: `world_load_objs`
+        # unpublishes the whole table on any failure (H9/F6), so every saved
+        # inventory id then fails to resolve, `_restore_inv` drops the lot,
+        # and `drop_session` writes the emptied inventory back. Measured by
+        # gate re-run #3 against a live server: a ONE-CHARACTER edit
+        # (`kind = "obj"` -> `"objj"`) and a player who connects once and is
+        # RST-closed **while typing nothing** loses everything. Repairing the
+        # file does not bring it back — records are signed with a key derived
+        # from the player's passphrase, which the server never holds (ADR 0004).
+        #
+        # 1.7.11 made exactly this fatal for `data/classes.cyml` THIRTY-FIVE
+        # LINES BELOW, in this same function, for exactly this reason. The
+        # class table got the guard and the object table did not: the fifth
+        # consecutive sweep to find a rule applied at one site and not its
+        # sibling, and the second time it was a sibling of this line's own fix.
+        #
+        # 1.7.18 (BA) — and it took a SIXTH sweep to notice this arm was itself
+        # unreachable whenever the ROOMS table was the thing rejected, because
+        # the whole block used to be nested inside the rooms success arm. That
+        # is now fatal above, so this guard can actually fire.
+        #
+        # Keyed on the RETURN CODE, not on `g_obj_tpl_count == 0` the way the
+        # class check is. A zone that authors no objects at all is legitimate
+        # and loads successfully with a count of zero; only a REJECTED file is
+        # the catastrophe. The two tests are not interchangeable here.
+        println("world: FATAL — the object table was rejected. Refusing to start:");
+        println("  every saved inventory id would fail to resolve, and the");
+        println("  next disconnect would write the emptied inventory back.");
+        println("  Fix data/zones/hub.objs.cyml and restart.");
+        return 1;
+    }
+    var mc = world_load_mobs(DP_MOBS);
+    if (mc >= 0) {
+        var sp = world_spawn_all();
+        print_num(mc); print(" mob templates, ", 16);
+        print_num(sp); println(" mobs spawned");
+    } else {
+        println("world: no mobs loaded (code below)");
+        print_num(mc); println("");
     }
     # Player classes (M5).
     var cc = world_load_classes(DP_CLASSES);
@@ -1800,6 +1832,29 @@ fn cmd_serve(port): i64 {
     g_save_interval_ticks = 300000 / g_tick_ms;
     if (g_save_interval_ticks < 1) { g_save_interval_ticks = 1; }
     println("persist: player saves + audit chain ready");
+    # === 1.7.18 (AZ) — THE BOOT OBJECT SPAWN MUST RUN AFTER `persist_init`. ===
+    #
+    # M7-D places the authored room objects. It used to sit up in the mob block,
+    # FIFTY-THREE LINES ABOVE `persist_init()` — and `persist_init` is what seeds
+    # the offline census AM (1.7.16) added. So at boot `g_obj_offline` was still
+    # zero, the offline term in `_obj_id_world_count` (`item.cyr`) contributed
+    # nothing, and the ceiling test asked only "how many are lying in rooms?".
+    # Answer at boot: none. So it minted the full authored complement while
+    # offline players still held theirs in signed records on disk.
+    #
+    # `zone_reset_room_objs` only ever REFILLS, never removes, so the surplus was
+    # permanent for the process — and ordinary play moved it into another player's
+    # record before the next restart. Gate re-run #4 measured `relic`, authored
+    # exactly once, at FOUR live copies after three clean SIGTERM restarts.
+    #
+    # AM's fix was correct and demonstrably works on the periodic-reset path; it
+    # was never exercised across a RESTART, because AM's own closure evidence was
+    # six get/quit/reset/relog cycles inside one process. The ordering is the whole
+    # fix, so it is pinned by a test — and the seed cannot simply be hoisted above
+    # instead, because `persist_init` must stay below the config load and the fatal
+    # loader guards.
+    var so = zone_reset_objs();
+    print_num(so); println(" objs spawned");
     # M7: start the zone-reset clock from boot (resets are measured since
     # last reset, not server start — but boot IS the first "reset").
     g_zone_last_reset_ms = clock_now_ms();

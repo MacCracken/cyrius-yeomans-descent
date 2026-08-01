@@ -3,13 +3,54 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.17 — **every finding from gate re-run #3 is closed (AJ-AY)**. Next is gate re-run #4)
+> **Last refresh**: 2026-07-31 (v1.7.18 — **gate re-run #4 returned DO-NOT-CLOSE**
+> (0/3/3/3, items AZ-BH); its first batch **BE, AZ, BA, BH is closed**. Next is
+> 1.7.19 — BC, BD, BF, BG)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.18** — 2026-07-31. **1407 assertions**; `cyrius audit` exits 0; 6/6 benches;
+**2/2 fuzz targets**; both targets build.
+
+**The boot sequence and the reader every table shares** — the first of three
+batches from gate re-run #4.
+
+**1.7.17 shipped a regression and this release is why that matters.** AR put an
+ordinal ceiling of 1e6 inside `parse_uint`, which `toml_int` also calls — and
+`toml_int` folds an unparseable value into its caller's **default**. Every
+player's `created` was therefore overwritten with the login moment on every login;
+`last_login` read as 0, making the "last seen…" greeting dead code on every
+shipped server; and `RESET_SECS_MAX` became unreachable. The bound now sits in
+`qual_parse`, the only caller with an ordinal, and `parse_uint` closes AR's wrap
+with exact i64 arithmetic.
+
+**Two silent, irreversible data-loss paths closed, both measured A/B against a
+running server.** The boot object spawn ran fifty-three lines above the
+`persist_init()` that seeds the offline census, so **every restart minted a fresh
+copy of every object an offline player held** — 13/13/13/13 across four restarts
+before, 13/12/12/12 after. And a rejected *rooms* table used to print "running
+roomless" and carry on with the object loader **never called**, which is exactly
+the inventory-emptying state AJ declared unsurvivable — **AJ's guard was keyed
+correctly and was simply unreachable on that path.**
+
+**Lessons carried, added this release:**
+
+- *A correctly-keyed guard can be unreachable.* AJ's own note warns that copying a
+  guard verbatim can be wrong. BA is the inverse, and nobody had written it down.
+  **Asserting a guard EXISTS — which AJ's test does, by source offset — does not
+  assert it can RUN.** The new assertion is on reachability.
+- *A shared reader has no domain.* BE is the first defect this project has shipped
+  *inside a fix for another defect*, one release later. When a fix changes a
+  predicate, **grep every caller of the function it lives in**; one grep would
+  have found `toml_int`.
+- *Small fixtures cannot see a bound.* Every prior `IDENT_CREATED` fixture used 1,
+  100, 999, 1234567 — or exactly 1000000, the largest value that still parsed. The
+  suite stayed green throughout. The new assertions use a genuine epoch second,
+  because that is the only value that separates the two behaviours.
 
 **1.7.17** — 2026-07-31. **1387 assertions**; `cyrius audit` exits 0; 6/6 benches;
 **2/2 fuzz targets**; both targets build; **9/9 mutations killed**.

@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Gate re-run #4 — DO-NOT-CLOSE (2026-07-31)
+
+Run against a clean tree at `0aef745`. **0 critical, 3 high, 3 medium, 3 low** —
+**nine distinct defects from twelve reports**, one refuted. Recorded as roadmap
+items **AZ-BH** and batched across 1.7.18-1.7.20; no code changed in this entry.
+
+Eleven agents: five finders on five surfaces, each in an isolated git worktree and
+required to build and run, each then attacked by an independent skeptic with its
+own worktree, told to reproduce or refute and to default to REFUTED when
+uncertain. The main repo was untouched throughout.
+
+**The count is falling** — #2 was 0/2/3/3, #3 was 0/4/5/7, #4 is 0/3/3/3 — **but
+the character of the findings changed, and that is the headline.** All nine
+survivors are the familiar shape (a rule applied at one site and not its sibling).
+In earlier sweeps those siblings were old. **Six of these nine are siblings of
+fixes shipped in the last three patch releases, and one was introduced by the head
+commit itself.** The sweep has largely stopped finding pre-existing defects and is
+now finding the incompleteness of its own recent fixes.
+
+The three highs:
+
+- **Every restart mints a fresh copy of every object an offline player is
+  carrying.** The boot spawn runs at `server.cyr:1746`; `persist_init()`, which
+  seeds 1.7.16's offline census, does not run until `:1799` — fifty-three lines
+  later — so the boot spawn asks "how many exist?", gets zero, and re-mints the
+  full authored complement. `relic` is authored exactly once; after three clean
+  SIGTERM restarts, four copies were live simultaneously. AM's own closure evidence
+  never performed a restart.
+- **One typo in the *rooms* file empties every inventory.** `world_load_objs` is
+  nested inside `if (wl == WL_OK)` — the *rooms* result — so a rooms rejection
+  prints "running roomless" and skips the object loader entirely. **AJ's fatal
+  guard is keyed on a return code from a function that is never called**, and the
+  comment warning of "silent, irreversible, playerbase-wide data loss" sits inside
+  the unreachable block. Six one-edit routes confirmed; irreversible per ADR 0004.
+- **Every successful login still burns 2,248 bytes.** 1.7.8 (item U) removed the
+  pre-auth parse; a *correct* passphrase falls through that early return into the
+  same untouched `toml_parse`. Measured twice independently at 2,265 B/login, dead
+  linear — 883 MB/hour from one sequential socket, with no login rate limit
+  anywhere.
+
+**And a regression in the head commit.** AR put an ordinal ceiling of 1,000,000
+inside `parse_uint`, but `toml_int` is its second caller and reads `-1` as
+"unparseable" — so every zone, class and save-record integer above 1e6 is
+**discarded and replaced by its default**. `created` is overwritten with the login
+moment on every login; the "last seen" greeting is dead code on every shipped
+server. M14-D in the roadmap said in as many words that this fix affects "every
+`toml_int` caller… which is why it did not land in a patch release."
+
+**One clean negative worth recording:** two players interacting under one tick —
+re-run #3's top-listed instrument gap — is now **answered**. Every contended
+ordering that could be constructed serialised and conserved correctly. The
+object-conservation defects live in census accounting, not command interleaving.
+
+
 ### Gate re-run #3 — DO-NOT-CLOSE (2026-07-31)
 
 Run against a clean tree at `84c9a3a`. **0 critical, 4 high, 5 medium, 7 low** —
@@ -68,6 +122,86 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 `SS_AUTHED = 0` so the arm it would measure cannot fire. **Gate re-run #3 must be
 allowed to run the suite and the benches.**
 
+
+## [1.7.18] — 2026-07-31
+
+**The boot sequence and the reader every table shares** — the first batch of gate
+re-run #4 (items **BE, AZ, BA, BH**). 1407 assertions (was 1387); `cyrius audit`
+exits 0; 6/6 benches; 2/2 fuzz targets; both targets build.
+
+### Fixed
+
+- **BE — a regression shipped in 1.7.17.** AR put an ordinal ceiling of 1,000,000
+  inside `parse_uint`, but `parse_uint` has **two callers with different domains**:
+  `qual_parse` (ordinals) and `toml_int` (every integer in every zone header,
+  class entry and save record). `toml_int` reads `-1` as "unparseable" and
+  substitutes its caller's **default**, so every authored or persisted value above
+  1e6 was silently discarded and replaced. `created` is read with a default of
+  `get_epoch_secs()`, so **every player's creation date was overwritten with the
+  login moment on every login** and written straight back; `last_login` read as 0,
+  making the "last seen…" greeting dead code on every shipped server; and
+  `RESET_SECS_MAX` became unreachable, so a documented monthly reset cadence read
+  as 900. The ordinal bound now lives in `qual_parse`, which is the only caller
+  that has an ordinal, and `parse_uint` closes AR's wrap with **exact i64
+  arithmetic** instead. Both overflow arms are pinned — the second is the one
+  `patra.cyr:3692`'s idiom omits, where a trailing 8 or 9 at the cutoff lands two
+  past max.
+- **AZ — every server restart minted a fresh copy of every object an offline
+  player was carrying.** The boot object spawn ran **fifty-three lines above**
+  `persist_init()`, which is what seeds the offline census 1.7.16 (AM) added. At
+  boot `g_obj_offline` was still zero, so the reset ceiling asked only "how many
+  are lying in rooms?", got "none", and minted the full authored complement on top
+  of what players held in signed records on disk. `zone_reset_room_objs` only ever
+  refills, so the surplus was permanent for the process. **Measured A/B against a
+  running server: pre-fix 13, 13, 13, 13 across four restarts with one object held
+  offline; post-fix 13, 12, 12, 12.** AM's fix was correct and had simply never
+  been exercised across a restart — its closure evidence was six
+  get/quit/reset/relog cycles inside one process.
+- **BA — one typo in the *rooms* file silently and permanently emptied every
+  player's inventory.** `world_load_objs` was nested inside the rooms-loader
+  success arm, so a rooms rejection printed "running roomless" and **never called
+  the object loader at all** — leaving `g_obj_tpl_count` at 0, which is exactly the
+  state AJ (1.7.15) declared unsurvivable. **AJ's fatal guard is keyed on
+  `world_load_objs`'s return code, which is correct and which is precisely why it
+  could not fire: a guard on the return value of a function that is never called
+  is unreachable.** A rejected room table is now fatal, above the object load, and
+  the "roomless" affordance is gone — it bought nothing, since a server with no
+  rooms cannot run the game and its only observable effect was emptying
+  inventories. **Verified live: a one-character exit typo now exits 1; before, the
+  server ran on with no object table.**
+- **BH — an unresolvable `start` id in the zone header was silently ignored**
+  while the identical typo in an `exit_` id refused the whole zone, twelve lines
+  apart on the same `room_index_by_str` lookup. `g_start_room` kept its
+  initialized 0 and the boot log was character-for-character identical to a
+  correct configuration. Now `WL_ERR_NOSTART`. An **absent** `start` remains legal
+  and still means room 0 — only a `start` that is present and does not resolve is
+  an error, so no zone that loads today is rejected. **Verified live A/B.**
+
+### Changed
+
+- Two comments that described the offline census as rebuilt "at the top of each
+  reset pass". It has been seeded once at boot and moved by login/disconnect since
+  1.7.16, and **that sentence is the one that would have stopped someone noticing
+  AZ** — if the census were per-pass, the boot spawn's position would not matter.
+
+### Lessons carried, added this release
+
+- *A correctly-keyed guard can be unreachable.* AJ's own note warns that copying a
+  guard verbatim can be wrong. BA is the inverse and it was the warning nobody had
+  written down: AJ's guard was keyed exactly right and sat on a path that a
+  sibling failure skipped entirely. **Asserting that a guard EXISTS — which AJ's
+  test does, by source offset — does not assert that it can RUN.** The new
+  assertion is on reachability, not presence.
+- *A shared reader has no domain.* BE is the first defect this project has shipped
+  *inside a fix for another defect*, one release later. AR's reasoning was sound
+  for the caller it was thinking about and was written into the shared function
+  rather than that caller. **When a fix changes a predicate, grep every caller of
+  the function it lives in** — one grep would have found `toml_int`.
+- *Small fixtures cannot see a bound.* Every test that planted `IDENT_CREATED`
+  used 1, 100, 999, 1234567 — or exactly 1000000, the largest value that still
+  parsed. The suite was green throughout. The new assertions use a **genuine
+  epoch second**, because that is the only value that distinguishes the two
+  behaviours.
 
 ## [1.7.17] — 2026-07-31
 

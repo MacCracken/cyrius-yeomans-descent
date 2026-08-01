@@ -66,6 +66,7 @@ var WL_ERR_OVERCAP = 0 - 3;   # more than MAX_ENTRIES rooms
 var WL_ERR_KIND    = 0 - 4;   # an entry's kind != "room"
 var WL_ERR_NOID    = 0 - 5;   # an entry has no id
 var WL_ERR_DANGLE  = 0 - 6;   # an exit names a room that does not exist
+var WL_ERR_NOSTART = 0 - 7;   # the header's `start` names a room that does not exist
 
 # === World globals ===
 var g_rooms      = 0;   # contiguous block of g_room_count RM_SIZE structs
@@ -411,9 +412,26 @@ fn world_load_rooms(path): i64 {
     }
 
     # Resolve the spawn room: the zone header's `start` id, else room 0.
+    #
+    # 1.7.18 (BH) — an unresolvable `start` is a LOAD ERROR, the same as the
+    # dangling exit twelve lines above. It used to have no else arm and no
+    # diagnostic: `g_start_room` kept its initialized 0 and the boot log was
+    # character-for-character identical to a correct configuration. Two rules for
+    # the same shape of typo, in the same function, on the same lookup —
+    # `room_index_by_str` — differing only in which key the operator mistyped.
+    #
+    # The blast radius is wider than new characters. `world_start_room()` is also
+    # the fallback for a save whose recorded room no longer resolves, and the
+    # death-respawn target, so a silently-wrong start room quietly relocates
+    # existing players too.
+    #
+    # An ABSENT `start` remains legal and still means room 0 — that is an
+    # authoring choice, not a typo, and this must not reject zones that load
+    # today. Only a `start` that is PRESENT and does not resolve is the error.
     if (start_id != 0) {
         var si = room_index_by_str(start_id);
-        if (si >= 0) { g_start_room = si; }
+        if (si < 0) { return _wl_rooms_fail(WL_ERR_NOSTART); }
+        g_start_room = si;
     }
 
     return WL_OK;

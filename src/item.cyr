@@ -1021,7 +1021,12 @@ fn _obj_id_world_count(idptr, idlen): i64 {
     # player is in-world. So every item carried offline was invisible, the reset
     # minted a replacement, and the owner brought theirs back at the next login —
     # unbounded across cycles, including for objects authored exactly once.
-    # `obj_offline_census_build` refreshes this at the top of each reset pass.
+    # The census is seeded ONCE by `persist_init` at boot and then MOVED by login
+    # (debit) and disconnect (credit) — it is NOT rebuilt per reset pass; see the
+    # note on `obj_offline_census_build`. 1.7.18 (AZ): that means every caller of
+    # this function must run AFTER `persist_init`, and the boot object spawn did
+    # not — it sat fifty-three lines above it, so at boot this term was zero and
+    # the ceiling re-minted everything held offline, on every restart.
     var tpl = obj_tpl_by_id(idptr, idlen);       # forward ref → persist.cyr census
     if (tpl != 0) { n = n + obj_offline_count((tpl - g_obj_tpls) / OT_SIZE); }
     return n;

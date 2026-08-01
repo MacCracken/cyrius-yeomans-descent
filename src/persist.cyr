@@ -1871,7 +1871,19 @@ fn _census_add_record(path): i64 {
     return 0;
 }
 
-# Rebuild the whole census. Called once at the top of each reset pass.
+# Rebuild the whole census from disk.
+#
+# Called ONCE, from `persist_init` at boot — NOT per reset pass. 1.7.16 (AM)
+# tried per-pass first and measured ~70 kB of permanently lost arena per rebuild
+# (`dir_list` / `str_from` allocate and `alloc` has no free), which is 1.7.1's
+# item-C shape reappearing inside the fix for a different unbounded-growth bug.
+# After boot the census MOVES: login debits, disconnect credits.
+#
+# 1.7.18 (AZ) — the "once at boot" is load-bearing for the CALLER's ordering, and
+# this comment used to say "at the top of each reset pass", which is the sentence
+# that would have stopped someone noticing the boot object spawn ran fifty-three
+# lines above the seed. If it were per-pass, the boot spawn's position would not
+# matter. It is not, and it does.
 fn obj_offline_census_build(): i64 {
     persist_init();
     if (g_obj_tpl_count <= 0) { return 0; }

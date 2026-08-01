@@ -1,6 +1,8 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.17 — **every finding from gate re-run #3 is closed (AJ-AY)**. Next is gate re-run #4)
+> **Last Updated**: 2026-07-31 (v1.7.18 — **BE, AZ, BA and BH are closed**, the
+> first of three batches from gate re-run #4. Next is 1.7.19; the remaining open
+> items are **BC, BD, BF, BG** and then **BB**)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -41,7 +43,11 @@ ownership and fix size.
 | — | ~~1.7.15~~ | ~~3~~ | ✅ **Shipped.** **AJ** a rejected objects table is now fatal (exit 1), and a dropped id is counted, audited and reported · **AN** `class` by stable id, both forms read · **AO** a healed character keeps its room | — |
 | — | ~~1.7.16~~ | ~~3~~ | ✅ **Shipped.** **AK** the two tick consumers now agree what a phase means · **AM** an offline census, seeded once and moved by login/disconnect · **AL** the account is counted where the record is written | — |
 | — | ~~1.7.17~~ | ~~10~~ | ✅ **Shipped.** **AP** combat is two-sided · **AQ** the fuzz gate reached `NORM_CAP` for the first time (7,988x/run) and now asserts its own coverage · **AW** two benches that could not fail · plus AR, AT, AU, AV, AX, AY; **AS** documented as a content rule | — |
-| 1 | [**gate re-run #4**](#the-gate--what-closes-the-1x-line) | — | **Next, and everything from re-run #3 is closed.** Run it against a **tagged commit**, let it **build and run** (that is what made #3 work), and note that 1.7.16 already built much of the offline-population machinery #3 asked for | **yes** |
+| — | ~~gate re-run #4~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **3 high**, 3 medium, 3 low. Twelve reports collapsed to **nine distinct defects** (AZ-BH); one refuted. **Nine of nine are a rule applied at one site and not its sibling — and six are siblings of fixes from 1.7.15/16/17, one from the head commit itself** | — |
+| — | ~~1.7.18~~ | ~~4~~ | ✅ **Shipped.** **BE** the ordinal bound moved out of the shared reader — `parse_uint` now closes AR's wrap by exact i64 arithmetic, and `created` survives a login · **AZ** the boot spawn runs after the census is seeded (measured 13/13/13/13 → 13/12/12/12) · **BA** a rejected rooms table is fatal, so AJ's guard is reachable at last · **BH** `WL_ERR_NOSTART` | — |
+| 1 | [**1.7.19**](#1719--sessions-in-unusual-states) | 4 | **Next.** Sessions that are not a normal logged-in player — **BC** the refused duplicate poisons the census · **BD** `classes_upkeep` frozen in a peer-held menu (AK's other half) · **BF** the classless heal double-counts an account · **BG** the class-menu squatter's deadline | **yes** |
+| 2 | [**1.7.20**](#1720--the-login-parse-item-us-second-arm) | 1 | **BB** — the post-auth `toml_parse`, 2,248 B on every successful login, 883 MB/h from one socket. Item **U**'s second arm: 1.7.8 removed the pre-auth half and left this one | **yes** |
+| 3 | [**gate re-run #5**](#the-gate--what-closes-the-1x-line) | — | After 1.7.20. Same protocol as #4 (worktrees, build-and-run, paired skeptics) — but see the note there: five of the six surfaces #4 swept are now spent, and **AGNOS has never been executed by any sweep** | **yes** |
 | 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
@@ -62,6 +68,481 @@ behind the headline was loose in the same way as the comment it indicted.
 **The minimum credible 2.0 is M14 + M15 + M16** — the contract, the content
 ceiling, and progression. Everything from M17 on can slip without embarrassing
 the release.
+
+---
+
+## Open issues — gate re-run #4 returned DO-NOT-CLOSE (2026-07-31)
+
+**Ruling: DO-NOT-CLOSE. Critical 0, high 3, medium 3, low 3** — **nine distinct
+defects from twelve reports** (two were each found twice); one refuted. Run
+against a clean tree at `0aef745`.
+
+Five finders swept five surfaces, each in an isolated git worktree, each required
+to build and run; each finder was then attacked by an independent skeptic with its
+own worktree, told to reproduce or refute and to **default to REFUTED when
+uncertain**. Eleven agents total. The main repo was untouched throughout.
+
+**The count is coming down** — #2 was 0/2/3/3, #3 was 0/4/5/7, this is 0/3/3/3 —
+**but the character of the findings has changed, and that is the thing to act
+on.** Nine of nine survivors are the familiar shape (a rule applied at one site
+and not its sibling). In earlier sweeps those siblings were *old*: a 1.6.x rule
+not carried to a 1.7.x site. **Six of these nine are siblings of fixes shipped in
+the last three patch releases, and one was introduced by the head commit itself.**
+The sweep has essentially stopped finding pre-existing defects and is now finding
+the incompleteness of its own recent fixes, at roughly the rate the fixes retire
+them.
+
+| Defect | Sibling of | The gap |
+|---|---|---|
+| **AZ** boot census duplication | AM (1.7.16) | Offline term added to the reset path; the boot path seeds it 53 lines too late |
+| **BA** rooms→objs skip | AJ (1.7.15) | Guard correctly keyed on a return code — from a function that is never called |
+| **BB** login parse leak | U (1.7.8) | Parse deferred, not removed; the post-auth half was never measured |
+| **BC** refused-duplicate census | AE (1.7.12) + AM (1.7.16) | AE disowned the record; AM later made that same teardown own a census |
+| **BD** `classes_upkeep` frozen | AK (1.7.16) | AK unfroze the mob half of one phase gate, not the player half, ten lines away |
+| **BE** `parse_uint` in `toml_int` | AR (1.7.17) | The fix itself, applied at the wrong altitude, breaking its second caller |
+| **BF** account double-count | AL (1.7.16) + AO (1.7.15) | AO added the two-flow discriminator 21 lines above; the increment never got it |
+| **BG** PHASE_CLASS deadline | AI (1.7.14) | AI moved the reap *budget* to `session_persistable`; the *deadline* four lines away stayed on `SS_AUTHED` |
+| **BH** silent `start` id | its own function's `WL_ERR_DANGLE` rule | Ten lines apart, opposite policies for the same shape of typo |
+
+**The mechanical answer is small and specific, and it is a process change rather
+than a code change:** when a fix changes a predicate, **grep every call site of
+that predicate and every caller of the function it lives in, and record the
+enumeration in the fix's own comment.** Three of these nine (`SS_AUTHED` vs
+`session_persistable`, twice; `parse_uint`'s two callers) would have been caught
+by one grep. Two more (AZ, BA) would have been caught by asking *"is my new guard
+reachable on every path that reaches the thing it guards?"* — AJ's own note
+already warns that copying a guard verbatim can be wrong; **the inverse warning,
+that a correctly-keyed guard can be unreachable, is the one that was missing.**
+
+### ✅ 1.7.18 — the boot sequence and the reader every table shares (SHIPPED)
+
+**Items BE, AZ, BA and BH are CLOSED.** 1407 assertions (was 1387).
+All four were verified A/B against a running server, not only in the suite:
+the boot spawn went 13/13/13/13 → 13/12/12/12 across four restarts with one
+object held offline; a one-character rooms typo now exits 1 where it used to run
+on with no object table; and a typo'd `start` id now exits 1 where the boot log
+used to be character-for-character identical to a correct configuration.
+
+**Items BE, AZ, BA, BH.** *(1 medium, 2 high, 1 low — in fix order, not severity
+order.)* One theme: everything that happens between process start and the first
+player, plus the integer reader all of it depends on. One test story: **boot the
+server against adverse data and against a populated `data/players`, and assert
+what the loaders and the boot spawn actually did.**
+
+**BE goes first and it is not negotiable** — it is a regression in the head
+commit, and every hour it runs destroys more creation dates permanently.
+
+---
+
+**BE. AR's ordinal bound sits in the shared integer reader, so every `toml_int`
+value above 1e6 silently takes its default — and `created` is destroyed on every
+login.** *(medium — but FIX FIRST)*
+
+- **What breaks.** AR added `if (v > PA_ORDINAL_MAX) { return 0 - 1; }` to
+  `parse_uint` ([`parser.cyr:668`](../../src/parser.cyr:668), bound 1,000,000).
+  Its comment reasons exclusively about the ordinal caller — *"this is an
+  ORDINAL", "MAX_INV is 100"*. But `parse_uint` has a second caller: `toml_int`
+  ([`mob.cyr:174,178`](../../src/mob.cyr:174)), the shared reader for every
+  integer in every zone header, every class entry, and every field of every save
+  record. `toml_int` reads `-1` as "unparseable" and returns `def`. **The value is
+  not clamped — it is discarded and replaced by the default.**
+- **The worst consumer** is
+  [`persist.cyr:2268`](../../src/persist.cyr:2268): `store64(blk + IDENT_CREATED,
+  toml_int(pairs, "created", get_epoch_secs()))`. The default is *now*, so the
+  creation date is overwritten with the login moment on every login, on every
+  server, and `_build_record` writes it straight back.
+  `g_loaded_last_login = toml_int(pairs, "last_login", 0)`
+  ([`:2341`](../../src/persist.cyr:2341)) reads 0, so the "last seen …" greeting
+  at [`:2450`](../../src/persist.cyr:2450) is **dead code on every shipped
+  server**. The same mechanism silently overrides operator config:
+  `clamp_reset_secs`'s documented `RESET_SECS_MAX = 31536000` is now unreachable,
+  and any `reset_secs` above 1e6 — a monthly cadence, well inside the documented
+  range — reads as 900.
+- **Demonstrated causally.** Rebuilt with the bound widened and logged the *same
+  untouched on-disk record* in: `created` preserved, `last_login` advanced, and
+  the login gained a line the shipped binary never prints. A four-point boundary
+  probe through `data/classes.cyml` (999999 / 1000000 / 1000001 / 1000002) pinned
+  the cliff at exactly `PA_ORDINAL_MAX` and showed the failure mode is
+  discard-to-default, not clamp.
+- **Why the suite is green, and it is damning.** Every test that plants
+  `IDENT_CREATED` uses 1, 100, 999, 1234567 — or **exactly 1000000, the largest
+  value that still parses**. The records in the working tree show it directly:
+  `created = 1000000` beside `last_login = 1785543497`.
+- **This file predicted it in writing.** M14-D says the `parse_uint` overflow fix
+  affects *"every `toml_int` caller — class stats, save fields, zone fields —
+  **which is why it did not land in a patch release**."* It landed in a patch
+  release anyway.
+- **Whose code.** Ours. **Fix size.** ~6 lines: move the bound out of `parse_uint`
+  and into `qual_parse`, which is the caller that actually has an ordinal domain,
+  and give `parse_uint` a real i64 overflow check instead (bail when
+  `v > (I64_MAX - d) / 10`). Add a regression test that round-trips a record with
+  a **genuine epoch-second** `created` rather than a small literal.
+
+**AZ. The boot object spawn runs before the offline census is seeded, so every
+restart mints a fresh copy of every object an offline player is carrying.**
+*(high)*
+
+- **What breaks.** `cmd_serve` spawns the world's objects at
+  [`server.cyr:1746`](../../src/server.cyr:1746), but `persist_init()` — which
+  seeds the offline census 1.7.16 added — does not run until
+  [`server.cyr:1799`](../../src/server.cyr:1799), **fifty-three lines later**.
+  During the boot spawn `g_obj_offline` is still zero, so the offline term at
+  [`item.cyr:1026`](../../src/item.cyr:1026) contributes nothing. The boot spawn
+  asks "how many are lying in rooms?", gets "none", and re-mints the full authored
+  complement while offline players still hold theirs in signed records.
+  `zone_reset_room_objs` only ever refills, never removes, so the surplus is
+  permanent for the process — and ordinary play moves it into another player's
+  record before the next restart.
+- **Can it happen today? Yes, on every restart** of a live server, which
+  [`running.md`](../guides/running.md) actively recommends as the shutdown path.
+  No malice, no admin verb, no malformed data. One extra copy of *every* authored
+  object, per restart, forever.
+- **Demonstrated, twice, independently.** `relic` is authored exactly once
+  (`data/zones/hub.rooms.cyml:234`); after three clean SIGTERM restarts **four
+  copies were live in one world simultaneously** — three in player records, one on
+  the shrine floor. Causation was then proved by patching `persist_init()` above
+  the boot spawn, rebuilding, and watching the boot count drop 13 → 12 against
+  byte-identical on-disk state, then reverting and watching it return to 13.
+- **Not a rediscovery of AM.** AM's fix demonstrably *works* on the periodic-reset
+  path in the same process where the boot path fails (`@reset` correctly answers
+  `objs +0` while the boot spawn had already over-minted). **AM's own closure
+  evidence was six get/quit/reset/relog cycles — no restart was ever performed.**
+  The existing ordering test pins the seed against the ready flag *inside*
+  `persist.cyr` and says nothing about `server.cyr`.
+- **Whose code.** Ours. **Fix size.** 2–5 lines: move the boot `zone_reset_objs()`
+  call below `persist_init()` — cleaner than hoisting `persist_init` up, which
+  would reorder config load relative to the fatal guards. Add a test asserting the
+  boot spawn count drops when `data/players` holds an authored id.
+- **Fix the comment in the same edit.** [`item.cyr:1024`](../../src/item.cyr:1024)
+  and `state.md` both still say the census *"refreshes at the top of each reset
+  pass"*. That stopped being true in 1.7.16, and it is exactly the sentence that
+  would have stopped someone noticing this hole.
+
+**BA. One typo in the *rooms* file makes the server skip the object loader
+entirely, and every player's inventory is silently and permanently emptied.**
+*(high)*
+
+- **What breaks.** `world_load_objs(DP_OBJS)`
+  ([`server.cyr:1702`](../../src/server.cyr:1702)) is nested *inside*
+  `if (wl == WL_OK)`, where `wl` is the **rooms**-loader result. A rooms rejection
+  takes the else arm at [`:1755`](../../src/server.cyr:1755), prints *"running
+  roomless"*, and carries on — so the object loader never runs and
+  `g_obj_tpl_count` stays at 0. That is byte-for-byte the state AJ declared
+  unsurvivable: `_restore_inv` ([`persist.cyr:1960`](../../src/persist.cyr:1960))
+  resolves every saved id through `obj_tpl_by_id`, every lookup fails, the ids are
+  dropped, and `drop_session` writes the emptied inventory back signed.
+- **AJ's fix is present and unreachable.** AJ keyed its fatal guard on
+  `world_load_objs`'s return code, which is *correct* — and on this path the
+  function is never called, so the guard cannot fire. The comment at
+  [`server.cyr:1715`](../../src/server.cyr:1715) warning of *"silent,
+  irreversible, playerbase-wide data loss"* sits inside the block that cannot be
+  reached. **A 1.7.17 server — the release that shipped AJ — still empties
+  inventories.**
+- **Can it happen today? Yes**, from operator error, with one character connecting
+  once. Six distinct one-edit routes to a rooms rejection were confirmed: a
+  dangling exit target (-6), a missing `kind` (-4), no id (-5), a NUL or oversized
+  id (-6), 33+ entries (-3), an empty or moved file (-1/-2). It also fires if
+  `data/zones/` is moved or the file renamed. **`hub.rooms.cyml` is the largest and
+  most frequently edited file in the zone set — this is *more* likely to fire than
+  AJ was.**
+- **Irreversible.** Records are signed with a key derived from the player's
+  passphrase (ADR 0004). The loss survives repairing the file that caused it.
+- **Demonstrated** twice, on two players, via two different rejection codes. Boot
+  log shows no "object templates" line at all; the server does not exit 1; a
+  player who connects, authenticates, types *nothing*, and is RST-closed gets
+  "Some of what you carried is no longer part of this world" and their record reads
+  `inv = ""`, `room = ""`.
+- **Why the suite misses it.** The existing test asserts by *source offset* that
+  the objs fatal arm sits below the objs load. That is ordering. **Nothing asserts
+  the objs load is *reachable* when the rooms load fails**, which is the structural
+  fact that is wrong.
+- **Whose code.** Ours. **Fix size.** ~10 lines: make a rooms rejection fatal the
+  way objs (AJ) and classes (AD) already are. The "running roomless" affordance
+  buys nothing — a roomless server cannot run the game, and its only observable
+  effect is emptying inventories.
+- **A note on severity.** This meets the *letter* of the critical bar —
+  playerbase-wide irreversible data loss. It is graded high only to stay consistent
+  with AJ, which this project graded high for identical impact through the sibling
+  file. If the bar is ever re-baselined, both belong at critical.
+
+**BH. A typo in the zone header's `start` id is silently ignored; the identical
+typo in an `exit_` id refuses the whole zone.** *(low)*
+
+- Ten lines apart in `world_load_rooms`: `exit_<dir>` naming a nonexistent room
+  returns `WL_ERR_DANGLE` and tears the world down
+  ([`world.cyr:405`](../../src/world.cyr:405)), while the same lookup on the
+  header's `start` id has **no else arm and no diagnostic**
+  ([`:414-417`](../../src/world.cyr:414)). `g_start_room` keeps its initialized 0
+  and the boot log is character-for-character identical to a correct
+  configuration.
+- **The blast radius is wider than new characters**: `world_start_room()` is also
+  the fallback for a save whose recorded room no longer resolves, and the
+  death-respawn target.
+- A three-way probe with a valid-but-different control confirmed the key works
+  when the id resolves, so the typo case is a **silent ignore**, not a no-op key.
+- **Cut from medium to low**: nothing is lost, nothing crashes, no peer can
+  trigger it, the world stays playable. **The defect is the silence.**
+- **Whose code.** Ours. **Fix size.** ~4 lines — a `WL_ERR_NOSTART` through
+  `_wl_rooms_fail`, or at minimum a boot diagnostic naming the id that did not
+  resolve.
+
+### 1.7.19 — sessions in unusual states
+
+**Items BC, BD, BF, BG.** *(2 medium, 2 low.)* One theme: a session that is **not
+a normal logged-in player** — a refused duplicate, a character parked in the class
+or passphrase menu, a healed classless record — corrupts a counter or freezes its
+own upkeep. One test story: drive a session into each non-`PHASE_CMD` state and
+each refused-login path, and assert the counters and the upkeep.
+
+**BC. A refused duplicate login makes the server believe objects still exist, and
+they are then never respawned again.** *(medium)*
+
+- `login_on_pass` calls `player_auth_load`, which restores the inventory inside
+  `_restore_inv` and **debits** the offline census one per resolved id
+  ([`persist.cyr:1976`](../../src/persist.cyr:1976)). Only then does AE's arm at
+  [`:2405`](../../src/persist.cyr:2405) notice the character is already connected
+  and refuse. But the precondition for refusing is that the live session already
+  claimed those holdings, so the counter is at zero and `obj_census_adjust`'s
+  underflow clamp at [`:1925`](../../src/persist.cyr:1925) swallows the debit —
+  while `drop_session`'s unconditional `session_drop_inv`
+  ([`server.cyr:855`](../../src/server.cyr:855)) **credits unclamped**
+  ([`item.cyr:123-128`](../../src/item.cyr:123)). Net: permanent **+N phantom
+  offline holdings**, N = that record's inventory size. `_obj_id_world_count` then
+  believes the world is at its ceiling and the zone stops restocking.
+- **AE's own comment reasons about this teardown** and concludes *"Item
+  duplication was chased here too and is NOT a risk — `session_drop_inv` frees the
+  copies."* True in 1.7.12; **AM taught `session_drop_inv` to credit the census
+  four releases later and the arm was not re-examined.**
+- **Fires by accident on the single most common MUD failure mode: link-death.** A
+  player whose connection dies silently leaves a session held for `YD_IDLE_MS`
+  (default 5 min); their reconnect is refused as a duplicate and poisons the
+  census by their whole inventory. Needs the correct passphrase, so it is the
+  owner, not an attacker.
+- **Demonstrated** as matched A/B pairs by both skeptics. One escalated it: a
+  *single* refused reconnect on a record holding three different authored ids
+  erased all three from the world for the life of the process — twelve consecutive
+  resets at `objs=0`, all three rooms visually empty to a fresh character. The
+  other added two controls (a wrong-passphrase duplicate, and a duplicate on an
+  empty-inventory character); both behaved like the control, **localising the
+  defect precisely to `_restore_inv` running before the refusal.**
+- **Severity: medium, not high.** "Permanent" here is process-scoped — the census
+  is rebuilt from disk at boot. No player data is lost, nothing crashes. But it is
+  the strongest medium in this set: one ordinary player carrying at the `MAX_INV`
+  cap can suppress **every authored object in the world** until the operator
+  restarts. Ironically **AZ then restocks the suppressed objects at that same
+  restart** — which is part of why neither has been seen before.
+- **Whose code.** Ours. **Fix size.** ~5–10 lines: a `session_discard_inv(s)` that
+  walks `SS_INV` calling `obj_free` **without** `obj_census_adjust`, called in the
+  refusal arm beside the existing `store64(s + SS_AUTHED, 0)`. The asymmetric
+  clamp at `persist.cyr:1925` deserves a comment saying it is a general hazard.
+
+**BD. Cooldowns, energy and timed buffs stop advancing the moment a player opens
+the passphrase prompt.** *(medium)*
+
+- `combat_tick_all` ([`server.cyr:1386-1390`](../../src/server.cyr:1386)) wraps
+  **both** of its jobs in one `SS_PHASE == PHASE_CMD` gate: the combat round *and*
+  `classes_upkeep(s)`. AK (1.7.16) fixed the half that let a player go
+  invulnerable — it made `mob_tick_all` swing at a player in a non-CMD phase. It
+  did not touch `classes_upkeep`, which is the only decrementer of
+  `SS_CD0/1/2`, `SS_GUARD` and `SS_STIM` and the only source of energy and
+  out-of-combat HP regen. **All five freeze.**
+- **The phase is held open indefinitely by a peer**: `chpass_on_new` re-prompts
+  forever on an out-of-range length with **no attempt counter** (unlike
+  `_chpass_mismatch`, which does count), and every rejected line refreshes
+  `SS_LAST_MS`, so the reaper never fires.
+- **Demonstrated at three independent observables**: energy unchanged after 10–12
+  ticks parked; the cooldown counter read as a *number* out of `self_prep` still
+  at its authored 3 after ten ticks; and a real sustained fight against the 45-HP
+  Foundry Sentinel confirming mobs do swing during the park.
+- **The harm story was corrected during verification and the correction stands.**
+  The finder called it "unbounded damage mitigation in a menu". The skeptic fought
+  a real mob and the parked player **died anyway** — 25 damage over 12 ticks with
+  GUARD held at 3. Most of the freeze runs *against* the player (no regen, no
+  cooldown decay); the exploit buys −3 AC while you are helpless. Real,
+  demonstrable, bounded in value. **Medium is the ceiling.**
+- **Whose code.** Ours. **Fix size.** ~4 lines in `combat_tick_all` — keep the
+  combat round behind the `PHASE_CMD` gate, lift `classes_upkeep(s)` out and run
+  it for every session in the world (`session_room_ok`), which is exactly the set
+  AK decided mobs may swing at. Plus ~5 lines to give `chpass_on_new`'s length
+  rejections the counter `_chpass_mismatch` already has.
+- **One measurement trap, recorded because it will bite the next sweep.** This
+  test **falsely passes at a fast tick**: at `YD_TICK_MS=200` the first two runs
+  read full energy and no buff, purely because 3+ ticks fired between finishing the
+  re-key and reading the status. Pipelining does not help — the confirm line's
+  derive+sign exhausts the per-pass crypto charge window, so the following line is
+  retained. **Only a slow tick (3 s) plus a read fired ~1 RTT after acknowledgement
+  separates the hypotheses.**
+
+**BF. A character whose class no longer resolves burns a second account slot every
+time it is healed.** *(low)*
+
+- 1.7.11's classless-record heal
+  ([`persist.cyr:2472`](../../src/persist.cyr:2472)) sends an **existing**
+  character back to `PHASE_CLASS`, and `login_on_class` ends with AL's
+  unconditional `g_account_count = g_account_count + 1`
+  ([`classes.cyr:366`](../../src/classes.cyr:366)) for a record
+  `accounts_count_disk()` already counted at boot. Nothing decrements. **AO
+  already established twenty-one lines above that this function now serves two
+  flows** and added the `SS_ROOM < 0` discriminator for the room; the account
+  increment three lines further down never got it.
+- Reproduced end to end by both agents: rename the four class ids in
+  `data/classes.cyml`, heal two characters, and a third creation is refused with
+  "This world is not accepting new characters" at cap 3 with two files on disk —
+  with a restart-only control confirming the refusal was purely the phantom
+  increments.
+- **Cut from medium to low**: it needs an off-by-default knob (`max_accounts`)
+  *and* an operator class-table edit, causes no loss, and clears on restart.
+- **Fix size.** ~3 lines, using AO's existing discriminator.
+
+**BG. A peer parked at the class menu gets the five-minute player grace instead of
+the 30-second slowloris deadline.** *(low)*
+
+- `session_is_idle` ([`session.cyr:1911`](../../src/session.cyr:1911)) keys the
+  deadline on `SS_AUTHED`, which is set in `login_on_confirm` **before** the class
+  menu is shown. So `PHASE_CLASS` — no class, no room, no record on disk, and
+  since AL not even an account slot — gets the logged-in player's deadline.
+  **`sweep_idle` already knows better**: AI (1.7.14) changed the reap *budget* to
+  `session_persistable(s)` four lines away and left the *deadline* on `SS_AUTHED`.
+- **The severity was refuted with a counterfactual the finder never ran**, and it
+  is decisive: 256 raw sockets that send *not one byte* refused a legitimate client
+  on 13 of 14 probes over 75 s, opened in 0.02 s versus 7.47 s for the class-menu
+  route — **375× cheaper**, needing nothing from the login flow. Fixing this makes
+  the squat churn every 30 s instead of holding seamlessly for 300, restoring
+  roughly a 1-in-14 window for an honest player. **That is an availability
+  improvement, not a resource exhaustion the bug enables. Low.**
+- **The obvious fix has a cost the finding did not mention**: a genuine new player
+  then has 30 s to read four class descriptions and choose. **Fix size.** 1–2
+  lines — and consider a middle deadline (60–90 s) rather than the bare pre-auth
+  one.
+
+### 1.7.20 — the login parse (item U's second arm)
+
+**Item BB alone.** *(1 high.)* The largest single fix in the batch and the only
+one that is a rewrite rather than a correction, which is why it gets its own
+release. **File it as item U's second arm, not as a new item.**
+
+**BB. Every successful login permanently burns 2,248 bytes the process can never
+reuse.** *(high)*
+
+- **What breaks.** `player_auth_load` calls
+  `toml_parse(str_new(g_persist_slurp, n))`
+  ([`persist.cyr:2109`](../../src/persist.cyr:2109)) to read the record's ~25
+  fields. The bump allocator has no free (`lib/alloc.cyr`), and **`alloc_reset` is
+  called nowhere in `src/`**. 1.7.8 (item U) fixed the *pre-authentication* half by
+  adding the strict `_scan_kv` fast path that derives, compares and returns early,
+  so a wrong passphrase now allocates nothing. **A *right* passphrase falls
+  straight through that early return into the same untouched `toml_parse`** and
+  pays the full cost, on every login, forever.
+- **Measured twice, independently.** 2,265.9 B/login over 19,167 logins at
+  106.5/s; and 2,265.1 B/login over 15,000 logins at 108.3/s — dead linear, no
+  plateau. Both attributed it in-process: a bare `toml_parse` of the 506-byte
+  record costs 2,248 B, and ten consecutive successful `player_auth_load` calls
+  cost 22,480 B — **2,248.0 each**. That is **883 MB/hour from one sequential
+  socket**, and the rate is the server's own ed25519 ceiling, not the client's.
+- **Can it happen today? Yes.** Registration is unlimited by default
+  (`max_accounts` defaults to 0 and no `data/server.cyml` is required), and
+  **there is no login rate limit anywhere** — the `passwd` limiter (1.7.1) does not
+  cover login.
+- **Whose code.** Ours. **Fix size.** ~60–90 lines: extend `_scan_kv` to cover the
+  post-auth field set the way 1.7.8 did for the pre-auth one, so the successful
+  path never constructs a `toml_parse` vec. **Gate it with a bench that asserts
+  bytes-per-login and FAILS when reverted** — that is the instrument whose absence
+  let this survive 1.7.8's own fix.
+
+### Refuted — do not resurrect
+
+**`save_sweep` gates `player_save` on `SS_AUTHED` where `drop_session` and
+`shutdown_save_all` use `session_persistable`.** The code observation is accurate
+([`server.cyr:248`](../../src/server.cyr:248)), but **the cell is unreachable**,
+and the finder said so themselves with an explicit negative result. Closed
+independently rather than on trust: `save_sweep_due`'s first line requires
+`SS_SAVE_DIRTY`, and there are exactly three writers of that flag in the tree —
+[`session.cyr:1606`](../../src/session.cyr:1606) (PHASE_CMD-only dispatch),
+[`item.cyr:900`](../../src/item.cyr:900) (reached only via `room_find_player`,
+PHASE_CMD-gated), and [`combat.cyr:310`](../../src/combat.cyr:310) (needs a mob
+whose target is this session, and both setters require the player to have attacked
+first). Meanwhile `SS_CLASS < 0` exists only in `PHASE_CLASS` — three store sites.
+**The conjunction has no constructor.** It is a one-line hygiene alignment, not a
+defect, and it should not consume a roadmap slot.
+
+### What gate re-run #4 had no instrument for
+
+**The three gaps re-run #3 named:**
+
+1. **Offline-population conservation — covered as a one-off, NOT as an
+   instrument.** The conservation finder built the harness #3 said did not exist
+   (an instrumented binary printing `offline / world / authored` per reset pass)
+   and it immediately produced **two** of this run's defects (AZ, BC). But it was a
+   throwaway probe, reverted at the end of the run.
+   **`world_count + offline_record_count == authored_count` still does not exist as
+   a test, a bench, or a fuzz target, and it should** — it is the assertion that
+   would have caught both AM and AZ. Also: nothing in the tree reads
+   `g_obj_offline` directly, so every census measurement in this run is a threshold
+   oracle (`@reset`'s `objs +N` plus a `look`) that **cannot distinguish a phantom
+   count of 1 from 5**. *This is the single highest-value instrument to build, and
+   it belongs in `cyrius audit`.*
+2. **Phase × tick — substantially covered on one driver, untouched on the other.**
+   The real matrix is **8 × 5 = 40**, not #3's assumed 56: four of the seven tick
+   consumers are global rather than per-session, and `drain_pending_rx` moved off
+   the tick path in 1.7.0. The clean cells are recorded so they are not re-swept:
+   `maybe_zone_reset` × PHASE_CHPASS (looks like a peer-held denial, is not — an
+   AFK player in PHASE_CMD blocks resets identically), `render_who` vs `@stats`,
+   `line_crypto_bound`'s PHASE_CLASS pre-charge, and `session_free`'s
+   `SS_IDENT_CAND` wipe. **Still open:** the `--agnos` poll-loop variant of
+   `advance_tick` is a **second, separate driver** and every cell would have to be
+   re-checked there; and what the tick does to a session in `PHASE_CLASS` with
+   `SS_ROOM >= 0` (the heal state — an in-world body that `room_say_broadcast`,
+   `room_append_present`, `cmd_who` and `find_player_global` all skip on their
+   PHASE_CMD gates while `zone_has_player` counts it).
+3. **CYML loader fuzz coverage — still open, half-closed.** 31 hand-authored
+   structural mutations (truncation at every boundary, embedded NUL, 0xFF/0xFE
+   prose, duplicate ids and keys, self-referencing exits, 400-byte ids, 4000-byte
+   titles, 321 entries against `MAX_ENTRIES=32`, 23-digit and negative integers)
+   across all five loaders produced **no crash, hang, or out-of-bounds read** — the
+   rejection arms are genuinely robust. **But 31 samples is not coverage.** AX
+   closed the *record-parser* target; `cyrius fuzz` still contains **no CYML loader
+   target at all**.
+
+**Re-run #3's fourth gap — two players under one tick — is now ANSWERED, and the
+answer is a clean negative worth recording.** Every contended ordering that could
+be constructed — both players `get` the same object in one epoll batch, `put`/`get`
+on one container, `give` across a simultaneous RST-close, a shared mob kill with a
+stale `SS_TARGET`, a raced `get all from corpse` — **serialised and conserved
+correctly**. The object-conservation defects live in the **census accounting**, not
+in the command interleaving. **Do not re-sweep the interleavings.**
+
+**New gaps this run leaves open — these are what gate re-run #5 should target:**
+
+- **AGNOS has never been executed by any sweep.** All ten agents ran x86_64 only.
+  `running.md` already declares AGNOS persistence unverified end-to-end since
+  1.7.8. **This is now the single largest untested surface in the tree, and it is a
+  second copy of the event loop.** The agnosticos repo's `docker/descent-sweep/`
+  harness exists for exactly this.
+- **Audit-log rotation under volume.** The heaviest run in this sweep — 19,167
+  logins, 400 creations, 250 concurrent sessions — produced 47 kB of
+  `data/audit.libro`, **two orders of magnitude below the 8 MiB rotation trigger**.
+  Segment sealing, `_audit_prune`, the `AUDIT_SEG_KEEP = 4` window and the collision
+  guard have never been exercised on a running server. Forcing it needs a lowered
+  constant in a throwaway build.
+- **The broadcast fan-out breach point (item K / 2.0) is still unanswered.** 250
+  co-located players idle cost 0.83–2.50 ms CPU per tick with drift p99 at 13 ms
+  against a 50 ms allowance; one 200-byte `say` to 250 players costs 1.75 ms
+  (~7 µs/recipient). But nobody could keep 250 players in *sustained* combat — the
+  horde kills the room's mob faster than resets respawn it — so the combat arm
+  measured the same thing as the idle arm. **That needs a bench change, not a TCP
+  probe.**
+- **Nobody forged a record signature.** Several findings have a player-driven
+  variant reasoned from ADR 0004's threat model (the player owns their signing key)
+  rather than measured. A signing harness would close it.
+- **No multi-hour soak.** The longest continuous run was ~11 minutes. BB's
+  2,265 B/login slope is measured-linear across 36 MB; the OOM timeline is
+  extrapolated from it, not observed.
+- **Not filed as a defect:** 256 raw sockets that never send a byte refuse
+  legitimate connections on 13 of 14 probes and refill instantly as the 30 s reaper
+  collects them. That is inherent to a 256-slot server with no connection-*rate*
+  limiting — `MAX_SESSIONS` and the 1.6.3 accept backoff bound concurrency, not
+  arrival rate, **the same lever item AA already names**. Worth a decision
+  alongside AA rather than a new item.
 
 ---
 
@@ -1341,22 +1822,39 @@ zone field and a cap, both frozen by ADR 0007)*
 ## The gate — what closes the 1.x line
 
 **The 1.x line closes when a re-run sweep comes back with no critical or high
-findings.** That has not happened. It is item 5 in
-[What is left](#what-is-left), and it plus 1.7.0 and 1.7.1 are what block 2.0.
+findings.** That has not happened. **Gate re-run #4 came back 0/3/3/3** — see
+[its open issues](#open-issues--gate-re-run-4-returned-do-not-close-2026-07-31).
+Re-run #5 runs after 1.7.20, and it plus 1.7.18–1.7.20 are what block 2.0.
 
-Three sweeps have been done and **all three found serious defects the previous
-pass had missed** — a remote crash on `examine` (found at 1.6.9), an unbounded
-event batch costing 4.12 s of blocked loop (found at 1.6.12), and now a 252 ms
-pass at 504% of the drift budget plus an unbounded per-connection arena loss
-(the gate sweep, [open issues](#open-issues--8) A and C). The first two are
-fixed; the third sweep's findings are 1.7.0–1.7.3.
+**The trend is real and it is downward** — #2 was 0/2/3/3, #3 was 0/4/5/7, #4 was
+0/3/3/3 — but no run has yet cleared the bar.
 
-The bar stays where it is because the evidence is consistent: every pass so far
-has found real things, and each one found them in a place the previous pass had
-no instrument for. 1.6.9 built the first benches that touched save, login and
-loaders, and re-run #2 immediately found defects there. The gate sweep found A
-because it was the first time anything summed a whole tick pass. Expect the next
-re-run to find whatever 1.7.0's bench does not yet measure.
+Every sweep so far has **found serious defects the previous pass had missed**, and
+each found them in a place the previous pass had no instrument for: a remote crash
+on `examine` (1.6.9), an unbounded event batch costing 4.12 s of blocked loop
+(1.6.12), a 252 ms pass at 504% of the drift budget plus an unbounded
+per-connection arena loss (the gate sweep, items A and C), and — in #4 — an object
+duplicated on **every restart** because the boot path seeds a census 53 lines too
+late. 1.6.9 built the first benches touching save, login and loaders, and re-run
+#2 immediately found defects there. The gate sweep found A because it was the
+first time anything summed a whole tick pass. **#4 found AZ and BC because it was
+the first time anything compared `data/players/` against the live world.**
+
+**What changed at #4, and what it means for #5.** For the first time the sweep
+mostly stopped finding *pre-existing* defects: six of its nine survivors are
+siblings of fixes shipped in the previous three patch releases, and one was
+introduced by the head commit. **The sweep is now finding the incompleteness of
+its own recent fixes at roughly the rate the fixes retire them.** Two consequences:
+
+1. **Re-running the same surfaces will yield less each time.** Five of #4's six
+   surfaces are spent — the interleaving surface in particular came back a clean
+   negative and should not be re-swept. **#5's value is in the surfaces #4 could
+   not reach: AGNOS (never executed by any sweep, and a second copy of the event
+   loop), audit rotation under volume, and a forged-signature harness.**
+2. **The cheaper lever is process, not sweeping.** When a fix changes a predicate,
+   grep every call site of that predicate and every caller of the function it
+   lives in, and record the enumeration in the fix's own comment. Three of #4's
+   nine would have died to one grep.
 
 ### How the sweep went — for context, not for tracking
 

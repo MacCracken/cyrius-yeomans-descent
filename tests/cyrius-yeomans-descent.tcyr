@@ -6346,6 +6346,7 @@ fn main() {
     test_operator_edit_blast();
     test_peer_reachable_highs();
     test_mechanics_and_instruments();
+    test_boot_sequence();
 
 
     return assert_summary();
@@ -8506,10 +8507,9 @@ fn test_mechanics_and_instruments(): i64 {
     mob_remove(m2);
     session_free(p);
 
-    # --- AR. `parse_uint` refuses rather than wrapping.
+    # --- AR / BE. `parse_uint` refuses rather than wrapping — by ARITHMETIC,
+    # not by spending an ordinal bound in a reader that two domains share.
     assert_eq(parse_uint("3", 1), 3, "an ordinary ordinal parses");
-    assert_eq(parse_uint("1000000", 7), PA_ORDINAL_MAX, "...up to the documented bound");
-    assert_eq(parse_uint("1000001", 7), 0 - 1, "...and one past it is refused");
     # The wrap itself: 20 digits overflows i64 and used to land on a small
     # positive number, so `get 18446744073709551617.sword` resolved to a REAL
     # object — whichever one the wrap happened to select.
@@ -8518,6 +8518,55 @@ fn test_mechanics_and_instruments(): i64 {
     assert_eq(parse_uint("99999999999999999999", 20), 0 - 1, "...as is any other overflow");
     assert_eq(parse_uint("12x", 3), 0 - 1, "a non-digit is still refused");
     assert_eq(parse_uint("", 0), 0 - 1, "...and so is an empty token");
+    # BE — the refusal is now exactly at i64, and BOTH overflow arms are pinned.
+    # The second arm is the one `patra.cyr:3692` omits: at the cutoff a trailing
+    # 8 or 9 lands two past max, which a `v > limit` test alone lets through.
+    assert_eq(parse_uint("9223372036854775807", 19), 9223372036854775807,
+              "i64 max parses exactly");
+    assert_eq(parse_uint("9223372036854775808", 19), 0 - 1, "...and one past it is refused");
+    assert_eq(parse_uint("9223372036854775809", 19), 0 - 1,
+              "...including the trailing-9 case a bare cutoff test admits");
+
+    # BE — the ordinal bound moved OUT of the shared reader. Values above it are
+    # now real numbers here, because `toml_int` is the other caller and it reads
+    # -1 as "unparseable" and substitutes its caller's DEFAULT.
+    assert_eq(parse_uint("1000000", 7), PA_ORDINAL_MAX, "the ordinal bound is a real value");
+    assert_eq(parse_uint("1000001", 7), 1000001,
+              "BE: one past the ORDINAL bound is a NUMBER, not a refusal");
+
+    # ...and the ordinal domain still behaves exactly as AR left it, because the
+    # bound is enforced at `qual_parse`, the only caller that has an ordinal.
+    var pa_be = parser_new();
+    var qp_be[8]; var ql_be[8];
+    parser_parse(pa_be, "get 2.scrip", 11);
+    assert_eq(qual_single(pa_be, parsed_dobj(pa_be), &qp_be, &ql_be), 2,
+              "an ordinary ordinal still resolves");
+    parser_parse(pa_be, "get 1000001.scrip", 17);
+    assert_eq(qual_single(pa_be, parsed_dobj(pa_be), &qp_be, &ql_be), 1,
+              "AR's behaviour held: an over-bound ordinal is not an ordinal at all");
+    parser_parse(pa_be, "get 18446744073709551617.sword", 30);
+    assert_eq(qual_single(pa_be, parsed_dobj(pa_be), &qp_be, &ql_be), 1,
+              "...and neither is a wrapped one");
+    parser_free(pa_be);
+
+    # BE — THE REGRESSION THIS RELEASE EXISTS FOR. Every save-record and zone
+    # integer goes through `toml_int`, which folds -1 into its caller's default.
+    # With the ordinal bound inside `parse_uint`, an epoch-second value — ~1,780x
+    # the bound — was DISCARDED and replaced. `created` is read with a default of
+    # `get_epoch_secs()` (persist.cyr), so every player's creation date was
+    # overwritten with the login moment on every login and written straight back.
+    #
+    # Small literals cannot see this: every prior fixture used 1, 100, 999,
+    # 1234567 — or exactly 1000000, the largest value that still parsed. Use a
+    # GENUINE epoch second here, and nothing smaller.
+    assert_eq(toml_int(_pairs_of("created = \"1785543497\"\n"), "created", 999),
+              1785543497, "BE: a real epoch-second value survives toml_int");
+    assert_eq(toml_int(_pairs_of("last_login = \"1785543497\"\n"), "last_login", 0),
+              1785543497, "...so the 'last seen' greeting is no longer dead code");
+    assert_eq(toml_int(_pairs_of("reset_secs = \"31536000\"\n"), "reset_secs", 900),
+              31536000, "...and RESET_SECS_MAX is reachable again, not dead");
+    assert_eq(toml_int(_pairs_of("created = \"99999999999999999999\"\n"), "created", 42),
+              42, "...while a genuine overflow still falls back to the default");
 
     # --- AS. A KNOWN, DOCUMENTED LIMITATION, pinned rather than fixed.
     #
@@ -8621,6 +8670,70 @@ fn test_mechanics_and_instruments(): i64 {
     # the guard's presence is asserted here and its behaviour is exercised live.
     assert(_src_count("src/server.cyr", "g_session_count >= MAX_SESSIONS") >= 1,
            "the accept path still compares the live count against MAX_SESSIONS");
+    return 0;
+}
+
+# === 1.7.18 — the boot sequence (gate re-run #4, items AZ / BA / BH). ===
+#
+# All three live in `cmd_serve` or the loader it calls, and the suite cannot run
+# `cmd_serve` — it parks in epoll_wait. So the ORDER and the REACHABILITY are
+# asserted from the source, the technique 1.7.11/1.7.12/1.7.14/1.7.15 established
+# for exactly this, and each was verified against a running server alongside the
+# release. Source assertions are weak evidence of behaviour and strong evidence
+# of structure; these three defects were all structural.
+fn test_boot_sequence(): i64 {
+    test_group("boot-sequence");
+
+    # --- AZ. The boot object spawn must run AFTER the offline census is seeded.
+    #
+    # THE ORDERING IS THE ENTIRE FIX. `zone_reset_objs` consults
+    # `_obj_id_world_count`, whose offline term (AM, 1.7.16) is only meaningful
+    # once `persist_init` has seeded `g_obj_offline`. With the spawn above the
+    # seed, the ceiling test saw an empty census, believed nothing existed, and
+    # minted the full authored complement on top of what offline players held.
+    #
+    # Measured A/B against a live server for this release: pre-fix the boot spawn
+    # reported 13, 13, 13, 13 across four restarts with one object held offline;
+    # post-fix 13, 12, 12, 12. The 12 is the fix — the boot declines to re-mint
+    # the object that is on disk in somebody's record.
+    var persist_at = _src_offset_of("src/server.cyr", "persist_init();");
+    var spawn_at   = _src_offset_of("src/server.cyr", "var so = zone_reset_objs();");
+    assert(persist_at > 0, "cmd_serve seeds the persistence engine");
+    assert(spawn_at > 0, "...and spawns the authored room objects");
+    assert(spawn_at > persist_at,
+           "THE ASSERTION AZ EXISTS FOR: the boot spawn runs AFTER the offline census is seeded");
+
+    # --- BA. A rejected ROOM table is fatal, and it is fatal ABOVE the object
+    # load — which is what makes AJ's guard reachable.
+    #
+    # AJ (1.7.15) keyed its fatal arm on `world_load_objs`'s return code. That is
+    # correct and it was unreachable whenever the ROOMS table was the thing
+    # rejected, because the entire object/mob block was nested inside the rooms
+    # success arm. A guard on the return value of a function that is never called
+    # cannot fire. Asserting the guard EXISTS (which AJ's own test does, by
+    # offset) does not assert it can RUN.
+    var rooms_at       = _src_offset_of("src/server.cyr", "world_load_rooms(DP_ROOMS)");
+    var rooms_fatal_at = _src_offset_of("src/server.cyr", "world: FATAL — the room table was rejected.");
+    var objs_load_at   = _src_offset_of("src/server.cyr", "world_load_objs(DP_OBJS)");
+    assert(rooms_at > 0, "cmd_serve loads the room table");
+    assert(rooms_fatal_at > rooms_at, "...and refuses to start when that load FAILED");
+    assert(objs_load_at > rooms_fatal_at,
+           "THE ASSERTION BA EXISTS FOR: the object load sits BELOW the rooms guard, so it is reached on every path that survives it");
+    assert_eq(_src_count("src/server.cyr", "running roomless"), 0,
+              "...and the 'roomless' affordance that only ever emptied inventories is gone");
+
+    # --- BH. An unresolvable `start` id is a load error, not a silent ignore.
+    #
+    # `exit_<dir>` naming a nonexistent room returns WL_ERR_DANGLE and tears the
+    # world down; the header's `start` id had no else arm and no diagnostic ten
+    # lines away, so `g_start_room` kept its initialized 0 and the boot log was
+    # character-for-character identical to a correct configuration. The blast
+    # radius is wider than new characters: `world_start_room()` is also the
+    # fallback for a save whose room no longer resolves, and the respawn target.
+    assert(WL_ERR_NOSTART < 0, "an unresolvable start id has its own error code");
+    assert(WL_ERR_NOSTART != WL_ERR_DANGLE, "...distinct from a dangling exit");
+    var start_fail_at = _src_offset_of("src/world.cyr", "WL_ERR_NOSTART");
+    assert(start_fail_at > 0, "world_load_rooms can fail on an unresolvable start id");
     return 0;
 }
 
