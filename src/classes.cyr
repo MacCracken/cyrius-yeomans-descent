@@ -342,7 +342,13 @@ fn login_on_class(s, buf, len): i64 {
     # from the grid" for one coming back — though note that prose reaches only
     # ONLOOKERS: `room_broadcast` excludes the arriving session, so a test must
     # watch a second session in the room to see it.
-    if (load64(s + SS_ROOM) < 0) { session_enter_world(s); }
+    #
+    # 1.7.19 (BF) — CAPTURE THE DISCRIMINATOR BEFORE IT IS CONSUMED. The account
+    # counter below needs the same answer this line does, and `session_enter_world`
+    # overwrites SS_ROOM, so it cannot be re-read afterwards.
+    var is_new_character = 0;
+    if (load64(s + SS_ROOM) < 0) { is_new_character = 1; }
+    if (is_new_character == 1) { session_enter_world(s); }
     else { session_resume_world(s); }
     # H10 (1.6.5) — the character's FIRST record. Failing silently here means a
     # player finishes creation, plays, and finds nothing to log back in to.
@@ -363,7 +369,22 @@ fn login_on_class(s, buf, len): i64 {
         # window. `max_accounts` is a disk bound an operator chooses, not a
         # security boundary, and bounded overshoot is the right trade against
         # holding a reservation no teardown path could reliably release.
-        g_account_count = g_account_count + 1;
+        #
+        # === 1.7.19 (BF) — ONLY A NEW CHARACTER IS A NEW ACCOUNT. ===
+        #
+        # This function serves TWO flows, and AL counted both. The second is
+        # 1.7.11's classless-record heal, which sends an EXISTING character back
+        # to this menu — a record `accounts_count_disk()` already counted at boot,
+        # and nothing in the tree decrements. Every heal therefore burned a
+        # permanent extra slot: rename the class ids, heal two characters, and a
+        # third creation is refused at a cap of 3 with two files on disk.
+        #
+        # AO (1.7.15) established twenty-one lines above that this function serves
+        # two flows and added the SS_ROOM discriminator for the room. The account
+        # increment three lines below never got it — the same fix, the same
+        # function, the same release line, one call site short. Reusing AO's
+        # discriminator rather than inventing a second one is the point.
+        if (is_new_character == 1) { g_account_count = g_account_count + 1; }
     }
     session_send_cmd_prompt(s);
     return 0;

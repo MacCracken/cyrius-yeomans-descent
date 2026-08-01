@@ -123,6 +123,93 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 allowed to run the suite and the benches.**
 
 
+## [1.7.19] — 2026-07-31
+
+**Sessions in unusual states** — the second batch of gate re-run #4 (items **BC,
+BD, BF, BG**). 1436 assertions (was 1407); `cyrius audit` exits 0; 6/6 benches;
+2/2 fuzz targets; both targets build.
+
+One theme: a session that is **not a normal logged-in player** — a refused
+duplicate, a character parked in the class or passphrase menu, a healed classless
+record — corrupted a counter or froze its own upkeep.
+
+### Fixed
+
+- **BC — a refused duplicate login made the server believe objects still existed,
+  and they then stopped respawning.** The two census arms were asymmetric:
+  `_restore_inv`'s debit is clamped at zero (correctly — a mismatch must not
+  underflow), while `session_drop_inv`'s credit is not. On the refusal path the
+  live session already holds those ids, so the count is already zero, the login's
+  debit is swallowed by the clamp, and the teardown credits the full amount
+  anyway — **permanent phantom offline stock, and the zone quietly stops
+  restocking those objects for the life of the process.** New
+  `session_discard_inv` frees the copies without moving the census. Measured
+  directly: the pre-1.7.19 teardown **invents 2 holdings from nothing** after a
+  clamped restore; the new one moves the count by 0. **It fires by accident on
+  link-death** — a player whose connection dies keeps a session for `YD_IDLE_MS`,
+  and their reconnect inside that window is refused. No attacker; the owner, with
+  the correct passphrase. 1.7.12 (AE) reasoned about this exact teardown and
+  concluded duplication was not a risk "because `session_drop_inv` frees the
+  copies" — **true when written, and falsified by AM four releases later.**
+- **BD — cooldowns, energy and timed buffs stopped advancing the moment a player
+  opened the passphrase prompt.** `classes_upkeep` shared `combat_tick_all`'s
+  `PHASE_CMD` gate with the combat round, and it is the only decrementer of
+  `SS_CD0/1/2`, `SS_GUARD` and `SS_STIM` and the only source of energy and
+  out-of-combat regen. **1.7.16 (AK) fixed the other half of this same gate** —
+  it made mobs swing at a player in a non-CMD phase — without asking what else
+  the gate was holding ten lines away. Upkeep now runs for every session
+  `session_room_ok` admits, deliberately the same set AK decided mobs may swing
+  at: if the world may hit you in a phase, your body may keep metabolising in it.
+  Any other pairing is a state where damage accrues and recovery does not.
+- **BD (second half) — the phase could be held open forever.** `chpass_on_new`'s
+  two length-rejection arms re-prompted without counting anything, and every
+  rejected line refreshed `SS_LAST_MS`, so the idle reaper never fired either.
+  They now cost a counted attempt against `MAX_LOGIN_FAILS` and abandon the
+  re-key at the cap — the counter `_chpass_mismatch` twelve lines below has had
+  since G2 (1.6.12).
+- **BF — a character whose class no longer resolved burned a second account slot
+  every time it was healed.** `login_on_class` serves two flows and AL counted
+  both; the second is 1.7.11's classless-record heal, which sends an **existing**
+  character back to the menu — a record `accounts_count_disk()` already counted at
+  boot, with nothing anywhere to decrement. **AO (1.7.15) established twenty-one
+  lines above that this function serves two flows** and added the `SS_ROOM`
+  discriminator for the room; the account increment three lines below never got
+  it. Now reuses AO's discriminator rather than inventing a second one.
+- **BG — a peer parked at the class menu got the five-minute player grace instead
+  of the 30-second pre-auth deadline.** `session_is_idle` keyed on `SS_AUTHED`,
+  which `login_on_confirm` sets *before* the class menu is shown — so a session
+  with no class, no room, no record on disk and (since AL) not even an account
+  slot was treated as a logged-in player. **`sweep_idle` already knew better: AI
+  (1.7.14) moved the reap BUDGET to `session_persistable` and left the DEADLINE
+  four lines away on `SS_AUTHED`.** Now three tiers, with a new
+  `CLASSMENU_TIMEOUT_MS` of 90 s between them — not the bare 30 s, because a
+  genuine new player has four class descriptions to read and 30 s is a real
+  chance of timing out a person mid-decision.
+
+### Changed
+
+- `_mk_sess`, the test fixture, now sets `SS_ROOM = -1` to match `session_new`.
+  The `memset` left it at 0, which is not "unplaced" — it is "standing in room
+  index 0" — so **every creation test had been silently exercising AO's resume
+  path instead of the enter path it meant to.** This is the fixture that hid BF.
+
+### Lessons carried, added this release
+
+- *A comment that was true when written is not a comment that is true.* AE's
+  "duplication is NOT a risk here" was correct in 1.7.12 and was falsified by a
+  change to a different function four releases later. Nothing re-read it. The
+  same shape as BE last release, one altitude up.
+- *A fixture that does not match its constructor hides the defects that depend on
+  the difference.* `_mk_sess` diverged from `session_new` in exactly one field,
+  and that field is the discriminator two separate fixes (AO, BF) key on.
+- *Pick the instrument where the quantity is readable.* BC's live reproduction
+  needs a link-dead session, a reconnect inside the idle window, and two reset
+  intervals of decay, and its only end-to-end observable is whether a room
+  restocks — which the periodic reset also drives, so the signal is easy to lose.
+  Several live A/B attempts failed to discriminate. Asserting the **counter**
+  directly, with a counterfactual proving the old arm creates the phantom, took
+  one test and is stronger evidence than the room ever was.
+
 ## [1.7.18] — 2026-07-31
 
 **The boot sequence and the reader every table shares** — the first batch of gate

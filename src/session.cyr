@@ -1903,15 +1903,48 @@ fn session_consume_rx(s): i64 {
 # they walked away and should be given room; a connection that has not named
 # itself in 30 seconds is either broken or probing, and neither deserves a slot.
 # Hardcoded rather than a knob: ADR 0007 §6 freezes the YD_* set for 1.x.
-enum PreAuthConst { PREAUTH_TIMEOUT_MS = 30000; }
+#
+# 1.7.19 (BG) — and a THIRD deadline between them, for a session that has
+# authenticated but has not yet chosen a class.
+#
+# `session_is_idle` keyed on SS_AUTHED, which `login_on_confirm` sets BEFORE the
+# class menu is shown. So a session at PHASE_CLASS — no class, no room, no record
+# on disk, and since AL not even an account slot — was handed the full
+# five-minute grace of a logged-in player. `sweep_idle` already knew better: AI
+# (1.7.14) moved the reap BUDGET to `session_persistable` and left the DEADLINE
+# four lines away on SS_AUTHED.
+#
+# Why 90 s and not the bare 30 s pre-auth deadline: a genuine new player has to
+# read four class descriptions and choose, and 30 s is a real chance of timing
+# out a legitimate person mid-decision. 90 s cuts the squat's hold by 70% while
+# leaving ample room to read — the amplification, not the affordance, is the
+# defect.
+#
+# Kept in proportion deliberately. Gate re-run #4 measured the counterfactual:
+# 256 raw sockets sending NOT ONE BYTE refuse a legitimate client on 13 of 14
+# probes and open 375x faster than the class-menu route, so this is an
+# availability improvement, not a resource exhaustion this path enables. The
+# arrival-rate lever that would actually close that is item AA's, not this one's.
+enum PreAuthConst {
+    PREAUTH_TIMEOUT_MS   = 30000;
+    CLASSMENU_TIMEOUT_MS = 90000;
+}
 
-# Has this session been silent past its deadline? Logged-in players get
-# `timeout_ms`; a session that has not authenticated gets the shorter of that
-# and PREAUTH_TIMEOUT_MS — never longer. See the block above for why they differ.
+# Has this session been silent past its deadline? Three tiers, never longer than
+# `timeout_ms`: a session that has not authenticated gets PREAUTH_TIMEOUT_MS; one
+# that has authenticated but owns nothing persistable yet (the class menu) gets
+# CLASSMENU_TIMEOUT_MS; a real player gets the full `timeout_ms`. See the block
+# above for why they differ.
 fn session_is_idle(s, now_ms, timeout_ms): i64 {
     var limit = timeout_ms;
     if (load64(s + SS_AUTHED) == 0) {
         if (PREAUTH_TIMEOUT_MS < limit) { limit = PREAUTH_TIMEOUT_MS; }
+    } else {
+        # Authed but not yet persistable == no class chosen. The same predicate
+        # AI gave the reap budget, so the two finally agree.
+        if (session_persistable(s) == 0) {
+            if (CLASSMENU_TIMEOUT_MS < limit) { limit = CLASSMENU_TIMEOUT_MS; }
+        }
     }
     if (now_ms - load64(s + SS_LAST_MS) >= limit) { return 1; }
     return 0;

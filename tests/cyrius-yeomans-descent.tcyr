@@ -881,6 +881,17 @@ fn _mk_sess(name, nl): i64 {
     store64(s + SS_TX_BUF, fl_alloc(TX_CAP));
     var nm = fl_alloc(NAME_CAP); memcpy(nm, name, nl);
     store64(s + SS_NAME_BUF, nm); store64(s + SS_NAME_LEN, nl);
+    # 1.7.19 (BF) — MATCH `session_new`. The memset above leaves SS_ROOM at 0,
+    # which is not "unplaced", it is "standing in room index 0"; `session_new`
+    # (session.cyr:318) stores -1. Every fixture built here was therefore
+    # modelling an ALREADY-PLACED character, so every creation test silently
+    # exercised AO's resume path instead of the enter path it meant to.
+    #
+    # Nothing caught it because the two consumers of that distinction were both
+    # written after the helper: AO (1.7.15) reads it for the room, and BF reads it
+    # for the account count. This is the fixture that hid BF — the account
+    # increment was unconditional, so a wrong discriminator had nothing to change.
+    store64(s + SS_ROOM, 0 - 1);
     return s;
 }
 
@@ -6347,6 +6358,7 @@ fn main() {
     test_peer_reachable_highs();
     test_mechanics_and_instruments();
     test_boot_sequence();
+    test_unusual_session_states();
 
 
     return assert_summary();
@@ -8734,6 +8746,195 @@ fn test_boot_sequence(): i64 {
     assert(WL_ERR_NOSTART != WL_ERR_DANGLE, "...distinct from a dangling exit");
     var start_fail_at = _src_offset_of("src/world.cyr", "WL_ERR_NOSTART");
     assert(start_fail_at > 0, "world_load_rooms can fail on an unresolvable start id");
+    return 0;
+}
+
+# === 1.7.19 — sessions in unusual states (gate re-run #4, BC / BD / BF / BG). ===
+#
+# One theme: a session that is NOT a normal logged-in player — a refused
+# duplicate, a character parked in the class or passphrase menu, a healed
+# classless record — corrupts a counter or freezes its own upkeep.
+fn test_unusual_session_states(): i64 {
+    test_group("unusual-session-states");
+    persist_init();
+    if (g_obj_tpl_count == 0) { assert(0, "unusual-states: needs object templates"); return 0; }
+
+    # --- BC. A refused duplicate must not credit the census for holdings it
+    # never owned.
+    #
+    # The asymmetry IS the defect and both halves are pinned here:
+    # `obj_census_adjust`'s debit is clamped at zero (correctly — a mismatch must
+    # not underflow), while `session_drop_inv`'s credit is not. On the refusal
+    # path the live session already holds these ids, so the census is at zero,
+    # the login's debit is swallowed, and the teardown credits anyway.
+    var idx0 = 0;
+    var base = obj_offline_count(idx0);
+
+    # The credit half, unchanged: an ordinary disconnect DOES return holdings
+    # to the offline population. If this ever stops being true, AM has regressed
+    # and the discard below is measuring nothing.
+    var dropper = _freeable_sess();
+    store64(dropper + SS_INV, 0);
+    ilist_push(dropper + SS_INV, item_new(ot_at(idx0)));
+    ilist_push(dropper + SS_INV, item_new(ot_at(idx0)));
+    session_drop_inv(dropper);
+    assert_eq(obj_offline_count(idx0) - base, 2,
+              "an ordinary disconnect credits the offline census (AM, unchanged)");
+    obj_census_adjust(idx0, 0 - 2);                  # put the census back
+    assert_eq(obj_offline_count(idx0), base, "...and the fixture leaves no residue");
+
+    # The discard half: same two items, same list, no census movement.
+    var refused = _freeable_sess();
+    store64(refused + SS_INV, 0);
+    ilist_push(refused + SS_INV, item_new(ot_at(idx0)));
+    ilist_push(refused + SS_INV, item_new(ot_at(idx0)));
+    session_discard_inv(refused);
+    assert_eq(obj_offline_count(idx0), base,
+              "THE ASSERTION BC EXISTS FOR: a refused duplicate's copies are freed WITHOUT crediting the census");
+    assert_eq(load64(refused + SS_INV), 0, "...and the list is emptied, so the teardown finds nothing to credit");
+
+    # The clamp that made it one-sided, asserted directly so the reasoning above
+    # cannot rot: debiting past zero does NOT go negative.
+    obj_census_adjust(idx0, 0 - (obj_offline_count(idx0) + 5));
+    assert_eq(obj_offline_count(idx0), 0, "the census debit clamps at zero, it does not underflow");
+    obj_census_adjust(idx0, base);                   # restore the group's precondition
+
+    # ...and the refusal arm actually calls it.
+    assert(_src_count("src/persist.cyr", "session_discard_inv(s);") >= 1,
+           "the duplicate-login refusal discards the inventory it restored");
+
+    # THE WHOLE DEFECT, END TO END, at the altitude where the census is readable.
+    #
+    # The live reproduction needs a link-dead session, a reconnect inside
+    # YD_IDLE_MS and two zone-reset intervals of decay, and its only observable is
+    # whether a room restocks — which the periodic reset also drives, so the
+    # signal is easy to lose. Here the counter itself is readable, so the
+    # accounting can be asserted directly instead of inferred from a room.
+    #
+    # The precondition is the one that makes the refusal possible in the first
+    # place: the LIVE session already holds these ids, so the offline count for
+    # them is zero. That is what turns the login's debit into a no-op.
+    var scrip_tpl2 = obj_tpl_by_id("scrip", 5);
+    if (scrip_tpl2 != 0) {
+        var sidx = (scrip_tpl2 - g_obj_tpls) / OT_SIZE;
+        var held = obj_offline_count(sidx);
+        obj_census_adjust(sidx, 0 - held);               # live session owns them
+        assert_eq(obj_offline_count(sidx), 0, "precondition: nothing of this id is offline");
+
+        # The refused duplicate authenticates, so `_restore_inv` runs in full and
+        # mints its own copies before the refusal is even reached.
+        var dup = _freeable_sess();
+        store64(dup + SS_INV, 0);
+        assert_eq(_restore_inv(dup, "scrip,scrip", 11), 0, "the duplicate's record resolves");
+        assert_eq(inv_count(dup), 2, "...and two copies are minted");
+        assert_eq(obj_offline_count(sidx), 0,
+                  "...while the matching DEBIT is swallowed by the clamp — the count was already zero");
+
+        # Now the teardown. This is the line that used to run.
+        session_discard_inv(dup);
+        assert_eq(obj_offline_count(sidx), 0,
+                  "THE ASSERTION BC EXISTS FOR: no phantom offline stock after a refused duplicate");
+        assert_eq(inv_count(dup), 0, "...and the minted copies are gone");
+
+        # And the counterfactual, so the assertion above cannot pass vacuously:
+        # the arm that used to run here DOES create the phantom.
+        var dup2 = _freeable_sess();
+        store64(dup2 + SS_INV, 0);
+        _restore_inv(dup2, "scrip,scrip", 11);
+        session_drop_inv(dup2);                          # what 1.7.18 called
+        assert_eq(obj_offline_count(sidx), 2,
+                  "...and the pre-1.7.19 teardown is exactly what invented 2 holdings from nothing");
+        obj_census_adjust(sidx, 0 - 2);
+
+        obj_census_adjust(sidx, held);                   # restore the precondition
+    }
+
+    # --- BD. Upkeep is not gated on the phase — AK's other half.
+    #
+    # `classes_upkeep` is the ONLY decrementer of SS_CD0/1/2, SS_GUARD and
+    # SS_STIM and the only source of energy and out-of-combat regen. It used to
+    # share `combat_tick_all`'s PHASE_CMD gate with the combat round, so all five
+    # froze in a peer-held menu.
+    var saved_head = g_session_head;
+    var parked = session_new(0 - 1, 0);
+    store64(parked + SS_ROOM, 0);
+    store64(parked + SS_PHASE, PHASE_CHPASS_NEW);    # the peer-held menu
+    store64(parked + SS_TARGET, 0);
+    store64(parked + SS_CD0, 3);
+    store64(parked + SS_GUARD, 3);
+    g_session_head = parked;
+    store64(parked + SS_NEXT, 0);
+    combat_tick_all();
+    assert_eq(load64(parked + SS_CD0), 2,
+              "THE ASSERTION BD EXISTS FOR: a cooldown decays while parked in the passphrase menu");
+    assert_eq(load64(parked + SS_GUARD), 2, "...and so does a timed buff");
+    combat_tick_all();
+    assert_eq(load64(parked + SS_CD0), 1, "...every tick, not once");
+
+    # A session with no room is still skipped — `session_room_ok` is deliberately
+    # the same set AK decided mobs may swing at, so damage and recovery agree.
+    var roomless = session_new(0 - 1, 0);
+    store64(roomless + SS_ROOM, 0 - 1);
+    store64(roomless + SS_PHASE, PHASE_CHPASS_NEW);
+    store64(roomless + SS_CD0, 3);
+    g_session_head = roomless;
+    store64(roomless + SS_NEXT, 0);
+    combat_tick_all();
+    assert_eq(load64(roomless + SS_CD0), 3,
+              "a session with no body in the world does not metabolise");
+    g_session_head = saved_head;
+
+    # BD's other half: a length rejection in the re-key menu costs a counted
+    # attempt, so the phase cannot be held open forever.
+    var rk = _freeable_sess();
+    store64(rk + SS_PHASE, PHASE_CHPASS_NEW);
+    store64(rk + SS_FAILS, 0);
+    var tries = 0;
+    while (tries < MAX_LOGIN_FAILS) {
+        chpass_on_new(rk, "x", 1);                   # under PASS_MIN
+        tries = tries + 1;
+    }
+    assert_eq(load64(rk + SS_PHASE), PHASE_CMD,
+              "THE ASSERTION BD EXISTS FOR (2): enough short lines abandon the re-key instead of re-prompting forever");
+    assert_eq(load64(rk + SS_FAILS), 0, "...and the counter resets on abandon");
+
+    # --- BF. Only a NEW character is a new account.
+    #
+    # The healed classless record arrives at this menu with a room already
+    # restored, and `accounts_count_disk()` counted it at boot. AO added the
+    # SS_ROOM discriminator twenty-one lines above for the room; the account
+    # increment three lines below never got it.
+    assert(_src_count("src/classes.cyr", "if (is_new_character == 1) { g_account_count = g_account_count + 1; }") >= 1,
+           "THE ASSERTION BF EXISTS FOR: the account increment is gated on the same discriminator AO added");
+    assert_eq(_src_count("src/classes.cyr", "\n        g_account_count = g_account_count + 1;"), 0,
+              "...and the unconditional form is gone");
+
+    # --- BG. Three deadlines, and the class menu gets the middle one.
+    var idler = _freeable_sess();
+    store64(idler + SS_LAST_MS, 0);
+    store64(idler + SS_AUTHED, 0);
+    store64(idler + SS_CLASS, 0 - 1);
+    assert_eq(session_is_idle(idler, PREAUTH_TIMEOUT_MS, 300000), 1,
+              "an unauthenticated socket is reaped at the pre-auth deadline");
+
+    store64(idler + SS_AUTHED, 1);
+    store64(idler + SS_CLASS, 0 - 1);                 # authed, no class == class menu
+    assert_eq(session_is_idle(idler, PREAUTH_TIMEOUT_MS, 300000), 0,
+              "a class-menu session is NOT reaped at the bare pre-auth deadline (it has reading to do)");
+    assert_eq(session_is_idle(idler, CLASSMENU_TIMEOUT_MS, 300000), 1,
+              "THE ASSERTION BG EXISTS FOR: ...but it does NOT get the full player grace");
+    assert(CLASSMENU_TIMEOUT_MS < 300000, "...which is shorter than the player deadline");
+    assert(CLASSMENU_TIMEOUT_MS > PREAUTH_TIMEOUT_MS, "...and longer than the pre-auth one");
+
+    store64(idler + SS_CLASS, 0);                     # a real player
+    assert_eq(session_is_idle(idler, CLASSMENU_TIMEOUT_MS, 300000), 0,
+              "a player who chose a class keeps the full five-minute grace");
+    assert_eq(session_is_idle(idler, 300000, 300000), 1, "...and is reaped at it");
+
+    # The deadline and the reap budget finally ask the same question — AI moved
+    # the budget to `session_persistable` and left the deadline on SS_AUTHED.
+    assert(_src_count("src/session.cyr", "session_persistable(s) == 0") >= 1,
+           "the idle deadline keys on the same predicate as AI's reap budget");
     return 0;
 }
 

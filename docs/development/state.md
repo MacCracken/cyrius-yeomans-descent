@@ -3,15 +3,50 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.18 — **gate re-run #4 returned DO-NOT-CLOSE**
-> (0/3/3/3, items AZ-BH); its first batch **BE, AZ, BA, BH is closed**. Next is
-> 1.7.19 — BC, BD, BF, BG)
+> **Last refresh**: 2026-07-31 (v1.7.19 — **gate re-run #4 returned DO-NOT-CLOSE**
+> (0/3/3/3, items AZ-BH); **eight of its nine are closed**. Only **BB** is left,
+> and it is 1.7.20; then gate re-run #5)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.19** — 2026-07-31. **1436 assertions**; `cyrius audit` exits 0; 6/6 benches;
+**2/2 fuzz targets**; both targets build.
+
+**Sessions in unusual states** — the second batch of gate re-run #4. A session
+that is *not* a normal logged-in player corrupted a counter or froze its own
+upkeep, four ways.
+
+**A refused duplicate login invented offline stock and the zone stopped
+restocking.** The census debit is clamped and the credit is not, so the refusal
+path — where the live session already holds those ids — swallowed the debit and
+credited anyway. It fires on **link-death**, the most ordinary failure mode there
+is: a dead connection holds a session for `YD_IDLE_MS`, and the owner's reconnect
+inside that window is refused. AE's 1.7.12 comment says duplication is not a risk
+here "because `session_drop_inv` frees the copies" — true then, falsified by AM
+four releases later, never re-read.
+
+**`classes_upkeep` was inside `combat_tick_all`'s phase gate** — AK's other half,
+ten lines from the code AK changed — so cooldowns, energy, buffs and regen all
+froze in a menu a peer could hold open indefinitely.
+
+**Lessons carried, added this release:**
+
+- *A comment that was true when written is not a comment that is true.* AE's was
+  correct in 1.7.12 and falsified by a change to a different function four
+  releases later. Same shape as 1.7.18's BE, one altitude up.
+- *A fixture that does not match its constructor hides whatever depends on the
+  difference.* `_mk_sess` left `SS_ROOM` at 0 where `session_new` stores -1 — one
+  field, and it is the discriminator two separate fixes (AO, BF) key on. Every
+  creation test had been exercising the resume path.
+- *Pick the instrument where the quantity is readable.* BC's end-to-end
+  observable is whether a room restocks, which the periodic reset also drives —
+  several live A/B attempts failed to discriminate. Asserting the counter
+  directly, with a counterfactual proving the old arm creates the phantom, took
+  one test and is stronger evidence than the room ever was.
 
 **1.7.18** — 2026-07-31. **1407 assertions**; `cyrius audit` exits 0; 6/6 benches;
 **2/2 fuzz targets**; both targets build.

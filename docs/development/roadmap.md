@@ -1,8 +1,8 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.18 — **BE, AZ, BA and BH are closed**, the
-> first of three batches from gate re-run #4. Next is 1.7.19; the remaining open
-> items are **BC, BD, BF, BG** and then **BB**)
+> **Last Updated**: 2026-07-31 (v1.7.19 — **BC, BD, BF and BG are closed**, the
+> second of three batches from gate re-run #4. **BB is the only one left**, and it
+> is 1.7.20; then gate re-run #5)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -45,9 +45,9 @@ ownership and fix size.
 | — | ~~1.7.17~~ | ~~10~~ | ✅ **Shipped.** **AP** combat is two-sided · **AQ** the fuzz gate reached `NORM_CAP` for the first time (7,988x/run) and now asserts its own coverage · **AW** two benches that could not fail · plus AR, AT, AU, AV, AX, AY; **AS** documented as a content rule | — |
 | — | ~~gate re-run #4~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **3 high**, 3 medium, 3 low. Twelve reports collapsed to **nine distinct defects** (AZ-BH); one refuted. **Nine of nine are a rule applied at one site and not its sibling — and six are siblings of fixes from 1.7.15/16/17, one from the head commit itself** | — |
 | — | ~~1.7.18~~ | ~~4~~ | ✅ **Shipped.** **BE** the ordinal bound moved out of the shared reader — `parse_uint` now closes AR's wrap by exact i64 arithmetic, and `created` survives a login · **AZ** the boot spawn runs after the census is seeded (measured 13/13/13/13 → 13/12/12/12) · **BA** a rejected rooms table is fatal, so AJ's guard is reachable at last · **BH** `WL_ERR_NOSTART` | — |
-| 1 | [**1.7.19**](#1719--sessions-in-unusual-states) | 4 | **Next.** Sessions that are not a normal logged-in player — **BC** the refused duplicate poisons the census · **BD** `classes_upkeep` frozen in a peer-held menu (AK's other half) · **BF** the classless heal double-counts an account · **BG** the class-menu squatter's deadline | **yes** |
-| 2 | [**1.7.20**](#1720--the-login-parse-item-us-second-arm) | 1 | **BB** — the post-auth `toml_parse`, 2,248 B on every successful login, 883 MB/h from one socket. Item **U**'s second arm: 1.7.8 removed the pre-auth half and left this one | **yes** |
-| 3 | [**gate re-run #5**](#the-gate--what-closes-the-1x-line) | — | After 1.7.20. Same protocol as #4 (worktrees, build-and-run, paired skeptics) — but see the note there: five of the six surfaces #4 swept are now spent, and **AGNOS has never been executed by any sweep** | **yes** |
+| — | ~~1.7.19~~ | ~~4~~ | ✅ **Shipped.** Sessions that are not a normal logged-in player — **BC** the refused duplicate poisons the census · **BD** `classes_upkeep` frozen in a peer-held menu (AK's other half) · **BF** the classless heal double-counts an account · **BG** the class-menu squatter's deadline (a new 90 s tier) | — |
+| 1 | [**1.7.20**](#1720--the-login-parse-item-us-second-arm) | 1 | **Next.** **BB** — the post-auth `toml_parse`, 2,248 B on every successful login, 883 MB/h from one socket. Item **U**'s second arm: 1.7.8 removed the pre-auth half and left this one | **yes** |
+| 2 | [**gate re-run #5**](#the-gate--what-closes-the-1x-line) | — | After 1.7.20. Same protocol as #4 (worktrees, build-and-run, paired skeptics) — but see the note there: five of the six surfaces #4 swept are now spent, and **AGNOS has never been executed by any sweep** | **yes** |
 | 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
@@ -286,7 +286,20 @@ typo in an `exit_` id refuses the whole zone.** *(low)*
   `_wl_rooms_fail`, or at minimum a boot diagnostic naming the id that did not
   resolve.
 
-### 1.7.19 — sessions in unusual states
+### ✅ 1.7.19 — sessions in unusual states (SHIPPED)
+
+**Items BC, BD, BF and BG are CLOSED.** 1436 assertions (was 1407).
+
+**BC was proven at the counter, not at the room.** Several live A/B attempts
+failed to discriminate — the end-to-end observable is whether a room restocks,
+and the periodic reset drives that too, so the signal is easy to lose behind it.
+Asserting `obj_offline_count` directly settled it in one test, with a
+counterfactual showing the pre-1.7.19 teardown **invents 2 holdings from nothing**
+after a clamped restore while the new one moves the count by 0.
+
+**A test fixture was found lying.** `_mk_sess` memset `SS_ROOM` to 0 where
+`session_new` stores -1, so every creation test had been exercising AO's *resume*
+path rather than the *enter* path it meant to. That is the fixture that hid BF.
 
 **Items BC, BD, BF, BG.** *(2 medium, 2 low.)* One theme: a session that is **not
 a normal logged-in player** — a refused duplicate, a character parked in the class

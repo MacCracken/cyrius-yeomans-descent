@@ -135,6 +135,46 @@ fn session_drop_inv(s): i64 {
     return 0;
 }
 
+# === 1.7.19 (BC) — free an inventory WITHOUT moving the census. ===
+#
+# The sibling of `session_drop_inv` above, for the one path where the holdings
+# were never this session's to give back: a login that authenticated and was then
+# REFUSED as a duplicate.
+#
+# The two census arms are deliberately asymmetric and that asymmetry is the bug:
+# `_restore_inv`'s debit is CLAMPED at zero (`obj_census_adjust` refuses to go
+# negative, correctly — a mismatch must not underflow), while `session_drop_inv`'s
+# credit above is not. On the refusal path the live session already holds these
+# ids, so the census is already at zero and the login's debit is swallowed by the
+# clamp; the teardown then credits the full amount anyway. Net: +N phantom
+# OFFLINE holdings, permanent for the process, N = the record's inventory size.
+# `_obj_id_world_count` then believes the world is at its authored ceiling and
+# the zone quietly stops restocking those objects entirely.
+#
+# Measured by gate re-run #4: ONE refused reconnect on a record holding three
+# authored ids erased all three from the world — twelve consecutive resets at
+# `objs=0`, all three rooms empty to a fresh character.
+#
+# It fires by accident on the most common MUD failure mode there is. A player
+# whose connection dies silently keeps a session for YD_IDLE_MS (5 min by
+# default); their reconnect inside that window is refused as a duplicate. No
+# attacker, no malformed input — the owner, with the correct passphrase.
+#
+# 1.7.12 (AE) reasoned about exactly this teardown and concluded item duplication
+# was not a risk here, "because `session_drop_inv` frees the copies". That was
+# TRUE when it was written. 1.7.16 (AM) then taught `session_drop_inv` to credit
+# a census, four releases later, and this arm was never re-read.
+fn session_discard_inv(s): i64 {
+    var o = load64(s + SS_INV);
+    while (o != 0) {
+        var nxt = oi_next(o);      # capture before the free
+        obj_free(o);               # no obj_census_adjust — see the note above
+        o = nxt;
+    }
+    store64(s + SS_INV, 0);
+    return 0;
+}
+
 # Push `o` onto the front of the intrusive list at `slot`. O(1) and
 # order-agnostic — nothing in the game depends on inventory or room-object
 # ordering, so the cheapest insertion wins.

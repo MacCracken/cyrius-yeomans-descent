@@ -1384,8 +1384,38 @@ fn combat_tick_all(): i64 {
     var s = g_session_head;
     while (s != 0) {
         var nxt = load64(s + SS_NEXT);
+        # The ROUND is gated on PHASE_CMD: a player who is not at the command
+        # prompt cannot be issuing combat orders, so resolving their swing would
+        # be resolving an order they did not give.
         if (load64(s + SS_PHASE) == PHASE_CMD) {
             if (load64(s + SS_TARGET) != 0) { combat_round(s); }
+        }
+        # === 1.7.19 (BD) — UPKEEP IS NOT GATED ON THE PHASE. AK's other half. ===
+        #
+        # `classes_upkeep` used to sit inside the gate above, sharing it with the
+        # round. It is the ONLY decrementer of SS_CD0/1/2, SS_GUARD and SS_STIM,
+        # and the only source of energy and out-of-combat HP regen — so all five
+        # froze the moment a player opened the passphrase prompt, and the phase is
+        # peer-held: `chpass_on_new` re-prompts forever on an out-of-range length
+        # and every rejected line refreshes SS_LAST_MS, so the reaper never fires
+        # either.
+        #
+        # 1.7.16 (AK) fixed the OTHER half of this same gate — it made
+        # `mob_tick_all` swing at a player in a non-CMD phase, closing the
+        # permanent invulnerability. It did not ask what else the gate was
+        # holding, ten lines away, in the function it was reading.
+        #
+        # `session_room_ok` is deliberately the same set AK decided mobs may swing
+        # at: if the world is allowed to hit you in this phase, your body is
+        # allowed to keep metabolising in it. Any other pairing is a state where
+        # damage accrues and recovery does not, which is strictly worse than
+        # either rule applied consistently.
+        #
+        # Note most of the freeze ran AGAINST the player — no regen, no cooldown
+        # decay. Measured live: a parked player still DIED, 25 damage over 12
+        # ticks. What the exploit bought was -3 AC while helpless, which is why
+        # this is medium and not the high AK was.
+        if (session_room_ok(s) == 1) {
             classes_upkeep(s);   # energy regen + cooldown / buff decay (M5)
         }
         s = nxt;

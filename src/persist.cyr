@@ -2443,6 +2443,17 @@ fn login_on_pass(s, buf, len): i64 {
             # was never granted. Item duplication was chased here too and is NOT a
             # risk — `session_drop_inv` frees the copies `_restore_inv` minted
             # rather than dropping them to the room.
+            #
+            # 1.7.19 (BC) — THAT LAST SENTENCE STOPPED BEING TRUE IN 1.7.16.
+            # `session_drop_inv` still frees the copies, but AM taught it to
+            # CREDIT the offline census as it does, and `_restore_inv`'s matching
+            # debit was swallowed by the clamp on this path (the live session
+            # already holds these ids, so the count was already zero). The
+            # teardown therefore credited holdings this session never owned:
+            # permanent phantom offline stock, and the zone stops restocking those
+            # objects for the life of the process. Discard the copies HERE, where
+            # we know the census was never moved for them, so the teardown finds
+            # an empty list and has nothing to credit. See `session_discard_inv`.
             # Clearing SS_AUTHED is the whole fix and the ONLY thing needed: with
             # it clear, `session_persistable` is false and the dirty flag is never
             # consulted for this session again. A belt-and-braces
@@ -2450,6 +2461,7 @@ fn login_on_pass(s, buf, len): i64 {
             # mutation testing showed nothing could tell whether it was there,
             # which is the definition of a line that looks like a guard and is not.
             store64(s + SS_AUTHED, 0);
+            session_discard_inv(s);   # 1.7.19 (BC) — forward ref → item.cyr
             store64(s + SS_QUIT, 1);
             audit_keyed(AK_LOGIN_DUP, SEV_WARNING, "login.dup",
             load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
@@ -2811,9 +2823,48 @@ fn sess_cand_clear(s): i64 {
 # bytes and 64 SIGNATURE bytes were installed as the secret key, producing a
 # record that cannot verify under its own pubkey — permanent character loss plus
 # a false SEV_SECURITY "load.tamper" entry on the next login.
+
+# 1.7.19 (BD) — the shared abandon path for `chpass_on_new`'s two length arms.
+# Counts the attempt against MAX_LOGIN_FAILS and, at the cap, ends the re-key the
+# same way a run of mismatches does: back to the command prompt, passphrase
+# untouched, socket intact. See the note at the call sites.
+fn _chpass_len_reject(s, msg): i64 {
+    var fails = load64(s + SS_FAILS) + 1;
+    store64(s + SS_FAILS, fails);
+    if (fails >= MAX_LOGIN_FAILS) {
+        sess_cand_clear(s);
+        store64(s + SS_FAILS, 0);
+        store64(s + SS_PHASE, PHASE_CMD);
+        session_echo_on(s);
+        session_appendtx_cstr(s, "\r\nToo many failed attempts — re-key abandoned.");
+        session_appendtx_cstr(s, " Your passphrase is UNCHANGED.\r\n");
+        session_send_cmd_prompt(s);
+        return 0;
+    }
+    session_appendtx_cstr(s, msg);
+    return 0;
+}
+
 fn chpass_on_new(s, buf, len): i64 {
-    if (len < PASS_MIN) { session_appendtx_cstr(s, "Too short. New passphrase (4-64 chars): "); return 0; }
-    if (len > PASS_MAX) { session_appendtx_cstr(s, "Too long. New passphrase (4-64 chars): "); return 0; }
+    # === 1.7.19 (BD) — A LENGTH REJECTION COSTS A COUNTED ATTEMPT. ===
+    #
+    # These two arms used to re-prompt forever and count nothing. That is cheap in
+    # CPU — both return before `ident_derive`, so G2's derivation cap is not the
+    # issue — but it holds PHASE_CHPASS_NEW open indefinitely, and every rejected
+    # line refreshes SS_LAST_MS, so `sweep_idle` never collects the session
+    # either. An authenticated peer could therefore park in a non-command phase
+    # permanently, which is what made BD's frozen upkeep unbounded rather than a
+    # brief inconvenience.
+    #
+    # `_chpass_mismatch` twelve lines below has had this counter since G2
+    # (1.6.12); the two arms above it did not. Same function, same phase, same
+    # peer-held loop — the rule applied at one site and not its sibling.
+    #
+    # Deliberately NOT audited, unlike a mismatch: a short line is a typo, not a
+    # failed authentication, and AK_PASSWD_FAIL means something specific. The
+    # abandon path is shared so the user-visible outcome is identical.
+    if (len < PASS_MIN) { return _chpass_len_reject(s, "Too short. New passphrase (4-64 chars): "); }
+    if (len > PASS_MAX) { return _chpass_len_reject(s, "Too long. New passphrase (4-64 chars): "); }
     var cand = sess_cand(s);             # candidate salt|pk|sk (per session)
     random_bytes(cand, SALT_LEN);
     ident_derive(cand, buf, len, cand + IDENT_SK, cand + IDENT_PK);
