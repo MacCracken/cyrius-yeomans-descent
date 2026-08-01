@@ -39,13 +39,39 @@ cyrius build --agnos src/main.cyr build/descent-agnos     # static agnos ELF64
 [ASSIST] > run /bin/descent serve 4000
 ```
 
-What differs is entirely internal — players see no change. AGNOS `epoll` watches
-only signalfd/timerfd (never sockets) and is 3-arg, so the Linux epoll multiplexer
+AGNOS `epoll` watches only signalfd/timerfd (never sockets) and is 3-arg, so the
+Linux epoll multiplexer
 ([ADR 0003](../adr/0003-single-thread-event-loop-concurrency.md)) becomes a
 `sleep_ms`-paced poll loop: drain non-blocking `sock_accept`, sweep the session
 list with non-blocking `sock_recv` — same single-threaded single-owner model, same
-2.5 s combat tick. Clean shutdown is in-band / process-kill (AGNOS has no
-signalfd); the env knobs below are unchanged.
+2.5 s combat tick. The env knobs below are unchanged.
+
+> **What differs is NOT entirely internal, and this guide said it was until
+> 1.7.21.** Two differences players see:
+>
+> - **The population ceiling is 7, not `MAX_SESSIONS`.** Sockets come from an
+>   8-slot connection table compiled into the agnos syscall layer, and the
+>   listener holds one slot for the life of the process. Before 1.7.21 descent
+>   still believed 256, so the 8th client completed its TCP handshake and then sat
+>   on a blank screen — no banner, no error, no close. `MAX_SESSIONS` is now
+>   target-aware, so an over-capacity client gets the same polite refusal it gets
+>   on Linux. The ceiling itself is a kernel-side limit, not ours.
+> - **Clean shutdown needs `@shutdown`.** There is no signalfd on this target, so
+>   `SIGINT`/`SIGTERM` do not reach the loop. Before 1.7.21 there was **no
+>   in-band path either** — this guide claimed one and it did not exist — so the
+>   only way to stop the server was to kill it, and every connected player lost
+>   everything since their last autosave. Enable `YD_ADMIN=1` and use `@shutdown`.
+>
+> **Also unresolved on this target**, and stated rather than implied away: the
+> monotonic clock. Descent schedules everything — the combat tick, the save
+> sweep, the idle reaper, the zone-reset timer — off `mud_now_ms()`. Since 1.7.21
+> that reads `uptime_us` (#95, rdtsc-based) on AGNOS rather than `uptime_ms`
+> (#40), because the agnos syscall layer documents #40 as **frozen for a
+> foreground `run` program** — interrupts are disabled, so the 100 Hz timer that
+> drives it never fires. If that is accurate, a pre-1.7.21 server launched the
+> documented way never ticked at all: no combat, no autosave, no reset, while it
+> kept accepting logins. **Nobody has confirmed it on real hardware** — see the
+> harness note below.
 
 **Persistence (`data/players/`, `data/audit.libro`) — read this if you ran an
 AGNOS build before 1.7.8.** This guide claimed persistence "works identically"
@@ -67,14 +93,17 @@ construction against `lib/syscalls_x86_64_agnos.cyr`, but end-to-end persistence
 on a booted AGNOS kernel has not been re-verified since the fix. If you run one,
 that is the check worth reporting.
 
-To boot AGNOS and play the MUD off the sovereign kernel end-to-end (QEMU — no
-hardware needed), use the container harness in the **agnosticos** repo at
-`docker/descent-sweep/`:
-
-```sh
-./run.sh serve        # boots AGNOS + descent, then from your host: telnet 127.0.0.1 4444
-./run.sh              # or the automated assert-and-exit smoke
-```
+> **There is currently no way to boot AGNOS and play the MUD end-to-end.** This
+> section used to point at a container harness in the **agnosticos** repo at
+> `docker/descent-sweep/`. **That harness was retired on 2026-07-07** and the
+> directory is gone; the instructions here outlived it by several releases.
+>
+> Rebuilding it — or an equivalent QEMU harness — is the single highest-value
+> piece of test infrastructure this project is missing. Every AGNOS defect closed
+> in 1.7.21 was found by reading two arms of a preprocessor or by running under an
+> agnos→Linux syscall translator, which by its own documentation does not
+> exercise the kernel's scheduler, net stack or interrupt semantics — which is
+> exactly where the remaining unknowns live.
 
 ## Configuration (file)
 
@@ -120,6 +149,11 @@ with `YD_ADMIN=1` to enable them, then from any in-world session:
 - `@stats` — connections, logged-in count, ticks, tick-drift p99, idle timeout.
 - `@who` — connected players and their rooms.
 - `@reset` — force an immediate zone reset.
+- `@shutdown` — **since 1.7.21.** Stop the server cleanly from in-band: it saves
+  every connected session, flushes the audit tally and closes the listener, the
+  same exit path `SIGINT`/`SIGTERM` takes. On Linux prefer the signal; **on AGNOS
+  this is the only clean shutdown there is**, because that build has no signalfd
+  (see below).
 
 There is **no operator authentication yet** — `YD_ADMIN=1` enables the verbs for
 *every* connected player. Run with admin off on any shared/public deployment;
@@ -141,13 +175,51 @@ State lives under `data/` (created on first run, git-ignored):
   and it will convert as people log in.
 - `data/audit.libro` — append-only SHA-256 hash-chain audit log of security
   events (logins, saves, character creation, auth failures, tamper rejections).
+- `data/audit.libro.<N>` — **sealed segments.** See below.
+
+### The audit log is not one file
+
+ADR 0009 (shipped 1.7.4) gave the audit log **rotation**, and this guide did not
+mention it until 1.7.21. If you have ever seen an `audit.libro.1` in your `data/`
+and wondered what it was, this is it.
+
+- **Rotation.** When `data/audit.libro` passes its size trigger it is sealed and
+  renamed to `data/audit.libro.<N>`, numbered upward, and a fresh live file is
+  started. The rename is atomic; a crash mid-rotation cannot lose entries.
+- **Pruning and the retention bound.** Only the most recent few segments are
+  kept — older ones are deleted, and each deletion is **attested inside the
+  surviving chain** as an `audit.prune` entry carrying the retired segment's tail
+  hash. So a gap in the history is itself recorded and is distinguishable from
+  tampering. **This means the audit log has a bounded horizon by design: history
+  older than the keep window is gone, permanently, and pruning is not an error.**
+- **Verification is no longer a single-file operation.** To verify the chain you
+  must walk the segments in chronological order and then the live file, joining
+  each segment's tail hash to the next one's head. Verifying `audit.libro` alone
+  proves only the current segment.
+- **Never renumber or move segment files by hand.** The numbering is what tells
+  the server where the chain continues after a restart. A file moved out of
+  sequence — or a prune that failed and left a segment behind — made pre-1.7.21
+  servers resume from the wrong segment and report the chain as *tampered with*
+  when nothing had been. 1.7.21 makes that self-heal, but a hand-renumbered
+  directory is still the one input the format cannot reason about.
+- **If the log stops.** Since 1.7.21 the server prints
+  `server: AUDIT LOG IS NOT BEING WRITTEN` **once** if the store refuses a write
+  — a read-only `data/`, a full disk, wrong ownership. Before that it failed in
+  complete silence: the server carried on authenticating players while writing
+  nothing at all, with byte-identical output. If you see that line, the security
+  log has a hole in it from that moment until you fix the disk and restart.
 
 Records are crash-safe: a `kill -9` mid-write leaves the previous complete
 record intact. Each record is Ed25519-signed and version-stamped (`schema = 1`);
 a record tampered with, or stamped for a newer server, is rejected rather than
 loaded with bad state.
 
-> **Backups / migration.** Copy `data/players/` to back up characters — recursively, since 1.7.2 puts records in per-letter subdirectories. Records
+> **Backups / migration.** Copy `data/players/` to back up characters — recursively, since 1.7.2 puts records in per-letter subdirectories.
+> **To back up the audit chain you must copy `data/audit.libro` *and* every
+> `data/audit.libro.<N>` segment, together and at the same moment** — a backup of
+> the live file alone preserves only the current segment, and the sealed ones are
+> pruned by design and will be gone. This guide said "copy `data/players/`" and
+> nothing else for six releases. Records
 > are forward-gated by `schema`: a future server version that changes the field
 > set will bump the schema and migrate; this server refuses records stamped
 > newer than it understands. Records from 0.7.0–0.9.x (no `schema` field) load

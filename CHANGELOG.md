@@ -123,6 +123,159 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 allowed to run the suite and the benches.**
 
 
+## [1.7.21] — 2026-07-31
+
+**The target nobody had ever run** — gate re-run #5 (items **BI, BK, BL, BM, BN,
+BO, BP, BQ, BR, BS**). 1502 assertions (was 1476); `cyrius audit` exits 0; 6/6
+benches; 2/2 fuzz targets; both targets build.
+
+Re-run #5 returned **DO-NOT-CLOSE, 0 critical / 3 high / 5 medium / 4 low** — and
+**all three highs were on the AGNOS build, which no sweep had ever executed.**
+On x86_64 the run came back with **zero highs for the first time in seven
+sweeps.**
+
+### Fixed
+
+- **BI (high) — on AGNOS there was no clean shutdown at all.** That loop declares
+  `var stop = 0; while (stop == 0)` and **nothing in the tree ever assigned it**;
+  there is no signalfd on that target, so `handle_signal` has no counterpart.
+  Every statement after the loop — 1.7.11's `shutdown_save_all` (item AC), 1.7.1's
+  final `audit_flush_all`, the listener close — was **unreachable code**. Stopping
+  the server meant killing it, so every connected player lost everything since
+  their last autosave, on every restart. That is item AC verbatim, on the arm AC
+  was never carried to. New `@shutdown` admin verb sets a flag **both** loops
+  honour. `running.md` has claimed "clean shutdown is in-band" since 1.1.0;
+  it is now true.
+- **BK (high) — the AGNOS scheduling clock is documented as frozen on the launch
+  path this project's own guide gives.** `clock_now_ms()` is `sys_uptime_ms()`
+  (#40), which reads the kernel's 100 Hz `timer_ticks`; the agnos syscall layer
+  states at `lib/syscalls_x86_64_agnos.cyr:790` that a **foreground `run` program
+  executes with interrupts disabled, so #40 is FROZEN for that program's entire
+  run** — and `running.md` documents the launch as exactly `run /bin/descent serve
+  4000`. Every deadline in the tree is a difference of that clock, so a frozen one
+  means combat never resolves, nobody is autosaved, nobody is idle-reaped and the
+  zone never resets, while logins keep succeeding. Descent now owns its scheduling
+  clock (`mud_now_ms`, reading rdtsc-based #95 on AGNOS); all 48 call sites route
+  through it, so there is **one** place to change if the upstream answer lands.
+  `lib/chrono.cyr` is vendored and was not touched.
+- **BL (medium) — 1.7.19's own fix had a mirror image, and this is the second
+  time this exact path has produced a defect.** `obj_census_adjust`'s debit clamps
+  at zero and `session_drop_inv`'s credit does not, so a refusal running *after*
+  `_restore_inv` **over**-counted when the duplicate was the sole offline holder
+  (BC, 1.7.19) and **under**-counted when anyone else also held that template —
+  minting a permanent extra copy. Measured: sole holder → `objs +0`; add a second
+  offline holder and the identical run → `objs +1`, four times out of four.
+  **Fixed by refusing the duplicate inside `player_auth_load`, before any field is
+  restored** — nothing is minted, no census moves, `SS_AUTHED` is never set. H11's
+  constraint is preserved exactly (the check still runs after `ed25519_verify`, so
+  it cannot probe who is online). AE's disown and BC's discard both became
+  unnecessary rather than being re-fixed, and `session_discard_inv` was **deleted**
+  rather than left dead.
+- **BM (medium) — one skipped prune inverted the audit segment numbering
+  permanently.** `_audit_seg_hi`'s early stop rested on "the retained run is
+  contiguous" and called stopping early *"SAFE, not merely fast"*. Strand one
+  segment — a `kill -9` in the window between rename and unlink, which
+  `running.md` tells operators is safe — and the scan returns the **orphan's**
+  number as highest: new history sealed below old segments, resume from the wrong
+  segment after a crash, and a prune whose arithmetic victim no longer exists.
+  Demonstrated on the shipped binary: the chain resumed **four segments / 36
+  entries stale**, and ADR 0009's own verification walk reported six boundary
+  breaks and three false `audit.prune` attestations. No entry is ever lost — the
+  log simply accuses itself of tampering, in the one artifact whose whole job is
+  to be trusted. Both halves fixed together, because either alone leaves the
+  causal chain intact.
+- **BN (medium) — when `data/` could not be written the server kept
+  authenticating players while writing nothing to the audit chain.**
+  `audit_event` discarded the store's return, and `g_audit_emitted` was
+  incremented on the line **before** the append — so 1.7.1's counter, added
+  precisely because *"a counter at the call site cannot be wrong about how many
+  entries were written"*, was wrong under the one failure it needed to survive.
+  Measured with `chmod 0444` and with the log symlinked to `/dev/full`: zero new
+  entries, server alive, **stdout+stderr byte-identical at 305 bytes** across
+  baseline, both outages and recovery. The counter now advances only after a
+  successful append, and a failure latches one operator-visible line.
+- **BO (medium) — running the release gate on any tree that had served players
+  failed it.** AM (1.7.16) made `_obj_id_world_count` add offline holdings, and
+  the 1.7.16 CHANGELOG warned in as many words that a test depending on disk state
+  is a landmine. The precondition was added to the `reset` group and **not** to
+  `object-maxexist` — the group that guards the ceiling itself. **Verified A/B
+  this release:** two ordinary players each took one authored `notice` over TCP
+  and quit; with the precondition disabled the suite **FAILS**, with it restored
+  1502 pass. The second-order cost is why it mattered: without it that test could
+  only ever run with the offline term at zero — the blind state that hid AZ.
+- **BP (medium) — the AGNOS build silently served at most seven players.** Every
+  socket comes from an 8-slot table compiled into the syscall layer and the
+  listener holds one permanently, so `MAX_SESSIONS = 256` was unreachable dead
+  code — **36× below what the server believed and what `@stats` reported
+  against.** Because the table filled before descent's own check, H6's polite
+  close never fired: the 8th peer completed its handshake and sat on a blank
+  screen. Measured: conns 0–6 got the banner, conns 7–11 got zero bytes.
+  `MAX_SESSIONS` is now target-aware. The table itself is a kernel-side limit and
+  is not ours; lying about it was.
+- **BQ (low) — the control-byte guard covered three of four string fields.**
+  `_build_record` writes exactly four `_fstr` values — name, **class**, room, inv
+  — and M11-C checked three. AN (1.7.15) made `class` a player-controlled string
+  and the guard was never extended. Four forged records with one `0x01` byte each:
+  name/room/inv were refused as tampered, **`class` authenticated and loaded.**
+  This shipped in 1.7.20's own new scanner, against its own written contract that
+  *"the check has to exist BEFORE 2.0 adds a free-text field, not after."*
+- **BR (low) — `_audit_prune` attested deletions that had not happened.** It wrote
+  the marker even when `_audit_tail_hash` returned 0 — against the rule stated
+  three lines above it, *"a marker naming a file with no hash attests nothing"* —
+  and discarded `xunlink`'s return while incrementing the pruned counter
+  unconditionally. Measured with a directory as the victim: `"details":"7 "`, a
+  segment number and no hash, with the directory still on disk.
+- **BS (low) — `running.md` still described the audit log as one file.** ADR 0009
+  shipped rotation in 1.7.4 and committed to two operator-facing costs —
+  "verification is no longer a single-file operation" and "segment files are a new
+  operator-visible artifact" — and neither reached the guide for six releases.
+  `grep -icE "rotat|segment|prune"` over it returned **0**. The Backups block said
+  copy `data/players/` and nothing else, so an operator following it lost the
+  entire audit chain. Added: rotation, the retention horizon, why a gap is
+  attested rather than suspicious, how to verify across segments, a "never
+  renumber segments by hand" warning that BM makes load-bearing, and what the new
+  BN line means. Also corrected three stale claims in the same file — the
+  "players see no change" AGNOS assertion (BP and BI both falsify it) and a
+  pointer to a QEMU harness **deleted on 2026-07-07**.
+
+### Deferred, deliberately
+
+- **BJ (high) — `session_drain`'s only would-block arm is Linux `EAGAIN`.** On
+  AGNOS `sys_write` routes to blocking `sock_send` #48, which has no EAGAIN, so
+  the arm is dead code and one stalled client parks the single-threaded loop
+  (measured: a bystander's `look` went 0.000 s → 15.7 s under emulation). **The
+  read half got an AGNOS branch at `session.cyr:1970` under a comment that is word
+  for word true of the write half.** Not fixed here because agnos exposes **no
+  non-blocking send primitive at all** — this needs the same upstream `lib/`
+  decision item **AA** is already waiting on, and the two should be one
+  conversation rather than a patch that guesses.
+- **BT (low) — `corpse_of` mints loot outside the object ceiling**, so rooms
+  authoring the same ids stop restocking. It is the object-lifetime/ownership
+  question and belongs with **M15**, not a patch release.
+
+### Lessons carried, added this release
+
+- ***A defect you fix can have a mirror image, and fixing one half can create the
+  other.*** BC (1.7.19) and BL (1.7.21) are the same code path, one release apart,
+  in opposite directions — because the compensating fix reasoned about the clamped
+  case and not the un-clamped one. **The cure was to stop compensating**: moving
+  the refusal ahead of the restore deletes both halves and the function BC added.
+  When a fix "puts back" what another step took, ask whether the step should
+  happen at all.
+- *Enumerate a guard's class from the WRITER, not from memory.* BQ covered three
+  of four string fields because someone listed the fields they were thinking
+  about. `_build_record` has exactly four `_fstr` calls and could have been
+  grepped. This extends #4's prescription — *grep every call site of a predicate
+  you changed* — to **every member of a class a new guard claims to cover.**
+- *An early exit justified by an invariant is a bet that the invariant holds
+  forever.* BM's early stop was explicitly argued to be "SAFE, not merely fast",
+  and a single skipped prune falsified it permanently. The 8 ms it saved was paid
+  once per process; the failure it enabled was permanent false tamper reports.
+- *A second target is a second copy of every rule.* Three of this release's ten
+  items are one arm of a preprocessor having a fix the other never got. The tree
+  has had two event loops since 1.1.0 and no sweep had run the second one until
+  now.
+
 ## [1.7.20] — 2026-07-31
 
 **The login parse** — the last item of gate re-run #4 (**BB**, filed as item U's

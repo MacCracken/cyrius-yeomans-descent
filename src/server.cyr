@@ -16,12 +16,40 @@ enum ServerConst {
     LISTEN_BACKLOG   = 32;
     TICK_MS          = 2500;   # ADR 0001 — 2.5 s combat tick
     MAX_EPOLL_EVENTS = 64;
-    # H6 (1.6.3) — concurrent-session ceiling, and how many ticks the listener
-    # stands down after a real accept error. 256 sessions is far above anything
+    # === 1.7.21 (BP) — TARGET-AWARE, because the floor is not ours on AGNOS. ===
+    #
+    # 256 is a policy ceiling on Linux. On AGNOS it was **unreachable dead code**:
+    # every socket comes from `_agnos_sock_open`, which allocates out of
+    # `var _agnos_conn_tbl: i64[8]` (lib/syscalls_x86_64_agnos.cyr:280), and the
+    # listener permanently holds one slot — so **seven** clients is the hard
+    # ceiling, 36x below what this constant claims and what `@stats` reports
+    # against. The table is compiled into the binary, so no kernel changes it.
+    #
+    # The consequence was worse than the number. Because the table filled BEFORE
+    # descent's own check, the connection never became a client fd descent could
+    # see: H6's polite close never fired, and the 8th peer completed its TCP
+    # handshake and then sat on a blank screen — no banner, no error, no close.
+    # Measured: conns 0-6 each got the 213-byte banner; conns 7-11 got zero bytes.
+    #
+    # `running.md:42` says of this target "What differs is entirely internal —
+    # players see no change." A 36x population ceiling is not internal. Corrected
+    # there in the same release.
+    #
+    # 7, not 8: the listener owns a slot for the life of the process. Matching the
+    # real floor is what lets H6's existing close path fire, so the 8th client
+    # gets a refusal it can see instead of silence. Raising the table itself is an
+    # agnos-kernel question and is NOT ours — this only stops us lying about it.
+    #ifdef CYRIUS_TARGET_AGNOS
+    MAX_SESSIONS       = 7;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    # H6 (1.6.3) — concurrent-session ceiling. 256 sessions is far above anything
     # this single-threaded loop serves comfortably and far below a default
     # 1024-fd limit, leaving headroom for the listener, signalfd, epoll fd, save
     # files and the audit store.
     MAX_SESSIONS       = 256;
+    #endif
+    # How many ticks the listener stands down after a real accept error.
     ACCEPT_BACKOFF_TICKS = 4;
     # H1 (1.6.14) — the epoll_event layout, PER ARCHITECTURE.
     #
@@ -238,7 +266,7 @@ enum SaveSweepConst {
 # many were written. Called every tick; the cadence lives on the session, in
 # save_sweep_due. See the block above for the throughput argument.
 fn save_sweep(): i64 {
-    var now = clock_now_ms();
+    var now = mud_now_ms();
     var budget = SAVE_BATCH_MAX;
     var saved = 0;
     var s = g_session_head;
@@ -252,7 +280,7 @@ fn save_sweep(): i64 {
                 # idea; the audit chain is the only durable record.
                 if (player_save(s) != 1) {
                     audit_keyed(AK_SAVE_FAIL_SWEEP, SEV_WARNING, "save.fail.sweep",
-                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
                 }
                 budget = budget - 1;
                 saved = saved + 1;
@@ -659,7 +687,7 @@ fn maybe_zone_reset(): i64 {
     if (g_reset_secs_override > 0) {
         interval_ms = clamp_reset_secs(g_reset_secs_override) * 1000;
     }
-    var now = clock_now_ms();
+    var now = mud_now_ms();
     if (now - g_zone_last_reset_ms < interval_ms) { return 0; }   # window not elapsed
     if (zone_has_player() == 1) { return 0; }                     # M7-B defer
     var mobs = zone_reset_mobs();   # M7-C
@@ -701,7 +729,7 @@ fn advance_tick(): i64 {
     # tail of a flood that stopped; ADR 0009's size probe is metered by
     # audit_rotate_check_due, so it costs nothing on 23 ticks out of 24 and ~2.6 us
     # (zero arena) on the 24th — against ADR 0001's 50 ms.
-    var audit_now = clock_now_ms();
+    var audit_now = mud_now_ms();
     audit_flush_due(audit_now);
     if (audit_rotate_check_due(g_tick_count) == 1) { audit_rotate_maybe(audit_now); }
     mob_tick_all(g_tick_count);   # M13 — every living mob takes a turn
@@ -840,7 +868,7 @@ fn drop_session(epfd, s): i64 {
         # find it afterwards.
         if (player_save(s) != 1) {
             audit_keyed(AK_SAVE_FAIL_DISC, SEV_WARNING, "save.fail.disconnect",
-            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
         }
     }
     #ifndef CYRIUS_TARGET_AGNOS
@@ -923,7 +951,7 @@ fn shutdown_save_all(): i64 {
                 } else {
                     failed = failed + 1;
                     audit_keyed(AK_SAVE_FAIL_DISC, SEV_WARNING, "save.fail.shutdown",
-                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
                 }
             }
         }
@@ -1029,7 +1057,7 @@ fn tick_step(epfd, next_tick, now, tick_ms): i64 {
     # the tick's duration would reap a marginal session a pass early, and the
     # timeout is five minutes. Gratuitous churn in a patch release.
     sweep_idle(epfd, now);
-    return tick_reschedule(next_tick, clock_now_ms(), tick_ms);
+    return tick_reschedule(next_tick, mud_now_ms(), tick_ms);
 }
 
 # === Observability (M1-H). =================================================
@@ -1198,7 +1226,7 @@ fn render_reset(s): i64 {
     if (world_room_count() == 0) { session_appendtx_cstr(s, "No zone loaded.\r\n"); return 0; }
     var mobs = zone_reset_mobs();
     var objs = zone_reset_objs();
-    g_zone_last_reset_ms = clock_now_ms();
+    g_zone_last_reset_ms = mud_now_ms();
     zone_reset_log(mobs, objs);
     session_appendtx_cstr(s, "zone reset forced — mobs +");
     session_appendtx_num(s, mobs);
@@ -1842,7 +1870,7 @@ fn cmd_serve(port): i64 {
     }
     # 1.7.17 (AU) — seed from ENTROPY, not from uptime.
     #
-    # This was `combat_seed(clock_now_ms())`, and `clock_now_ms` is milliseconds
+    # This was `combat_seed(mud_now_ms())`, and `clock_now_ms` is milliseconds
     # since BOOT, not since the epoch (a distinction this project already learned
     # the hard way in 1.6.8, when a 5-minute cadence was tested against it). A
     # server started by an init system at a repeatable point in the boot sequence
@@ -1855,7 +1883,7 @@ fn cmd_serve(port): i64 {
     # target cannot silently take the seed to a constant.
     var seed_buf[8];
     random_bytes(&seed_buf, 8);
-    combat_seed(load64(&seed_buf) ^ clock_now_ms() ^ (get_epoch_secs() << 20));
+    combat_seed(load64(&seed_buf) ^ mud_now_ms() ^ (get_epoch_secs() << 20));
     # M6: persistence engine — buffers, data/ dirs, libro audit chain — and
     # the debounced save cadence (~5 min of ticks, never below one).
     persist_init();
@@ -1887,7 +1915,7 @@ fn cmd_serve(port): i64 {
     print_num(so); println(" objs spawned");
     # M7: start the zone-reset clock from boot (resets are measured since
     # last reset, not server start — but boot IS the first "reset").
-    g_zone_last_reset_ms = clock_now_ms();
+    g_zone_last_reset_ms = mud_now_ms();
     println("world: zone-reset timer armed");
     println("yeoman's descent — starting event-loop listener");
     println("server: listening on port");
@@ -1923,10 +1951,10 @@ fn cmd_serve(port): i64 {
     epoll_add_in(epfd, lfd, TAG_LISTENER);
     epoll_add_in(epfd, sigfd, TAG_SIGNAL);
     var events_buf = alloc(MAX_EPOLL_EVENTS * 16);   # H1 — 16 covers both layouts
-    var next_tick = clock_now_ms() + g_tick_ms;
+    var next_tick = mud_now_ms() + g_tick_ms;
     var stop = 0;
     while (stop == 0) {
-        var now = clock_now_ms();
+        var now = mud_now_ms();
         var timeout_ms = next_tick - now;
         if (timeout_ms < 0) { timeout_ms = 0; }
         # 1.7.0 — do not park in epoll_wait while refused lines are sitting in
@@ -1980,14 +2008,19 @@ fn cmd_serve(port): i64 {
             var ev_mask = load32(events_buf + ev_off);
             var data = load64(events_buf + ev_off + epoll_data_off());
             if (data == TAG_LISTENER) {
-                handle_accept(epfd, lfd, clock_now_ms());
+                handle_accept(epfd, lfd, mud_now_ms());
             }
             if (data == TAG_SIGNAL) {
                 stop = handle_signal(sigfd);
             }
+            # 1.7.21 (BI) — `@shutdown` works here too. This arm does not NEED it
+            # (signalfd already exits cleanly), but a verb that exists on one
+            # target and not its sibling is the shape six consecutive sweeps have
+            # found. One verb, both loops, same exit block.
+            if (g_shutdown_requested == 1) { stop = 1; }
             if (data > TAG_SIGNAL) {
                 var keep[8];
-                budget = event_batch_step(epfd, data, ev_mask, clock_now_ms(), budget, &keep);
+                budget = event_batch_step(epfd, data, ev_mask, mud_now_ms(), budget, &keep);
                 if (load64(&keep) == 0) {
                     drop_session(epfd, data);
                     # === 1.7.12 (AF) — charge the teardown. ===
@@ -2027,7 +2060,7 @@ fn cmd_serve(port): i64 {
         # Tick check — absolute scheduling per ADR 0003. If we drifted
         # past one tick, snap next_tick straight to the next future
         # boundary so we don't fire a burst of catch-up ticks.
-        now = clock_now_ms();
+        now = mud_now_ms();
         if (now >= next_tick) {
             next_tick = tick_step(epfd, next_tick, now, g_tick_ms);   # H14
         }
@@ -2044,10 +2077,10 @@ fn cmd_serve(port): i64 {
     # runs the combat tick on its absolute 2.5 s schedule. No signalfd —
     # shutdown is process-kill / in-band. ~20 ms cadence ≈ 50 sweeps/s.
     g_epfd = 0;   # room broadcasts call flush_session(g_epfd, …); epfd is unused on agnos
-    var next_tick = clock_now_ms() + g_tick_ms;
+    var next_tick = mud_now_ms() + g_tick_ms;
     var stop = 0;
     while (stop == 0) {
-        handle_accept(0, lfd, clock_now_ms());
+        handle_accept(0, lfd, mud_now_ms());
         # Non-blocking recv sweep over the active-session list. drop_session
         # unlinks the current node, so capture SS_NEXT before dispatch.
         # G1 (1.6.12) — the agnos sweep gets the same budget, and needed it more:
@@ -2059,7 +2092,7 @@ fn cmd_serve(port): i64 {
         while (s != 0) {
             var nxt = load64(s + SS_NEXT);
             var keep[8];
-            budget = event_batch_step(0, s, EPOLLIN, clock_now_ms(), budget, &keep);
+            budget = event_batch_step(0, s, EPOLLIN, mud_now_ms(), budget, &keep);
             if (load64(&keep) == 0) {
                 drop_session(0, s);
                 # 1.7.12 (AF) — the agnos twin, and it needed this MORE than the
@@ -2077,7 +2110,7 @@ fn cmd_serve(port): i64 {
         }
         drain_pending_rx();
         event_pass_end();
-        var now = clock_now_ms();
+        var now = mud_now_ms();
         if (now >= next_tick) {
             next_tick = tick_step(0, next_tick, now, g_tick_ms);   # H14
         }
@@ -2086,6 +2119,11 @@ fn cmd_serve(port): i64 {
         # agnos backlog would drain at 50 lines/s. The sleep is the ONLY thing
         # pacing this loop, so it is restored the moment the backlog clears.
         if (g_rx_backlog == 0) { sys_sleep_ms(20); }
+        # 1.7.21 (BI) — THE ONLY WAY OUT OF THIS LOOP. Without it `stop` is
+        # declared, tested, and never assigned anywhere in the tree, so every
+        # statement below the `#endif` — the shutdown save, the audit flush, the
+        # listener close — is unreachable on this target.
+        if (g_shutdown_requested == 1) { stop = 1; }
     }
     #endif
     println("server: shutdown signal received; closing listener.");

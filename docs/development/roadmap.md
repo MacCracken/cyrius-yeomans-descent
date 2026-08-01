@@ -1,8 +1,10 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.20 — **every finding from gate re-run #4 is
-> closed (AZ-BH)**. Next is gate re-run #5 — and see its note: five of #4's six
-> surfaces are spent, and **AGNOS has never been executed by any sweep**)
+> **Last Updated**: 2026-07-31 (v1.7.21 — **gate re-run #5 returned DO-NOT-CLOSE**
+> (0/3/5/4, items BI-BT); **ten of its twelve are closed**. Open: **BJ** (needs the
+> `lib/net.cyr` decision AA is waiting on) and **BT** (belongs with M15). The 1.x
+> gate is now blocked by ONE target — and **x86_64 came back with zero highs for
+> the first time in seven sweeps**)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -47,7 +49,11 @@ ownership and fix size.
 | — | ~~1.7.18~~ | ~~4~~ | ✅ **Shipped.** **BE** the ordinal bound moved out of the shared reader — `parse_uint` now closes AR's wrap by exact i64 arithmetic, and `created` survives a login · **AZ** the boot spawn runs after the census is seeded (measured 13/13/13/13 → 13/12/12/12) · **BA** a rejected rooms table is fatal, so AJ's guard is reachable at last · **BH** `WL_ERR_NOSTART` | — |
 | — | ~~1.7.19~~ | ~~4~~ | ✅ **Shipped.** Sessions that are not a normal logged-in player — **BC** the refused duplicate poisons the census · **BD** `classes_upkeep` frozen in a peer-held menu (AK's other half) · **BF** the classless heal double-counts an account · **BG** the class-menu squatter's deadline (a new 90 s tier) | — |
 | — | ~~1.7.20~~ | ~~1~~ | ✅ **Shipped.** **BB** — the post-auth `toml_parse`, 2,248 B on every successful login, 883 MB/h from one socket. **2,332 → 84 bytes per login (96%)**, and the bench arm that could not fail now gates at 256 and exits 1 when reverted. **Every finding from gate re-run #4 is now closed** | — |
-| 1 | [**gate re-run #5**](#the-gate--what-closes-the-1x-line) | — | **Next, and everything from re-run #4 is closed.** Same protocol as #4 (worktrees, build-and-run, paired skeptics) — but see the note there: five of the six surfaces #4 swept are now spent, and **AGNOS has never been executed by any sweep** | **yes** |
+| — | ~~gate re-run #5~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **3 high**, 5 medium, 4 low — 12 distinct defects from 15 reports. **All three highs are AGNOS-only; x86_64 came back with ZERO highs, a first.** The "our own recent fixes are incomplete" signal collapsed from 7-of-9 to 1-of-12 | — |
+| — | ~~1.7.21~~ | ~~10~~ | ✅ **Shipped.** The target nobody had ever run — **BI** AGNOS had no clean shutdown at all (`stop` was never assigned) · **BK** descent owns its scheduling clock, since #40 is documented frozen on the `run` path · **BL** 1.7.19's mirror image, fixed by refusing the duplicate *before* the restore · plus BM, BN, BO, BP, BQ, BR, BS | — |
+| 1 | [**BJ**](#open-issues--gate-re-run-5-returned-do-not-close-2026-07-31) | 1 | **Next, and it is a DECISION not a patch.** `session_drain`'s only would-block arm is Linux `EAGAIN`; AGNOS `sys_write` routes to blocking `sock_send` #48. agnos exposes **no non-blocking send at all**, so this needs the same upstream `lib/` conversation as item **AA** — take them together | **yes** |
+| 2 | [**the AGNOS harness**](#the-gate--what-closes-the-1x-line) | — | **Infrastructure, and the real blocker.** `running.md`'s QEMU harness was **deleted 2026-07-07**. Until it is rebuilt, no sweep can close AGNOS and re-run #6 will report the same uncertainty #5 did | **yes** |
+| 3 | [**gate re-run #6**](#the-gate--what-closes-the-1x-line) | — | After BJ and the harness. Target what #5 could not: a real kernel boot, the conservation invariant, CYML loader fuzz, a multi-hour soak | **yes** |
 | 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
@@ -68,6 +74,175 @@ behind the headline was loose in the same way as the comment it indicted.
 **The minimum credible 2.0 is M14 + M15 + M16** — the contract, the content
 ceiling, and progression. Everything from M17 on can slip without embarrassing
 the release.
+
+---
+
+## Open issues — gate re-run #5 returned DO-NOT-CLOSE (2026-07-31)
+
+**Ruling: DO-NOT-CLOSE. Critical 0, high 3, medium 5, low 4** — **12 distinct
+defects from 15 reports**, 3 refuted, 0 cross-finder duplicates. Run against a
+clean tree at `dad52fb` (v1.7.20).
+
+Same protocol as #4 and the same bound: five finders in isolated worktrees, each
+required to build and run, each attacked by an independent skeptic with its own
+worktree told to default to REFUTED. Eleven agents. **The surfaces were chosen to
+be the ones #4 could not reach** — its own settled negatives (command
+interleaving, hand-mutated CYML loaders) were explicitly excluded.
+
+**Read the shape before the count. All three highs are on the AGNOS build, and on
+x86_64 this run came back with ZERO highs — the first time in seven sweeps.** Five
+agents drove a live server for hours, forced ~95 real audit rotations, forged ~40
+signed records, put 250 real TCP players in sustained combat and soaked for 39
+minutes. The x86_64 findings are four mediums and four lows, none
+player-destructive.
+
+AGNOS counts, and the precedent is this project's own: item **T** (1.7.8) was an
+AGNOS-only defect, rated high and closed as high, and `running.md` has advertised
+AGNOS as a supported deployment since 1.1.0.
+
+### The pattern — the shape held, the recency broke
+
+| | #4 | #5 |
+|---|---|---|
+| Sibling shape ("a rule at one site and not its sibling") | 9 / 9 | 11 / 12 |
+| Siblings of the **previous three releases** | 6 / 9 | **1 / 12** |
+| Introduced by the head commit | 1 | 1 (an incomplete guard, not a regression) |
+| **Pre-existing** defects found | ~2 / 9 | **10 / 12** |
+
+**#4's diagnosis — "the sweep is now finding the incompleteness of its own recent
+fixes at roughly the rate the fixes retire them" — is no longer true.** Nine fixes
+shipped across 1.7.18/19/20 and left one-and-a-half siblings between them, down
+from six. The process change #4 prescribed (grep every call site of a changed
+predicate, record the enumeration in the fix's own comment) is working.
+
+**The reason this run found ten pre-existing defects instead of two is not that
+the code got worse — it is that four instruments existed for the first time, and
+every one of them paid.**
+
+### ✅ 1.7.21 — the target nobody had ever run (SHIPPED)
+
+**Items BI, BK, BL, BM, BN, BO, BP, BQ, BR and BS are CLOSED.** 1502 assertions
+(was 1476). **BJ and BT remain open** and are the two entries in *What is left*.
+
+Verified beyond the suite where it was possible: **BO was A/B'd against a real
+played-on tree** — two ordinary players each took one authored `notice` over TCP
+and quit, and with the precondition disabled the suite FAILS where it now passes.
+The AGNOS items are asserted structurally, because the suite is an x86_64 binary
+and cannot execute the other arm; what is pinned is that **the two arms agree**,
+which is the property all three violated.
+
+### Still open
+
+**BJ. One player whose client stops draining freezes the whole AGNOS server.**
+*(high — DECISION, not a patch)*
+
+- `session_drain` ([`session.cyr:715`](../../src/session.cyr:715)) writes with a
+  bare `sys_write` and tests exactly one would-block code, `-11` (Linux EAGAIN).
+  On AGNOS that routes to `sock_send` #48, whose own declaration says **BLOCKS**
+  and which has no EAGAIN — so the arm is dead code, a full window parks the
+  single-threaded loop, and `-1` is classified as a socket error and torn down.
+- **The sibling is ten lines away in the same file.**
+  `session_on_readable_max` ([`session.cyr:1970`](../../src/session.cyr:1970)) got
+  an explicit AGNOS branch under the comment *"sys_read on a socket fd is the
+  BLOCKING recv adapter, which would park the single-threaded poll loop on an idle
+  session."* Word for word true of the write half, which never got one.
+- **Measured** under emulation: a bystander's time-to-first-byte on `look` went
+  0.000 s → **15.7 s**, reproducible to within 0.02 s across two fresh servers,
+  the whole server frozen for ~6 skipped ticks. On a real kernel the agnosticos
+  planning docs describe the same situation as a preempt-disabled **deadlock**,
+  i.e. unbounded — not observed.
+- **Why it is deferred rather than patched.** agnos exposes **no non-blocking send
+  primitive at all**. A complete fix needs the same upstream `lib/` decision item
+  **AA** has been waiting on since 1.7.9, and guessing at a chunking workaround
+  here would be a patch written against an API nobody has agreed to yet. **Take
+  AA and BJ as one conversation.**
+
+**BT. Mob loot is minted outside the object ceiling.** *(low — belongs with M15)*
+
+- `corpse_of` ([`item.cyr:365`](../../src/item.cyr:365)) mints loot with a bare
+  `item_new` and no max-exist check, while `zone_reset_room_objs` consults
+  `_obj_id_present`. Loot ids overlap authored ids, so a looted copy carried or
+  saved pushes the count past the ceiling and the authored copies never come back.
+  Controlled A/B: control → `objs +1` and the shard restocks; with one looted
+  shard held by one offline player → `objs +0`, twice.
+- **Not a duplicate of item J**, which was unbounded floor *growth* closed by
+  ground decay. This is the same missing check producing the opposite consequence
+  — a permanently **under**-stocked world.
+- **Fix size: real, not small.** It is the object-lifetime/ownership question and
+  belongs with M15's registry work.
+
+### What gate re-run #5 had no instrument for
+
+**#4's four named gaps — three now covered.**
+
+1. **AGNOS execution — COVERED for the first time ever, and only partially.** One
+   agent ran the `--agnos` build under an agnos→Linux syscall translator, served
+   the MUD over TCP, and produced all three highs. It also answered `running.md`'s
+   own open question: **AGNOS persistence works end to end** — record written,
+   `quit` saves, an RST disconnect saves via `drop_session`, reconnect verifies and
+   restores. **1.7.8's fix holds.**
+   **Still open, and now the top instrument gap: nobody has booted a real AGNOS
+   kernel.** The translator's own ADR states it validates agnos *userland* and does
+   not exercise the kernel's scheduler, net stack or preempt/IF semantics — which
+   is exactly where BK's trigger and BJ's unbounded form live. **The QEMU harness
+   `running.md` pointed at was deleted 2026-07-07**; rebuilding it is a
+   prerequisite for re-run #6. Also untested on AGNOS: every `YD_*` knob, zone
+   reset, `save_sweep`, audit rotation, chpass, and #4's 40-cell phase × tick
+   matrix on the second driver.
+2. **Audit rotation under volume — COVERED.** ~95 real rotations across two
+   agents, then confirmed on the stock binary at the shipped 8 MiB trigger.
+   Produced BM, BN, BR and BS. Technique worth keeping: the rename→unlink window
+   can be held open with unmodified code by making the next prune victim a
+   **FIFO**, since `file_exists` blocks on it with no writer. Still open: rotation
+   on `--agnos`, entry **self-hash** verification (only linkage was checked), the
+   torn-line case, and a theoretical `file_exists`-under-fd-exhaustion bypass.
+3. **Forged-signature harness — COVERED twice, and both were throwaways.**
+   ~150 lines each, linking the project's own `ident_derive` / `ed25519_sign`.
+   **Recommend landing one in the tree** — it is the only way to test ADR 0004's
+   stated threat model, and it produced BQ. **Clean negative worth recording: the
+   full scalar-clamp battery HELD everywhere** — `hp` at i64max, `maxhp` 0/-5,
+   `ndice` 0/1e8, `ac` 1e6, `str` -1e6, `created` i64min, leading zeros, `+`/`-`,
+   empty values, duplicate keys, key prefixes, `[player]`-in-a-value, no trailing
+   newline. Every one clamps or defaults, no crash, no scanner/bayan divergence.
+4. **The broadcast fan-out breach point (item K) — ANSWERED.**
+
+> **Combat tick-body p99 = 0.432 µs x N²** for N co-located, mutually engaged
+> players. **The 50 ms drift budget breaches at N ≈ 345** — bracketed 336–352
+> across two independent sweeps. Against the 2.5 s interval, N ≈ 760.
+> `MAX_SESSIONS = 256`, so **the breach is 1.35x the population the server will
+> accept.**
+
+Three things that make this directly actionable for M14/M15:
+
+- **At 256 the real cost is 26–28 ms, not the 43.3 ms** item K and
+  `benches/bench_tick_budget.bcyr:317` both still print. **Both need re-deriving**
+  — item K's scoping argument rests on "4% from failing" and it is at 53%.
+- **The limiting term was measured, not assumed.** Holding 256 sessions engaged
+  and varying only the room split: `cost(k) = A/k + B` gives **A = 26.4 ms (96.7%)
+  = the per-recipient prose append**, B = 0.9 ms (3.3%) = the session walk, combat
+  resolution and flush combined. **It is not the room walk. Bounding fan-out means
+  bounding the append.**
+- **Volume: 110 x N² prose bytes per tick** — 7.24 MB/tick at 256 in-process,
+  **validated over real TCP at 7.08 MB/tick with 250 co-located players, 2.2%
+  apart.** Item K no longer needs a TCP probe. H15's TX valve lost **zero** prose
+  at both 150 and 250 players.
+
+**New gaps for re-run #6:** a real AGNOS kernel boot; **the conservation
+invariant still does not exist** (#4 called it the highest-value instrument to
+build, and #5 produced two more census defects — BL and BT — that it would have
+caught); `cyrius fuzz` still has **no CYML loader target**; no multi-hour soak in
+one run (best 22.8 min, ended when a sibling agent's `pkill -f descent` reached
+it — **#6 must kill by port or PID, not by name**); and audit-chain **self-hash**
+verification.
+
+**Settled negatives, recorded so #6 does not re-derive them:** BE's `parse_uint`
+overflow arithmetic is exactly correct at both bounds; BD's un-gating of
+`classes_upkeep` costs ≤0.4% of the drift allowance at `MAX_SESSIONS`; BF/BG are
+right on both flows; the rotation collision guard refused every same-name rotation
+constructed; marker coalescing cannot bite at shipped settings; `AUDIT_SEG_MAX`
+exhaustion needs ~5,000 years; and **per-op arena allocation is 0 bytes** across
+14 command verbs, session/mob/item/telnet lifecycle, corpse decay, zone resets and
+the whole `advance_tick` body, over 1.7 M churn ops.
 
 ---
 

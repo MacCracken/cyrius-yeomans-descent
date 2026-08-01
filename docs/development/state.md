@@ -3,14 +3,61 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.20 — **every finding from gate re-run #4 is
-> closed (AZ-BH)**. Next is gate re-run #5)
+> **Last refresh**: 2026-07-31 (v1.7.21 — **gate re-run #5 returned DO-NOT-CLOSE**
+> (0/3/5/4, items BI-BT); **ten of twelve are closed**. Open: **BJ** (an upstream
+> decision, paired with AA) and **BT** (M15). The 1.x gate is blocked by ONE
+> target, and **x86_64 came back with zero highs for the first time in seven
+> sweeps**)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.21** — 2026-07-31. **1502 assertions**; `cyrius audit` exits 0; 6/6 benches;
+**2/2 fuzz targets**; both targets build.
+
+**The target nobody had ever run.** Gate re-run #5 pointed the first instrument
+ever at the `--agnos` build — a second copy of the event loop, shipped since
+1.1.0 — and three highs fell out of the first hour, while **x86_64 came back with
+zero highs for the first time in seven sweeps**.
+
+**On AGNOS there was no clean shutdown at all.** That loop declares `stop`, tests
+it, and nothing in the tree ever assigned it; there is no signalfd on that target.
+Every statement after the loop — 1.7.11's shutdown save, 1.7.1's audit flush, the
+listener close — was unreachable. That is item AC verbatim, on the arm AC was
+never carried to. There is now an `@shutdown` verb, and `running.md`'s six-release-
+old claim that shutdown is "in-band" is finally true.
+
+**And the AGNOS scheduling clock is documented as frozen on the launch path this
+project's own guide gives.** `sys_uptime_ms` (#40) reads a 100 Hz timer that never
+fires for a foreground `run` program, per the agnos syscall layer's own comment.
+Descent now owns its scheduling clock (`mud_now_ms`) and all 48 call sites route
+through it. **Unconfirmed on real hardware** — the QEMU harness `running.md`
+pointed at was deleted 2026-07-07, and rebuilding it is the top instrument gap.
+
+**1.7.19's fix had a mirror image.** The census debit clamps and the credit does
+not, so a refusal running after `_restore_inv` over-counted in one case and
+under-counted in the other — and BC fixed one half by creating the other. Fixed by
+refusing the duplicate *before* the restore, which deletes both halves and the
+function BC added.
+
+**Lessons carried, added this release:**
+
+- *A defect you fix can have a mirror image, and fixing one half can create the
+  other.* BC and BL are the same path one release apart, in opposite directions.
+  **The cure was to stop compensating** — when a fix "puts back" what another step
+  took, ask whether the step should happen at all.
+- *Enumerate a guard's class from the WRITER.* BQ covered three of four string
+  fields; `_build_record` has exactly four `_fstr` calls and could have been
+  grepped. Extends #4's prescription from *predicates you changed* to *every
+  member of a class a new guard claims to cover*.
+- *An early exit justified by an invariant is a bet that the invariant holds
+  forever.* BM's early stop was argued to be "SAFE, not merely fast"; one skipped
+  prune falsified it permanently, for 8 ms saved once per process.
+- *A second target is a second copy of every rule.* Three of ten items are one arm
+  of a preprocessor having a fix the other never got.
 
 **1.7.20** — 2026-07-31. **1476 assertions**; `cyrius audit` exits 0; 6/6 benches;
 **2/2 fuzz targets**; both targets build.

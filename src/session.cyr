@@ -119,6 +119,63 @@ var g_epfd = 0;
 # server.cyr) so cmd_on_line / cmd_help_text can read it.
 var g_admin_enabled = 0;
 
+# 1.7.21 (BI) — set by the `@shutdown` admin verb; read by BOTH event loops.
+# The AGNOS loop has no signalfd and so had no other way to terminate; see the
+# verb for the full note.
+var g_shutdown_requested = 0;
+
+# === 1.7.21 (BK) — THE MONOTONIC CLOCK THIS SERVER SCHEDULES ON. ===
+#
+# Every deadline in the tree is a difference of these: the 2.5 s combat tick, the
+# save sweep, the idle reaper, the zone-reset timer, the login and passwd rate
+# limits, the audit rollup window. All of them.
+#
+# On AGNOS `mud_now_ms()` (lib/chrono.cyr) is `sys_uptime_ms()` — syscall #40,
+# which reads the kernel's 100 Hz `timer_ticks`. The vendored peer states the
+# problem in its own words at `lib/syscalls_x86_64_agnos.cyr:790`:
+#
+#     "a FOREGROUND `run` program executes with IF cleared, so the 100 Hz timer
+#      never fires and `sys_uptime_ms` (#40, which reads timer_ticks) is FROZEN
+#      for that program's entire run — anything timing itself with #40 on that
+#      path measures zero. rdtsc needs no interrupts, so #95 is the only correct
+#      clock there."
+#
+# And `docs/guides/running.md` documents the AGNOS launch as exactly that path:
+# `run /bin/descent serve 4000`. With #40 frozen, `now >= next_tick` is never
+# true: combat never resolves, `save_sweep` never runs, nobody is idle-reaped,
+# the zone never resets — while the server cheerfully keeps accepting logins.
+#
+# #95 (`sys_uptime_us`, rdtsc-based) needs no interrupts and is what that comment
+# names as correct. Its epoch is "since calibration" rather than since boot, which
+# costs nothing: this server only ever takes DIFFERENCES and compares against
+# values it stored itself from this same clock.
+#
+# NOT fixed in `lib/chrono.cyr`, which is where it arguably belongs: that file is
+# vendored and off-limits here (CLAUDE.md), and `clock_now_ms` has consumers
+# beyond this project whose launch path may differ. Descent owns its own
+# scheduling clock instead, and every call site in `src/` routes through here —
+# so there is ONE place to change if the upstream answer lands.
+#
+# UNOBSERVED PREMISE, stated rather than buried: gate re-run #5 could not boot a
+# real AGNOS kernel (the QEMU harness `running.md` names was deleted 2026-07-07),
+# so the freeze is documented by the vendored peer but not measured here. This
+# change is a strict improvement either way — on the frozen path it is the
+# difference between a working server and a dead one; on a path where #40 does
+# tick, #95 is simply a finer clock reading the same wall.
+fn mud_now_ms(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var us = sys_uptime_us();
+    # -1 is #95's documented failure return. Falling back rather than dividing it
+    # to 0 matters: a clock stuck at zero is the exact defect this exists to fix,
+    # and failing back to #40 is no worse than the behaviour being replaced.
+    if (us >= 0) { return us / 1000; }
+    return clock_now_ms();
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return clock_now_ms();
+    #endif
+}
+
 # Starting combatant profile (a scavenged sidearm). Replaced by class +
 # attribute scaling at M5, restored from save at M6.
 enum PlayerStat {
@@ -217,14 +274,14 @@ fn session_room_ok(s): i64 {
 # states outright.
 #
 # Corrected in 1.6.8: this comment used to justify that line by claiming
-# clock_now_ms() is large enough that the subtraction covers it. It is not —
-# clock_now_ms() is CLOCK_MONOTONIC, milliseconds since boot — so the guard is
+# mud_now_ms() is large enough that the subtraction covers it. It is not —
+# mud_now_ms() is CLOCK_MONOTONIC, milliseconds since boot — so the guard is
 # load-bearing rather than belt-and-braces. The code was always right; the
 # reasoning was not, and save_sweep_due was written from the wrong version.
 fn save_rate_limited(s): i64 {
     var last = load64(s + SS_LAST_SAVE_MS);
     if (last == 0) { return 0; }
-    if (clock_now_ms() - last < SAVE_MIN_INTERVAL_MS) { return 1; }
+    if (mud_now_ms() - last < SAVE_MIN_INTERVAL_MS) { return 1; }
     return 0;
 }
 
@@ -232,7 +289,7 @@ fn save_rate_limited(s): i64 {
 # (1.7.1 — see CHPASS_MIN_INTERVAL_MS for why the rate, not just the per-attempt
 # count, has to be bounded.)
 #
-# `now_ms` is a PARAMETER rather than a clock_now_ms() call inside, unlike
+# `now_ms` is a PARAMETER rather than a mud_now_ms() call inside, unlike
 # save_rate_limited above. That is the deliberate difference: it makes the rule
 # total over its domain and testable without arranging a clock, which is the seam
 # save_sweep_due and tick_step already use and the one 1.7.0 settled on after two
@@ -240,7 +297,7 @@ fn save_rate_limited(s): i64 {
 # would be churn in a release that is not about it.
 #
 # A zero SS_LAST_CHPASS_MS — a session that has never re-keyed — is never limited.
-# That guard is LOAD-BEARING, not belt-and-braces: clock_now_ms() is
+# That guard is LOAD-BEARING, not belt-and-braces: mud_now_ms() is
 # CLOCK_MONOTONIC (ms since BOOT), so `now - 0 < INTERVAL` is true on any host up
 # for less than ten seconds, and without it the first `passwd` of a freshly booted
 # server would be refused. This is the exact bug 1.6.8 fixed in save_sweep_due,
@@ -263,7 +320,7 @@ fn chpass_rate_limited(s, now_ms): i64 {
 # player_auth_load clears SS_SAVE_DIRTY without stamping a time — and it is
 # tested EXPLICITLY, exactly as save_rate_limited above tests it.
 #
-# It has to be. `clock_now_ms()` is CLOCK_MONOTONIC: milliseconds since BOOT,
+# It has to be. `mud_now_ms()` is CLOCK_MONOTONIC: milliseconds since BOOT,
 # not since the epoch. Leaning on `now - 0` being larger than the interval is
 # leaning on the machine having been up for five minutes, which is false on a
 # freshly-booted host — and a freshly-booted host running a freshly-started
@@ -1595,6 +1652,34 @@ fn cmd_on_line(s, buf, len): i64 {
         if (name_eq_ci(buf, len, "@reset") == 1) {      # 0.8.3 (server.cyr)
             render_reset(s);
             session_send_cmd_prompt(s);
+            return 0;
+        }
+        # === 1.7.21 (BI) — an IN-BAND way to stop the server. ===
+        #
+        # The AGNOS event loop declares `var stop = 0; while (stop == 0)` and
+        # NOTHING in the tree ever assigned it — there is no signalfd on that
+        # target, so `handle_signal` has no counterpart. The loop was therefore
+        # unexitable, and every statement after it — 1.7.11's `shutdown_save_all`
+        # (item AC), 1.7.1's final `audit_flush_all`, the listener close — was
+        # unreachable code. On AGNOS, stopping the server has only ever meant
+        # killing it, so every connected player lost everything since their last
+        # autosave, on every restart. That is item AC verbatim, on the arm AC was
+        # never carried to.
+        #
+        # `running.md` has said "Clean shutdown is in-band / process-kill" since
+        # 1.1.0. There was no in-band path. This is it.
+        #
+        # An admin verb rather than a sentinel file polled once per pass: the poll
+        # loop runs at ~50 passes/s, so a file check would be 50 stat syscalls a
+        # second forever to serve an event that happens once. It is behind
+        # YD_ADMIN with the other three, which is off by default.
+        #
+        # Deliberately available on BOTH targets. The Linux arm already exits via
+        # signalfd and does not need this, but a verb that exists on one target
+        # and not the other is the exact shape this project keeps finding.
+        if (name_eq_ci(buf, len, "@shutdown") == 1) {
+            g_shutdown_requested = 1;
+            session_appendtx_cstr(s, "\r\nShutdown requested — saving every connected session.\r\n");
             return 0;
         }
     }

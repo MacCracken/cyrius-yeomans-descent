@@ -60,6 +60,11 @@ enum PersistConst {
 # masquerading as tampering.
 var PL_ERR_UNREADABLE = 0 - 2;   # malformed, truncated, or signature mismatch
 var PL_ERR_SCHEMA     = 0 - 3;   # intact + signed, but written by a newer server
+# 1.7.21 (BL) — authenticated, but this character is already connected. Distinct
+# from the codes above because nothing is wrong with the RECORD: the refusal is
+# about live state, and it is raised before any field is restored so the census
+# is never touched. See the check in `player_auth_load`.
+var PL_ERR_DUP        = 0 - 4;
 
 # === 1.7.8 — the AGNOS publish path. ======================================
 #
@@ -284,6 +289,10 @@ fn _audit_last_hash(buf, n): i64 {
 # without a test that could see it. A counter at the call site cannot be wrong
 # about how many entries were written.
 var g_audit_emitted = 0;
+# 1.7.21 (BN) — latched once the audit store refuses a write, so a broken disk
+# produces one operator-visible line rather than one per event. Never cleared:
+# an audit chain with a hole in it stays suspect for the life of the process.
+var g_audit_store_failed = 0;
 
 # Owned storage for the chain's resumed prev-link (1.7.3). A SHA-256 hex digest
 # is 64 bytes; 128 is headroom for a longer digest without another edit here.
@@ -361,8 +370,46 @@ fn audit_event(sev, action, who, wholen): i64 {
         if (who != 0) { det = str_new(who, wholen); }
     }
     var e = chain_append(g_audit_chain, sev, str_from("persist"), str_from(action), det);
-    g_audit_emitted = g_audit_emitted + 1;
-    if (g_audit_store != 0) { filestore_append(g_audit_store, e); }
+    # === 1.7.21 (BN) — COUNT WHAT WAS WRITTEN, NOT WHAT WAS ATTEMPTED. ===
+    #
+    # `g_audit_emitted` used to be incremented on the line ABOVE the append, so
+    # 1.7.1's counter — introduced precisely because "a counter at the call site
+    # cannot be wrong about how many entries were written" — was wrong under the
+    # one failure it needed to survive. The suite asserts durability off it.
+    #
+    # THE SIBLING IS 300 LINES AWAY IN THIS FILE. `player_save` checks both of its
+    # durable operations and its three callers audit the failure through
+    # `save.fail.sweep` / `save.fail.disconnect` / `save.fail.create`. The rule "a
+    # failed durable write must be detected and reported" was applied to the
+    # player record and not to the tamper-evidence log.
+    #
+    # Measured by gate re-run #5: `chmod 0444` on `data/`, and separately
+    # `audit.libro` symlinked to `/dev/full` for a real ENOSPC at `write()` —
+    # three churn cycles of logins, saves and deliberate auth failures each. Zero
+    # new audit entries, server alive and still authenticating, and stdout+stderr
+    # **byte-identical at 305 bytes** across baseline, both outages and recovery.
+    # The operator has no way to learn that the security log stopped.
+    #
+    # UPSTREAM HALF, stated not hidden: `filestore_append` (lib/libro.cyr) discards
+    # `file_append_locked`'s return and hands back a hard 0, so there is nothing
+    # here to test yet — this arm is armed for the day it widens, and until then
+    # only the counter ordering and the latch below are real. Both are still worth
+    # having: the counter stops lying immediately, and one stderr line beats none.
+    var wrote = 1;
+    if (g_audit_store != 0) {
+        if (filestore_append(g_audit_store, e) < 0) { wrote = 0; }
+    }
+    if (wrote == 1) { g_audit_emitted = g_audit_emitted + 1; }
+    else {
+        # LATCHED. A full disk would otherwise emit one line per audit event,
+        # which is the same unbounded-output shape 1.7.1 removed from the audit
+        # rollup — and an `audit_event` to report it is useless, because the store
+        # is the thing that is broken.
+        if (g_audit_store_failed == 0) {
+            g_audit_store_failed = 1;
+            println("server: AUDIT LOG IS NOT BEING WRITTEN — check data/ permissions and free space.");
+        }
+    }
     # The streaming chain retains nothing, so this entry is ours to release once
     # the store has it — but ONLY because it is streaming. On a retaining chain
     # the entries vec still references it, and freeing here makes the next
@@ -939,7 +986,7 @@ fn audit_size_warn_due(size): i64 {
 fn audit_size_check(): i64 {
     var n = _audit_store_size();
     if (audit_size_warn_due(n) == 0) { return 0; }
-    audit_keyed(AK_AUDIT_SIZE, SEV_WARNING, "audit.size", 0, 0, clock_now_ms());
+    audit_keyed(AK_AUDIT_SIZE, SEV_WARNING, "audit.size", 0, 0, mud_now_ms());
     return 1;
 }
 
@@ -985,14 +1032,42 @@ fn _audit_seg_hi(): i64 {
         if (got == 1) { hi = n; miss = 0; }
         else {
             miss = miss + 1;
-            # The retained run is contiguous and at most AUDIT_SEG_KEEP long, so
-            # KEEP consecutive misses after a hit means nothing is above. Stopping
-            # early is SAFE, not merely fast: an under-reported `hi` collides on
-            # the next rotation, and the collision guard in audit_rotate_now
-            # refuses rather than clobbering a sealed segment.
-            if (hi > 0) {
-                if (miss >= AUDIT_SEG_KEEP) { n = AUDIT_SEG_MAX; }
-            }
+            # === 1.7.21 (BM) — THE EARLY STOP IS GONE. ===
+            #
+            # It used to read: "The retained run is contiguous and at most
+            # AUDIT_SEG_KEEP long, so KEEP consecutive misses after a hit means
+            # nothing is above. Stopping early is SAFE, not merely fast."
+            #
+            # **The premise is falsifiable and one skipped prune falsifies it
+            # forever.** Strand a segment — a SIGKILL in the sub-millisecond
+            # window between `file_rename` and `xunlink` (which `running.md` tells
+            # operators is safe), an unlink that fails (BR), or an operator moving
+            # a file by hand — and once the live window moves KEEP numbers past
+            # it, the run is no longer contiguous. This scan then returns the
+            # ORPHAN's number as "highest", and everything downstream inherits it:
+            # `audit_rotate_now` seals new history BELOW several older segments
+            # (the collision guard passes — nothing is there), `_audit_resume_head`
+            # reads the wrong segment's tail after a crash, and `_audit_prune`'s
+            # arithmetic victim names numbers that no longer exist so it prunes
+            # nothing, which strands the next one too.
+            #
+            # Demonstrated on the shipped binary with shipped constants: an
+            # orphaned segment made the chain resume four segments / 36 entries
+            # stale, and ADR 0009's own verification walk reported six boundary
+            # breaks and three false `audit.prune` attestations. No entry is ever
+            # LOST — walked chronologically the chain is intact — but the log
+            # accuses itself of tampering, which is worse than useless in the one
+            # artifact whose entire job is to be trusted.
+            #
+            # The cost of removing it is a full AUDIT_SEG_MAX probe: ~8 ms, paid
+            # ONCE per process because the result is cached in `g_audit_seg_hi`.
+            # That is a boot-time cost measured in milliseconds against a failure
+            # mode measured in permanent false tamper reports.
+            #
+            # This half alone is not enough — see `_audit_prune`, which now sweeps
+            # everything at or below the window instead of naming one arithmetic
+            # victim. Either half alone leaves the causal chain intact.
+            miss = miss;
         }
         n = n + 1;
     }
@@ -1050,7 +1125,32 @@ fn audit_rotate_check_due(ticks): i64 {
 # `newest - AUDIT_SEG_KEEP` — arithmetic, not a scan — and it is self-correcting:
 # already gone means a no-op.
 fn _audit_prune(newest, now_ms): i64 {
+    # === 1.7.21 (BM) — SWEEP THE WINDOW, do not name one arithmetic victim. ===
+    #
+    # This retired exactly `newest - AUDIT_SEG_KEEP` and called itself
+    # "self-correcting: already gone means a no-op". It is self-correcting for a
+    # victim that is ALREADY GONE and the opposite for one that was SKIPPED: miss
+    # a prune once and that segment is never named again, because the arithmetic
+    # has moved past it. It then strands `_audit_seg_hi`'s contiguity premise
+    # permanently (see there), which is the other half of this fix. Sweeping down
+    # from the window makes a skipped prune self-heal on the next rotation.
+    #
+    # Bounded: the loop starts at `newest - KEEP` and walks DOWN, so a healthy
+    # server does exactly one probe-and-miss more than before.
+    var swept = 0;
     var victim = newest - AUDIT_SEG_KEEP;
+    while (victim >= 1) {
+        var did = _audit_prune_one(victim, now_ms);
+        swept = swept + did;
+        victim = victim - 1;
+    }
+    if (swept > 0) { return 1; }
+    return 0;
+}
+
+# Retire ONE segment. Split out of `_audit_prune` by 1.7.21 (BM) so the sweep
+# above has something to call; the body is otherwise 1.7.4's, plus BR.
+fn _audit_prune_one(victim, now_ms): i64 {
     if (victim < 1) { return 0; }
     if (_audit_seg_path(victim, g_audit_segbuf) <= 0) { return 0; }
     if (file_exists(g_audit_segbuf) == 0) { return 0; }
@@ -1060,10 +1160,35 @@ fn _audit_prune(newest, now_ms): i64 {
     # what makes the ordering mutation-visible: unlink first and _audit_tail_hash
     # returns 0, so the marker carries no hash.
     var hlen = _audit_tail_hash(g_audit_segbuf, g_audit_head);
+    # === 1.7.21 (BR) — DO NOT ATTEST WHAT YOU CANNOT HASH. ===
+    #
+    # The comment three lines above states the rule — "a marker naming a file with
+    # no hash attests nothing" — and the code then wrote the marker anyway when
+    # `_audit_tail_hash` returned 0 for a missing or unreadable victim. Measured:
+    # `"action":"audit.prune","details":"7 "` — a segment number, a space, and no
+    # hash, beside healthy markers from the same run carrying full hashes.
+    # Writing the rule down is not checking it.
+    if (hlen <= 0) {
+        audit_keyed(AK_AUDIT_ROTFAIL, SEV_WARNING, "audit.rotate.fail",
+        g_audit_segbuf, _slen(g_audit_segbuf), now_ms);
+        return 0;
+    }
     var mlen = _audit_mark(victim, g_audit_head, hlen);
     audit_keyed(AK_AUDIT_PRUNE, SEV_WARNING, "audit.prune", g_audit_mark, mlen, now_ms);
     _audit_seg_path(victim, g_audit_segbuf);       # rebuild: the read reused segbuf
-    xunlink(g_audit_segbuf);
+    # === 1.7.21 (BR) — AND DO NOT CLAIM A PRUNE THAT DID NOT HAPPEN. ===
+    #
+    # `xunlink`'s return was discarded and `g_audit_pruned` incremented
+    # unconditionally, so an unlink that failed (EISDIR, EACCES, EROFS) produced a
+    # signed attestation that a file had been retired while the file was still on
+    # disk — and left it to strand `_audit_seg_hi` (BM). Demonstrated with a
+    # directory substituted for the victim: the marker was written, the counter
+    # advanced, and `ls -l` showed the directory still there.
+    if (xunlink(g_audit_segbuf) != 0) {
+        audit_keyed(AK_AUDIT_ROTFAIL, SEV_WARNING, "audit.rotate.fail",
+        g_audit_segbuf, _slen(g_audit_segbuf), now_ms);
+        return 0;
+    }
     g_audit_pruned = g_audit_pruned + 1;
     return 1;
 }
@@ -1571,7 +1696,7 @@ fn _build_record(s): i64 {
             # writes an audit entry so the operator can see it happened.
             if (off > SAVE_CAP - SIG_TAIL) {
                 audit_keyed(AK_SAVE_INV_TRUNC, SEV_WARNING, "save.inv.truncated",
-                load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+                load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
                 it = 0;
                 continue;
             }
@@ -1622,7 +1747,7 @@ fn _build_record(s): i64 {
                 if (off > SAVE_CAP - SIG_TAIL) {
                     audit_keyed(AK_SAVE_INV_TRUNC, SEV_WARNING, "save.inv.truncated",
                     load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN),
-                    clock_now_ms());
+                    mud_now_ms());
                     stop = 1;
                     inner = 0;
                     continue;
@@ -1661,7 +1786,7 @@ fn player_save(s): i64 {
     # any point below still backs off (see save_sweep_due). Stamping only on the
     # success path would leave every failure mode retrying every tick, which is
     # the defect this fixes.
-    store64(s + SS_LAST_SAVE_TRY_MS, clock_now_ms());
+    store64(s + SS_LAST_SAVE_TRY_MS, mud_now_ms());
     var total = _build_record(s);
     if (total < 0) { return 0 - 1; }
     _shard_mkdir(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN));   # 1.7.2
@@ -1687,9 +1812,9 @@ fn player_save(s): i64 {
     # the two leaves a harmless duplicate that the next save clears.
     _path_for_flat(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), g_persist_tmp);
     xunlink(g_persist_tmp);                      # 1.7.8 — not syscall(87); ENOENT is normal
-    store64(s + SS_LAST_SAVE_MS, clock_now_ms());
+    store64(s + SS_LAST_SAVE_MS, mud_now_ms());
     store64(s + SS_SAVE_DIRTY, 0);
-    audit_keyed(AK_SAVE, SEV_INFO, "save", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+    audit_keyed(AK_SAVE, SEV_INFO, "save", load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
     return 1;
 }
 
@@ -2468,9 +2593,26 @@ fn player_auth_load(s, pass, passlen): i64 {
     # ids come from authored CYML), which is why this has never been reachable —
     # but the check has to exist BEFORE 2.0 adds a free-text field, not after.
     # Cheap and unconditional: no legitimate value holds a control byte.
-    if (_rv_ctrl(rv, "name") == 1) { return 0 - 2; }
-    if (_rv_ctrl(rv, "room") == 1) { return 0 - 2; }
-    if (_rv_ctrl(rv, "inv") == 1)  { return 0 - 2; }
+    # 1.7.21 (BQ) — `class` is the FOURTH `_fstr` field and it was not in this
+    # sweep. `_build_record` writes exactly four string values — name, class,
+    # room, inv (persist.cyr:1502, :1522, :1532, and the inv writer) — and this
+    # guard covered three of them. AN (1.7.15) made `class` a player-controlled
+    # stable id string; the guard predates that and was never extended.
+    #
+    # Demonstrated by gate re-run #5 with four forged records, one 0x01 byte
+    # each: name / room / inv were refused as tampered, `class` **authenticated
+    # and loaded**.
+    #
+    # Not weaponizable today — a real newline makes the record unparseable and it
+    # is refused earlier — but that is the same "has never been reachable"
+    # argument the comment above already makes for the other three, and it is
+    # exactly why the check exists BEFORE 2.0 adds a free-text field. Enumerate
+    # the class from the WRITER, not from the fields somebody happened to think
+    # of: four `_fstr` calls, four guards.
+    if (_rv_ctrl(rv, "name") == 1)  { return 0 - 2; }
+    if (_rv_ctrl(rv, "class") == 1) { return 0 - 2; }
+    if (_rv_ctrl(rv, "room") == 1)  { return 0 - 2; }
+    if (_rv_ctrl(rv, "inv") == 1)   { return 0 - 2; }
 
     # === Authentication BEFORE integrity (1.7.0), and before ALLOCATION (1.7.8). ===
     #
@@ -2525,7 +2667,7 @@ fn player_auth_load(s, pass, passlen): i64 {
     # reordering in place without a timing assertion.
     g_charge_verifies = g_charge_verifies + 1;
     if (ed25519_verify(filepk, g_persist_slurp, prefix, filesig) != 1) {
-        audit_keyed(AK_LOAD_TAMPER, SEV_SECURITY, "load.tamper", nm, nl, clock_now_ms());
+        audit_keyed(AK_LOAD_TAMPER, SEV_SECURITY, "load.tamper", nm, nl, mud_now_ms());
         return 0 - 2;
     }
 
@@ -2546,6 +2688,40 @@ fn player_auth_load(s, pass, passlen): i64 {
     # server must never half-load a record whose fields it does not understand.
     if (_rv_schema(rv) > g_schema_max) {
         return PL_ERR_SCHEMA;
+    }
+
+    # === 1.7.21 (BL) — REFUSE A DUPLICATE HERE, BEFORE ANYTHING IS RESTORED. ===
+    #
+    # This check used to live in `login_on_pass`, AFTER this whole function had
+    # already run — including `_restore_inv`, which mints instances and DEBITS the
+    # offline census once per resolved id.
+    #
+    # 1.7.19 (BC) found half of what that costs: when the duplicate's own record
+    # is the only offline holder of a template, the debit is swallowed by
+    # `obj_census_adjust`'s underflow clamp and the teardown then credited it
+    # anyway, inventing offline stock. BC fixed that by crediting nothing back.
+    #
+    # **BC's premise is only true when the duplicate is the SOLE offline holder.**
+    # When any OTHER offline player also holds that template — the normal steady
+    # state — the debit lands on *their* holding, un-clamped, and crediting
+    # nothing back leaves the census under-counting forever. `_obj_id_world_count`
+    # then reports the world below its authored ceiling and `zone_reset_room_objs`
+    # mints a replacement that nothing ever reclaims. Gate re-run #5 measured
+    # exactly this: sole holder → `objs +0` (BC's premise holds); add a second
+    # offline holder and the identical run → `objs +1`, four times out of four.
+    # So BC traded a phantom credit for a phantom debit, one release apart.
+    #
+    # Compensating for the debit needs per-template bookkeeping of which debits
+    # actually landed. **Not doing it at all is smaller and stronger**: no
+    # instances are minted, no census moves, `SS_AUTHED` is never set (so AE's
+    # disown has nothing to undo either), and the whole defect class goes with it.
+    #
+    # H11's constraint is preserved exactly. Its requirement is that the check run
+    # AFTER the passphrase proves who they are — so it cannot be used to probe who
+    # is online — and before the session is placed in the world. Both still hold:
+    # the derive, the comparison and `ed25519_verify` are all above this line.
+    if (session_already_online(nm, nl, s) == 1) {
+        return PL_ERR_DUP;
     }
 
     # Commit the authenticated identity into the session. Deliberately still
@@ -2626,7 +2802,7 @@ fn player_auth_load(s, pass, passlen): i64 {
         # needs, and it is about to be made permanent by the next save. SEV_WARNING
         # rather than SEV_INFO: this is data leaving the world, not a routine load.
         if (lost > 0) {
-            audit_keyed(AK_LOAD_INV_DROP, SEV_WARNING, "load.inv.drop", nm, nl, clock_now_ms());
+            audit_keyed(AK_LOAD_INV_DROP, SEV_WARNING, "load.inv.drop", nm, nl, mud_now_ms());
             session_appendtx_cstr(s, "\r\nSome of what you carried is no longer part of this world.\r\n");
         }
     }
@@ -2634,7 +2810,7 @@ fn player_auth_load(s, pass, passlen): i64 {
     g_loaded_last_login = _rv_int(rv, "last_login", 0);   # 0.8.1 greeting
     store64(s + SS_AUTHED, 1);
     store64(s + SS_SAVE_DIRTY, 0);
-    audit_keyed(AK_LOGIN_OK, SEV_INFO, "login.ok", nm, nl, clock_now_ms());
+    audit_keyed(AK_LOGIN_OK, SEV_INFO, "login.ok", nm, nl, mud_now_ms());
     return 1;
 }
 
@@ -2690,64 +2866,27 @@ fn login_begin_newpass(s): i64 {
 # Returning player: verify + restore + drop into the recorded room.
 fn login_on_pass(s, buf, len): i64 {
     var rc = player_auth_load(s, buf, len);
+    # === 1.7.21 (BL) — the duplicate refusal moved INTO `player_auth_load`. ===
+    #
+    # H11 (1.6.6) put this check here, after the load. Its own constraint was only
+    # that it run after the passphrase proves who they are — never that it run
+    # after the RESTORE — and running it after the restore is what cost 1.7.19 and
+    # this release a defect each, in opposite directions, on the offline census.
+    #
+    # It now sits immediately after `ed25519_verify` and before any field is
+    # touched, so a refused duplicate mints nothing, moves no census, and never
+    # gets `SS_AUTHED` set. AE's disown (1.7.12) and BC's discard (1.7.19) both
+    # became unnecessary rather than being re-fixed: there is nothing to disown
+    # and nothing to discard. The message and the condemnation are unchanged.
+    if (rc == PL_ERR_DUP) {
+        session_echo_on(s);
+        session_appendtx_cstr(s, "\r\nThat character is already connected from another session.\r\n");
+        store64(s + SS_QUIT, 1);
+        audit_keyed(AK_LOGIN_DUP, SEV_WARNING, "login.dup",
+        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+        return 0;
+    }
     if (rc == 1) {
-        # H11 (1.6.6) — refuse a second concurrent session for one character,
-        # checked AFTER the passphrase proves who they are (so this cannot be
-        # used to probe who is online) but BEFORE session_resume_world places
-        # them, and before any tick can save the duplicate over the live record.
-        if (session_already_online(load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), s) == 1) {
-            session_echo_on(s);
-            session_appendtx_cstr(s, "\r\nThat character is already connected from another session.\r\n");
-            # === 1.7.12 (AE) — DISOWN the record before condemning the session. ===
-            #
-            # `player_auth_load` set SS_AUTHED = 1 a few lines above, because the
-            # passphrase really did check out. This arm then refuses the login and
-            # sets SS_QUIT — but it used to leave SS_AUTHED set, and `drop_session`
-            # saves any session that is authed. So the REFUSED duplicate wrote its
-            # snapshot — taken at load time, before the refusal — over whatever the
-            # live session had done since.
-            #
-            # THE WINDOW IS NOT ONE BATCH. On the epoll path the teardown does
-            # follow immediately, which is why this looks harmless. On the
-            # retained-line path it does not: once EVENT_LINES_MAX is spent by
-            # earlier sessions, `session_consume_rx_max` retains the passphrase
-            # line and `drain_pending_rx` dispatches it in its *else* arm, which
-            # sets SS_QUIT and does NOT drop — the drop happens on a later walk.
-            # That consume also empties SS_RX_LEN, so `g_rx_backlog` is not
-            # incremented and the loop parks in `epoll_wait` for a full tick. The
-            # stale snapshot is therefore held up to 2500 ms, spanning a whole
-            # later batch, and a victim's `passwd` or `save` inside that window is
-            # silently reverted.
-            #
-            # Clearing SS_AUTHED is the whole fix: the session keeps its refusal
-            # message and its condemnation, and simply stops owning a record it
-            # was never granted. Item duplication was chased here too and is NOT a
-            # risk — `session_drop_inv` frees the copies `_restore_inv` minted
-            # rather than dropping them to the room.
-            #
-            # 1.7.19 (BC) — THAT LAST SENTENCE STOPPED BEING TRUE IN 1.7.16.
-            # `session_drop_inv` still frees the copies, but AM taught it to
-            # CREDIT the offline census as it does, and `_restore_inv`'s matching
-            # debit was swallowed by the clamp on this path (the live session
-            # already holds these ids, so the count was already zero). The
-            # teardown therefore credited holdings this session never owned:
-            # permanent phantom offline stock, and the zone stops restocking those
-            # objects for the life of the process. Discard the copies HERE, where
-            # we know the census was never moved for them, so the teardown finds
-            # an empty list and has nothing to credit. See `session_discard_inv`.
-            # Clearing SS_AUTHED is the whole fix and the ONLY thing needed: with
-            # it clear, `session_persistable` is false and the dirty flag is never
-            # consulted for this session again. A belt-and-braces
-            # `SS_SAVE_DIRTY = 0` was written here first and then removed —
-            # mutation testing showed nothing could tell whether it was there,
-            # which is the definition of a line that looks like a guard and is not.
-            store64(s + SS_AUTHED, 0);
-            session_discard_inv(s);   # 1.7.19 (BC) — forward ref → item.cyr
-            store64(s + SS_QUIT, 1);
-            audit_keyed(AK_LOGIN_DUP, SEV_WARNING, "login.dup",
-            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
-            return 0;
-        }
         store64(s + SS_FAILS, 0);
         store64(s + SS_PHASE, PHASE_CMD);
         session_echo_on(s);   # 0.8.1 — restore echo now the passphrase is in
@@ -2776,7 +2915,7 @@ fn login_on_pass(s, buf, len): i64 {
         # merely stops making new ones would leave those players stuck forever.
         if (load64(s + SS_CLASS) < 0) {
             audit_keyed(AK_CHAR_CREATE, SEV_WARNING, "class.reselect",
-            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
             session_appendtx_cstr(s, "\r\nYour calling did not survive the grid. Choose again.\r\n");
             store64(s + SS_PHASE, PHASE_CLASS);
             class_send_prompt(s);
@@ -2800,7 +2939,7 @@ fn login_on_pass(s, buf, len): i64 {
         # flood signal is fully preserved.
         if (fails >= MAX_LOGIN_FAILS) {
             audit_keyed(AK_LOGIN_FAIL, SEV_WARNING, "login.fail",
-            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
             session_appendtx_cstr(s, "\r\nToo many failed attempts. Closing.\r\n");
             store64(s + SS_QUIT, 1);
             return 0;
@@ -2905,7 +3044,7 @@ fn _confirm_mismatch(s): i64 {
     # that forced it was gone, rather than left in place because the code looked
     # deliberate.
     audit_keyed(AK_CREATE_FAIL, SEV_WARNING, "create.fail",
-    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
     if (fails >= MAX_LOGIN_FAILS) {
         session_echo_on(s);
         session_appendtx_cstr(s, "\r\nToo many failed attempts. Closing.\r\n");
@@ -2924,7 +3063,7 @@ fn _create_taken(s): i64 {
     session_appendtx_cstr(s, "\r\nThat name was just taken. Please reconnect and choose another.\r\n");
     store64(s + SS_QUIT, 1);
     audit_keyed(AK_CREATE_DUP, SEV_WARNING, "create.dup",
-    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
     return 0;
 }
 
@@ -3000,7 +3139,7 @@ fn login_on_confirm(s, buf, len): i64 {
         session_appendtx_cstr(s, " Please contact the operator.\r\n");
         store64(s + SS_QUIT, 1);
         audit_keyed(AK_ACCOUNTS_FULL, SEV_WARNING, "accounts.full",
-        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
         return 0;
     }
     # 1.7.16 (AL) — the increment MOVED to where the record is actually written
@@ -3020,7 +3159,7 @@ fn login_on_confirm(s, buf, len): i64 {
     store64(s + SS_AUTHED, 1);
     session_echo_on(s);   # 0.8.1 — passphrase set; restore echo
     audit_keyed(AK_CHAR_CREATE, SEV_INFO, "char.create",
-    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
     session_appendtx_cstr(s, "\r\nIdentity sealed into the grid.\r\n");
     store64(s + SS_PHASE, PHASE_CLASS);
     class_send_prompt(s);
@@ -3058,11 +3197,11 @@ fn passwd_begin(s): i64 {
     #
     # Refused rather than queued: a re-key is interactive, and silently deferring
     # one would leave the player at a prompt that does nothing.
-    if (chpass_rate_limited(s, clock_now_ms()) == 1) {
+    if (chpass_rate_limited(s, mud_now_ms()) == 1) {
         session_appendtx_cstr(s, "You changed your passphrase very recently. Try again shortly.\r\n");
         return 0;
     }
-    store64(s + SS_LAST_CHPASS_MS, clock_now_ms());
+    store64(s + SS_LAST_CHPASS_MS, mud_now_ms());
     store64(s + SS_PHASE, PHASE_CHPASS_NEW);
     session_echo_off(s);
     session_appendtx_cstr(s, "New passphrase (4-64 chars): ");
@@ -3179,7 +3318,7 @@ fn _chpass_mismatch(s): i64 {
     var fails = load64(s + SS_FAILS) + 1;
     store64(s + SS_FAILS, fails);
     audit_keyed(AK_PASSWD_FAIL, SEV_WARNING, "passwd.fail",
-    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
     if (fails >= MAX_LOGIN_FAILS) {
         store64(s + SS_FAILS, 0);
         store64(s + SS_PHASE, PHASE_CMD);
@@ -3239,7 +3378,7 @@ fn chpass_on_confirm(s, buf, len): i64 {
         # disk failure and a mistyped passphrase as one number, which is actively
         # misleading in the log an operator reaches for first.
         audit_keyed(AK_PASSWD_ROLLBACK, SEV_WARNING, "passwd.rollback",
-        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
         session_appendtx_cstr(s, "\r\nThe re-key could not be saved. Your passphrase is UNCHANGED.\r\n");
         session_send_cmd_prompt(s);
         return 0;
@@ -3248,7 +3387,7 @@ fn chpass_on_confirm(s, buf, len): i64 {
     store64(s + SS_PHASE, PHASE_CMD);
     session_echo_on(s);
     audit_keyed(AK_PASSWD_CHANGE, SEV_INFO, "passwd.change",
-    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), clock_now_ms());
+    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
     session_appendtx_cstr(s, "\r\nPassphrase changed. Your record is re-keyed.\r\n");
     session_send_cmd_prompt(s);
     return 0;

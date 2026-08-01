@@ -3341,6 +3341,34 @@ fn test_object_maxexist(): i64 {
     }
     if (idlen > str_len(sp)) { idlen = str_len(sp); }
 
+    # === 1.7.21 (BO) — CONTROL THE OFFLINE CENSUS, like the `reset` group does. ===
+    #
+    # AM (1.7.16) taught `_obj_id_world_count` to add offline holdings, and the
+    # 1.7.16 CHANGELOG said the consequence out loud: "A test that depends on disk
+    # state left by an earlier run is a landmine, and a change can arm one that was
+    # never there." The precondition was then added to the `reset` group (search
+    # `scrip_held` ~2,500 lines above) and NOT to this one — the group that guards
+    # the ceiling itself.
+    #
+    # The moment two offline records hold room 0's authored id, the world really is
+    # at its ceiling, the reset correctly declines to restock, and this test fails.
+    # Demonstrated by gate re-run #5 with two ordinary players picking up the
+    # notice board over TCP and quitting: `cyrius audit` exits 1. `data/players` is
+    # not in git, so CI always starts empty and never sees it — the gate fails only
+    # on a developer's tree, which is where it is run before every release.
+    #
+    # The second-order cost is the one that matters and is why this is not merely
+    # cosmetic: without it, this test can only ever execute with the offline term
+    # at ZERO — precisely the blind state that hid AZ (1.7.18) for a release.
+    var mx_tpl = obj_tpl_by_id(p, idlen);
+    var mx_idx = 0 - 1;
+    if (mx_tpl != 0) { mx_idx = (mx_tpl - g_obj_tpls) / OT_SIZE; }
+    var mx_held = 0;
+    if (mx_idx >= 0) {
+        mx_held = obj_offline_count(mx_idx);
+        obj_census_adjust(mx_idx, 0 - mx_held);
+    }
+
     zone_reset_objs();                       # top the world up to the ceiling
     var authored = _obj_id_authored_count(p, idlen);
     assert(authored >= 1, "the id is authored somewhere");
@@ -3435,6 +3463,9 @@ fn test_object_maxexist(): i64 {
     ilist_remove(slot, box);
     obj_free(box);
     assert_eq(_obj_id_world_count(p, idlen), authored, "the world is left at the ceiling");
+    # 1.7.21 (BO) — put back exactly what was borrowed, so this group leaves the
+    # census as it found it for whatever runs next.
+    if (mx_idx >= 0) { obj_census_adjust(mx_idx, mx_held); }
     return 0;
 }
 
@@ -6360,6 +6391,7 @@ fn main() {
     test_boot_sequence();
     test_unusual_session_states();
     test_login_parse();
+    test_gate5();
 
 
     return assert_summary();
@@ -7556,12 +7588,20 @@ fn test_shutdown_and_class_guard(): i64 {
               "...and writes NO record for the classless session");
 
     # The saved record really carries the unsaved progress, not the old snapshot.
+    #
+    # 1.7.21 (BL) — the session list is restored FIRST. This read-back models a
+    # login after the server came back up, and `player_auth_load` now refuses a
+    # character that is already connected (PL_ERR_DUP) rather than leaving that
+    # check to its caller. With the shut-down session still linked, "ShutOne" is
+    # by definition still online and the load is correctly refused. The old
+    # ordering only worked because the function did not ask.
+    g_session_head = saved_head;
+
     var back = _mk_sess("ShutOne", 7);
     assert_eq(player_auth_load(back, "shutpassone", 11), 1, "the shutdown-saved record loads");
     assert_eq(load64(back + SS_HP), 37,
               "...and holds the progress that only the shutdown walk could have captured");
 
-    g_session_head = saved_head;
     _player_unlink("ShutOne", 7);
 
     # --- AD, the disconnect half. A session that never chose a class must not
@@ -8760,20 +8800,21 @@ fn test_unusual_session_states(): i64 {
     persist_init();
     if (g_obj_tpl_count == 0) { assert(0, "unusual-states: needs object templates"); return 0; }
 
-    # --- BC. A refused duplicate must not credit the census for holdings it
-    # never owned.
+    # --- BC / BL. A refused duplicate must not move the offline census AT ALL.
     #
-    # The asymmetry IS the defect and both halves are pinned here:
-    # `obj_census_adjust`'s debit is clamped at zero (correctly — a mismatch must
-    # not underflow), while `session_drop_inv`'s credit is not. On the refusal
-    # path the live session already holds these ids, so the census is at zero,
-    # the login's debit is swallowed, and the teardown credits anyway.
+    # The two halves of this were found one release apart and in opposite
+    # directions. `obj_census_adjust`'s debit clamps at zero and
+    # `session_drop_inv`'s credit does not, so a refusal that ran AFTER
+    # `_restore_inv`:
+    #   - over-counted when the duplicate was the sole offline holder (BC), and
+    #   - under-counted when anyone else also held that template (BL),
+    # and each fix for one was wrong about the other. 1.7.21 refuses BEFORE the
+    # restore, so neither can happen: nothing is minted and the census is untouched.
     var idx0 = 0;
     var base = obj_offline_count(idx0);
 
-    # The credit half, unchanged: an ordinary disconnect DOES return holdings
-    # to the offline population. If this ever stops being true, AM has regressed
-    # and the discard below is measuring nothing.
+    # The credit half, unchanged: an ordinary disconnect DOES return holdings to
+    # the offline population. If this ever stops being true, AM has regressed.
     var dropper = _freeable_sess();
     store64(dropper + SS_INV, 0);
     ilist_push(dropper + SS_INV, item_new(ot_at(idx0)));
@@ -8781,74 +8822,31 @@ fn test_unusual_session_states(): i64 {
     session_drop_inv(dropper);
     assert_eq(obj_offline_count(idx0) - base, 2,
               "an ordinary disconnect credits the offline census (AM, unchanged)");
-    obj_census_adjust(idx0, 0 - 2);                  # put the census back
+    obj_census_adjust(idx0, 0 - 2);
     assert_eq(obj_offline_count(idx0), base, "...and the fixture leaves no residue");
 
-    # The discard half: same two items, same list, no census movement.
-    var refused = _freeable_sess();
-    store64(refused + SS_INV, 0);
-    ilist_push(refused + SS_INV, item_new(ot_at(idx0)));
-    ilist_push(refused + SS_INV, item_new(ot_at(idx0)));
-    session_discard_inv(refused);
-    assert_eq(obj_offline_count(idx0), base,
-              "THE ASSERTION BC EXISTS FOR: a refused duplicate's copies are freed WITHOUT crediting the census");
-    assert_eq(load64(refused + SS_INV), 0, "...and the list is emptied, so the teardown finds nothing to credit");
-
-    # The clamp that made it one-sided, asserted directly so the reasoning above
-    # cannot rot: debiting past zero does NOT go negative.
+    # The clamp that made the old path one-sided, asserted directly so the
+    # reasoning above cannot rot: debiting past zero does NOT go negative.
     obj_census_adjust(idx0, 0 - (obj_offline_count(idx0) + 5));
     assert_eq(obj_offline_count(idx0), 0, "the census debit clamps at zero, it does not underflow");
-    obj_census_adjust(idx0, base);                   # restore the group's precondition
+    obj_census_adjust(idx0, base);
 
-    # ...and the refusal arm actually calls it.
-    assert(_src_count("src/persist.cyr", "session_discard_inv(s);") >= 1,
-           "the duplicate-login refusal discards the inventory it restored");
-
-    # THE WHOLE DEFECT, END TO END, at the altitude where the census is readable.
-    #
-    # The live reproduction needs a link-dead session, a reconnect inside
-    # YD_IDLE_MS and two zone-reset intervals of decay, and its only observable is
-    # whether a room restocks — which the periodic reset also drives, so the
-    # signal is easy to lose. Here the counter itself is readable, so the
-    # accounting can be asserted directly instead of inferred from a room.
-    #
-    # The precondition is the one that makes the refusal possible in the first
-    # place: the LIVE session already holds these ids, so the offline count for
-    # them is zero. That is what turns the login's debit into a no-op.
-    var scrip_tpl2 = obj_tpl_by_id("scrip", 5);
-    if (scrip_tpl2 != 0) {
-        var sidx = (scrip_tpl2 - g_obj_tpls) / OT_SIZE;
-        var held = obj_offline_count(sidx);
-        obj_census_adjust(sidx, 0 - held);               # live session owns them
-        assert_eq(obj_offline_count(sidx), 0, "precondition: nothing of this id is offline");
-
-        # The refused duplicate authenticates, so `_restore_inv` runs in full and
-        # mints its own copies before the refusal is even reached.
-        var dup = _freeable_sess();
-        store64(dup + SS_INV, 0);
-        assert_eq(_restore_inv(dup, "scrip,scrip", 11), 0, "the duplicate's record resolves");
-        assert_eq(inv_count(dup), 2, "...and two copies are minted");
-        assert_eq(obj_offline_count(sidx), 0,
-                  "...while the matching DEBIT is swallowed by the clamp — the count was already zero");
-
-        # Now the teardown. This is the line that used to run.
-        session_discard_inv(dup);
-        assert_eq(obj_offline_count(sidx), 0,
-                  "THE ASSERTION BC EXISTS FOR: no phantom offline stock after a refused duplicate");
-        assert_eq(inv_count(dup), 0, "...and the minted copies are gone");
-
-        # And the counterfactual, so the assertion above cannot pass vacuously:
-        # the arm that used to run here DOES create the phantom.
-        var dup2 = _freeable_sess();
-        store64(dup2 + SS_INV, 0);
-        _restore_inv(dup2, "scrip,scrip", 11);
-        session_drop_inv(dup2);                          # what 1.7.18 called
-        assert_eq(obj_offline_count(sidx), 2,
-                  "...and the pre-1.7.19 teardown is exactly what invented 2 holdings from nothing");
-        obj_census_adjust(sidx, 0 - 2);
-
-        obj_census_adjust(sidx, held);                   # restore the precondition
-    }
+    # THE ASSERTION BL EXISTS FOR: the refusal is raised by `player_auth_load`
+    # itself, before any field is restored — so `_restore_inv` never runs and
+    # there is no census movement in EITHER direction to compensate for.
+    assert(PL_ERR_DUP < 0, "a duplicate login has its own return code");
+    assert(PL_ERR_DUP != PL_ERR_UNREADABLE, "...distinct from an unreadable record");
+    assert(PL_ERR_DUP != PL_ERR_SCHEMA, "...and from a newer-schema record");
+    var dup_at    = _src_offset_of("src/persist.cyr", "return PL_ERR_DUP;");
+    var verify_at = _src_offset_of("src/persist.cyr", "if (ed25519_verify(filepk, g_persist_slurp, prefix, filesig) != 1) {");
+    var restore_at = _src_offset_of("src/persist.cyr", "var lost = _restore_inv(s,");
+    assert(dup_at > 0, "player_auth_load can refuse an already-connected character");
+    assert(dup_at > verify_at,
+           "H11 HELD: the refusal still runs AFTER the signature verify, so it cannot probe who is online");
+    assert(dup_at < restore_at,
+           "THE ASSERTION BL EXISTS FOR: ...and BEFORE the inventory restore, so no census moves");
+    assert_eq(_src_count("src/item.cyr", "fn session_discard_inv"), 0,
+              "...and BC's compensating discard is deleted, not left dead");
 
     # --- BD. Upkeep is not gated on the phase — AK's other half.
     #
@@ -9050,6 +9048,113 @@ fn test_login_parse(): i64 {
     var pl[8];
     assert_eq(_kv_at("salt = 41\n", 10, "salt", 4, &pl), 0,
               "the PRE-AUTH reader still refuses a bare value — 1.7.20 changed nothing a peer can reach");
+    return 0;
+}
+
+# === 1.7.21 — gate re-run #5 (items BI / BK / BN / BP / BQ / BR / BM). ===
+#
+# BL and BO are asserted where their subjects live (unusual-session-states and
+# object-maxexist respectively). The AGNOS items are asserted structurally: the
+# suite is an x86_64 binary and cannot execute the other arm, so what is pinned
+# is that the two arms AGREE — which is the property every one of these defects
+# violated.
+fn test_gate5(): i64 {
+    test_group("gate5");
+
+    # --- BI. Both event loops can be stopped, and by the same mechanism.
+    #
+    # The AGNOS loop declared `stop`, tested it, and nothing in the tree ever
+    # assigned it — so the shared exit block below the `#endif` (shutdown save,
+    # audit flush, listener close) was unreachable on that target. That is item AC
+    # verbatim, on the arm AC was never carried to.
+    assert_eq(_src_count("src/server.cyr", "if (g_shutdown_requested == 1) { stop = 1; }"), 2,
+              "THE ASSERTION BI EXISTS FOR: BOTH event loops honour the shutdown flag, not just the epoll one");
+    assert(_src_count("src/session.cyr", "\"@shutdown\"") >= 1,
+           "...and an in-band verb sets it, which is what running.md has always claimed exists");
+    var sd_at   = _src_offset_of("src/server.cyr", "shutdown_save_all();");
+    var flush_at = _src_offset_of("src/server.cyr", "audit_flush_all();");
+    assert(sd_at > 0, "the exit block still saves every live session");
+    assert(flush_at > sd_at, "...before flushing the audit tally, in that order (1.7.11)");
+
+    # --- BK. The scheduling clock is descent's, and every call site uses it.
+    #
+    # `clock_now_ms` is `sys_uptime_ms` (#40) on AGNOS, which the agnos syscall
+    # layer documents as FROZEN for a foreground `run` program — the launch path
+    # running.md documents. Every deadline in the tree is a difference of this
+    # clock, so a frozen one means the tick never fires.
+    assert(_src_count("src/session.cyr", "fn mud_now_ms") >= 1,
+           "descent owns its scheduling clock rather than binding to lib/chrono.cyr");
+    assert(_src_count("src/session.cyr", "sys_uptime_us()") >= 1,
+           "...and reads the rdtsc clock, which needs no interrupts");
+    # The whole point is that there is ONE place to change. Two `clock_now_ms`
+    # calls remain in src/ and both are mud_now_ms's own fallbacks.
+    assert_eq(_src_count("src/server.cyr", "clock_now_ms()"), 0,
+              "THE ASSERTION BK EXISTS FOR: no scheduling site bypasses the wrapper (server)");
+    assert_eq(_src_count("src/persist.cyr", "clock_now_ms()"), 0, "...(persist)");
+    assert_eq(_src_count("src/classes.cyr", "clock_now_ms()"), 0, "...(classes)");
+    assert_eq(_src_count("src/session.cyr", "clock_now_ms()"), 2,
+              "...and session holds exactly the two fallbacks inside the wrapper itself");
+    assert(mud_now_ms() > 0, "the wrapper returns a live monotonic reading");
+    var t0 = mud_now_ms();
+    assert(mud_now_ms() >= t0, "...that does not go backwards");
+
+    # --- BP. The session ceiling matches the floor the target actually has.
+    #
+    # On AGNOS every socket comes from an 8-slot table with the listener holding
+    # one, so 256 was unreachable dead code and the 8th client got silence
+    # instead of H6's polite close.
+    assert(_src_count("src/server.cyr", "MAX_SESSIONS       = 7;") >= 1,
+           "THE ASSERTION BP EXISTS FOR: the AGNOS arm declares the ceiling it actually has");
+    assert(_src_count("src/server.cyr", "MAX_SESSIONS       = 256;") >= 1,
+           "...and the Linux arm is unchanged");
+    assert_eq(MAX_SESSIONS, 256, "...with this x86_64 build getting the Linux value");
+    assert(_src_count("src/server.cyr", "g_session_count >= MAX_SESSIONS") >= 1,
+           "...so H6's close path is the thing that fires at capacity, on both");
+
+    # --- BQ. The control-byte guard covers every string field the writer writes.
+    #
+    # Enumerate the class FROM THE WRITER — `_build_record` emits exactly four
+    # `_fstr` values — rather than from the fields somebody thought of.
+    assert_eq(_src_count("src/persist.cyr", "_rv_ctrl(rv, \"name\")"), 1, "the M11-C guard covers name");
+    assert_eq(_src_count("src/persist.cyr", "_rv_ctrl(rv, \"class\")"), 1,
+              "THE ASSERTION BQ EXISTS FOR: ...and class, the fourth _fstr field it used to miss");
+    assert_eq(_src_count("src/persist.cyr", "_rv_ctrl(rv, \"room\")"), 1, "...and room");
+    assert_eq(_src_count("src/persist.cyr", "_rv_ctrl(rv, \"inv\")"), 1, "...and inv");
+    assert_eq(_src_count("src/persist.cyr", "_fstr(off, \"class\""), 3,
+              "...and class really is written by _fstr — all three arms, including the two empty ones");
+
+    # --- BN. The audit counter counts writes, not attempts.
+    #
+    # 1.7.1 added this counter because "a counter at the call site cannot be wrong
+    # about how many entries were written" — and it was incremented on the line
+    # BEFORE the append, so it was wrong under the one failure it had to survive.
+    var app_at = _src_offset_of("src/persist.cyr", "if (filestore_append(g_audit_store, e) < 0) { wrote = 0; }");
+    var cnt_at = _src_offset_of("src/persist.cyr", "if (wrote == 1) { g_audit_emitted = g_audit_emitted + 1; }");
+    assert(app_at > 0, "audit_event inspects the store's return");
+    assert(cnt_at > app_at,
+           "THE ASSERTION BN EXISTS FOR: the emitted counter advances AFTER a successful append, not before");
+    assert(_src_count("src/persist.cyr", "g_audit_store_failed") >= 2,
+           "...and a failure is latched so a full disk is one line, not one per event");
+
+    # --- BM / BR. Rotation survives a skipped prune.
+    #
+    # `_audit_seg_hi`'s early stop assumed the retained run is contiguous. One
+    # stranded segment falsifies that forever, and everything downstream inherits
+    # a wrong "highest": new history sealed below old, resume from the wrong
+    # segment, and a prune whose arithmetic victim no longer exists.
+    assert_eq(_src_count("src/persist.cyr", "if (miss >= AUDIT_SEG_KEEP) { n = AUDIT_SEG_MAX; }"), 0,
+              "THE ASSERTION BM EXISTS FOR: the contiguity-premised early stop is gone");
+    assert(_src_count("src/persist.cyr", "while (victim >= 1) {") >= 1,
+           "...and the prune sweeps the window rather than naming one arithmetic victim");
+    # BR — both halves: do not attest what you cannot hash, and do not claim a
+    # deletion that did not happen.
+    assert(_src_count("src/persist.cyr", "if (hlen <= 0) {") >= 1,
+           "THE ASSERTION BR EXISTS FOR: a hashless marker attests nothing, so it is not written");
+    assert(_src_count("src/persist.cyr", "if (xunlink(g_audit_segbuf) != 0) {") >= 1,
+           "...and an unlink that failed is not counted as a prune");
+    var pruned_at = _src_offset_of("src/persist.cyr", "g_audit_pruned = g_audit_pruned + 1;");
+    var unlink_at = _src_offset_of("src/persist.cyr", "if (xunlink(g_audit_segbuf) != 0) {");
+    assert(pruned_at > unlink_at, "...the counter advancing only after the unlink is checked");
     return 0;
 }
 
