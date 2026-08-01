@@ -93,17 +93,53 @@ construction against `lib/syscalls_x86_64_agnos.cyr`, but end-to-end persistence
 on a booted AGNOS kernel has not been re-verified since the fix. If you run one,
 that is the check worth reporting.
 
-> **There is currently no way to boot AGNOS and play the MUD end-to-end.** This
-> section used to point at a container harness in the **agnosticos** repo at
-> `docker/descent-sweep/`. **That harness was retired on 2026-07-07** and the
-> directory is gone; the instructions here outlived it by several releases.
+### Booting AGNOS and playing the MUD end-to-end
+
+```sh
+scripts/agnos-qemu-smoke.sh
+```
+
+**Since 1.7.21 this project has its own QEMU-direct harness.** It cross-builds
+descent `--agnos`, stages an ext2 root with the binary and `data/`, boots a real
+AGNOS kernel under QEMU with SLIRP host-port forwarding, and drives the server
+over TCP from the host.
+
+This section used to point at a container harness in the **agnosticos** repo at
+`docker/descent-sweep/`. That was **retired on 2026-07-07** — deliberately: its
+architecture was QEMU-inside-Docker, which that project killed as "the dead
+VM-in-a-container pattern", and kernel/net validation there lives on
+**QEMU-direct**. So this harness is QEMU-direct, modelled on agnos's own
+`scripts/smoke/{tcp-listen,ark-run,bench-connect}-smoke.sh`.
+
+**It needs no patch to the agnos kernel.** The kernel's `BENCH_CONNECT_SELFTEST`
+hook reads a command from `/etc/probe-cmd` on the ext2 root and runs it, so
+descent is launched by staging a file rather than by adding a hook of its own:
+
+```sh
+# in the agnos checkout, once:
+BENCH_CONNECT_SELFTEST=1 sh scripts/build.sh
+```
+
+> **What it found on its first run — read this before deploying on AGNOS.**
 >
-> Rebuilding it — or an equivalent QEMU harness — is the single highest-value
-> piece of test infrastructure this project is missing. Every AGNOS defect closed
-> in 1.7.21 was found by reading two arms of a preprocessor or by running under an
-> agnos→Linux syscall translator, which by its own documentation does not
-> exercise the kernel's scheduler, net stack or interrupt semantics — which is
-> exactly where the remaining unknowns live.
+> **A player cannot create a character or log in. The server dies the moment a
+> passphrase is entered**, with the kernel reporting `run: exit 142` (128+14, the
+> ring-3 page-fault kill code).
+>
+> Everything up to that point works, and works well: the zone loads (21 rooms, 10
+> object templates, 4 mob templates, 4 classes), the persistence engine opens,
+> `sock_listen` binds, a client connects, the 213-byte MOTD and the Telnet
+> `IAC WILL ECHO` negotiation arrive intact, a name is accepted, and the server
+> replies `New operative — choose a passphrase`. Idling a connection for 20 s is
+> stable. **The fault is at `ident_derive`** — the Ed25519/SHA-256 key derivation
+> — and it lands in the crypto's per-thread scratch banking (`cbank()` →
+> `thread_local_get`, `lib/sigil-mldsa.cyr`), which self-installs a TLS block on
+> first use. That is vendored `lib/` plus the kernel's TLS support, not descent's
+> code, so it is **not fixable from this repo**.
+>
+> This is why the earlier claim that "AGNOS persistence works end to end" was
+> misleading: it was measured under an agnos→Linux syscall translator, which
+> emulates userland and does not reproduce this.
 
 ## Configuration (file)
 

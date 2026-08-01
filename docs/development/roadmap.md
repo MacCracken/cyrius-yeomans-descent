@@ -52,8 +52,9 @@ ownership and fix size.
 | — | ~~gate re-run #5~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **3 high**, 5 medium, 4 low — 12 distinct defects from 15 reports. **All three highs are AGNOS-only; x86_64 came back with ZERO highs, a first.** The "our own recent fixes are incomplete" signal collapsed from 7-of-9 to 1-of-12 | — |
 | — | ~~1.7.21~~ | ~~10~~ | ✅ **Shipped.** The target nobody had ever run — **BI** AGNOS had no clean shutdown at all (`stop` was never assigned) · **BK** descent owns its scheduling clock, since #40 is documented frozen on the `run` path · **BL** 1.7.19's mirror image, fixed by refusing the duplicate *before* the restore · plus BM, BN, BO, BP, BQ, BR, BS | — |
 | 1 | [**BJ**](#open-issues--gate-re-run-5-returned-do-not-close-2026-07-31) | 1 | **Next, and it is a DECISION not a patch.** `session_drain`'s only would-block arm is Linux `EAGAIN`; AGNOS `sys_write` routes to blocking `sock_send` #48. agnos exposes **no non-blocking send at all**, so this needs the same upstream `lib/` conversation as item **AA** — take them together | **yes** |
-| 2 | [**the AGNOS harness**](#the-gate--what-closes-the-1x-line) | — | **Infrastructure, and the real blocker.** `running.md`'s QEMU harness was **deleted 2026-07-07**. Until it is rebuilt, no sweep can close AGNOS and re-run #6 will report the same uncertainty #5 did | **yes** |
-| 3 | [**gate re-run #6**](#the-gate--what-closes-the-1x-line) | — | After BJ and the harness. Target what #5 could not: a real kernel boot, the conservation invariant, CYML loader fuzz, a multi-hour soak | **yes** |
+| — | ~~the AGNOS harness~~ | — | ✅ **BUILT (1.7.21).** `scripts/agnos-qemu-smoke.sh` — QEMU-direct, boots a real AGNOS kernel and drives descent over TCP. Needs **no kernel patch** (rides the `/etc/probe-cmd` hook). The retired agnosticos container harness is not coming back: its QEMU-in-Docker architecture was killed on purpose | — |
+| 1 | [**BU**](#bu--descent-cannot-authenticate-anyone-on-a-real-agnos-kernel) | 1 | **NEW, and it supersedes BJ/BK in severity.** On a real kernel descent **dies the instant a passphrase is entered** — `run: exit 142`, a ring-3 page fault at `ident_derive`. Character creation and login have NEVER worked on AGNOS. The fault is in `cbank()` → `thread_local_get` (vendored `lib/` + kernel TLS), so it is **not fixable from this repo** | **yes** |
+| 3 | [**gate re-run #6**](#the-gate--what-closes-the-1x-line) | — | After BU, BJ and now that the harness exists. Target what #5 could not: a real kernel boot, the conservation invariant, CYML loader fuzz, a multi-hour soak | **yes** |
 | 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
 | 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
 | 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
@@ -156,6 +157,44 @@ which is the property all three violated.
   **AA** has been waiting on since 1.7.9, and guessing at a chunking workaround
   here would be a patch written against an API nobody has agreed to yet. **Take
   AA and BJ as one conversation.**
+
+**BU. Descent cannot authenticate anyone on a real AGNOS kernel.** *(high — found
+by the 1.7.21 harness, NOT by gate re-run #5)*
+
+- **What breaks.** A player connects, is greeted, gives a name, is prompted for a
+  passphrase — and the server **dies the moment the passphrase is submitted**.
+  The kernel reports `run: exit 142` (128 + 14, its ring-3 page-fault kill code).
+  Character creation and login have therefore **never worked on that target**, in
+  any release since `--agnos` shipped in 1.1.0.
+- **Everything before it works, and that is what makes the finding precise.**
+  Measured on a real kernel under QEMU: zone loads (21 rooms, 10 object
+  templates, 4 mob templates, 7 mobs, 4 classes), `filestore: open` succeeds,
+  `sock_listen` binds, `sock_accept` returns a tagged fd, the **213-byte MOTD and
+  the Telnet `IAC WILL ECHO` salvo arrive intact**, an empty line is handled, a
+  name is accepted and the phase advances to the passphrase prompt. A connection
+  left idle for 20 s is stable, and with no client at all the server runs
+  indefinitely.
+- **Bisected to `ident_derive`** — the Ed25519/SHA-256 key derivation — by
+  instrumenting the accept path, the poll loop, the recv branch and the line
+  dispatcher in turn, then discriminating empty line vs name vs passphrase. The
+  fault lands in the crypto's per-thread scratch banking: `cbank()`
+  (`lib/sigil-mldsa.cyr:560`) calls `crypto_tls_main_init()` and
+  `thread_local_get`, self-installing a TLS block on first use.
+- **Whose code. NOT ours, and not fixable from this repo.** `lib/` is vendored
+  and off-limits (CLAUDE.md), and the other half is the agnos kernel's TLS
+  support. `src/main.cyr` already includes `lib/thread.cyr` +
+  `lib/thread_local.cyr` explicitly, with a comment predicting this exact class
+  of failure ("leaving thread_local_* as ud2/SIGILL trap stubs that crash sha256
+  the instant ident derivation runs"), and `lib/thread_local.cyr` does have AGNOS
+  branches — so the include is right and the remaining gap is deeper.
+- **It also corrects a claim gate re-run #5 made.** #5 reported "AGNOS
+  persistence works end to end" from a run under an agnos→Linux syscall
+  translator. That translator emulates *userland* and does not reproduce this, so
+  the claim held only for the surface it could see. **A real kernel boot was the
+  instrument, exactly as #5 predicted it would be.**
+- **Next step is a decision, not a patch:** take it upstream with **AA** and
+  **BJ** — all three are the same conversation about what `lib/` owes the AGNOS
+  target.
 
 **BT. Mob loot is minted outside the object ceiling.** *(low — belongs with M15)*
 

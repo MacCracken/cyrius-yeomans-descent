@@ -253,6 +253,46 @@ sweeps.**
   authoring the same ids stop restocking. It is the object-lifetime/ownership
   question and belongs with **M15**, not a patch release.
 
+### Added
+
+- **`scripts/agnos-qemu-smoke.sh` — a QEMU-direct AGNOS harness.** descent has
+  shipped a `--agnos` target since 1.1.0 and **no test had ever executed it on a
+  real kernel.** This cross-builds `--agnos`, stages an ext2 root with the binary
+  and `data/`, boots a real AGNOS kernel under QEMU with SLIRP host-port
+  forwarding, and drives the server over TCP from the host
+  (`scripts/agnos_probe.py`).
+
+  **It needs no patch to the agnos kernel** — the kernel's existing
+  `BENCH_CONNECT_SELFTEST` hook reads a command from `/etc/probe-cmd` and runs
+  it, so descent is launched by staging a file. The retired agnosticos container
+  harness is deliberately not resurrected: its QEMU-in-Docker architecture was
+  killed by that project on purpose, which is why the pointer in `running.md` had
+  been dead since 2026-07-07.
+
+  **One harness bug worth recording**, because it produced two runs of confident
+  nonsense before it was caught: readiness was originally "can I TCP-connect to
+  the forwarded port?" — and **SLIRP accepts `hostfwd` on the host side whether or
+  not anything in the guest is listening**, so it succeeded ~1 s after QEMU
+  started, killed the VM mid-boot, and reported five detailed failures about a
+  server that had not booted. Readiness is now the serial console.
+
+### Found, not fixed — see roadmap item BU
+
+- **On a real AGNOS kernel, descent dies the moment a player enters a
+  passphrase** (`run: exit 142` — the ring-3 page-fault kill code). **Character
+  creation and login have never worked on that target.** Everything before it
+  does: the zone loads, `sock_listen` binds, the 213-byte MOTD and the Telnet
+  negotiation arrive, a name is accepted and the passphrase prompt is sent, and
+  an idle connection is stable for 20 s. Bisected to **`ident_derive`** and the
+  crypto's per-thread scratch banking (`cbank()` → `thread_local_get`). That is
+  vendored `lib/` plus the kernel's TLS support — **not fixable from this repo**,
+  and it belongs in the same upstream conversation as **AA** and **BJ**.
+
+  It also corrects gate re-run #5's report that "AGNOS persistence works end to
+  end": that was measured under an agnos→Linux syscall translator, which emulates
+  userland and does not reproduce this. #5 named a real kernel boot as its top
+  instrument gap and was right.
+
 ### Lessons carried, added this release
 
 - ***A defect you fix can have a mirror image, and fixing one half can create the
@@ -275,6 +315,16 @@ sweeps.**
   items are one arm of a preprocessor having a fix the other never got. The tree
   has had two event loops since 1.1.0 and no sweep had run the second one until
   now.
+- ***An emulator that answers "does the userland run" cannot answer "does it
+  work".*** Gate re-run #5 concluded AGNOS persistence was sound from a syscall
+  translator. One real kernel boot showed nobody can log in at all. **When a
+  result comes from a substitute for the real thing, the substitute's own
+  documentation about what it does not cover is part of the result.**
+- *A readiness check that can succeed for the wrong reason will.* The harness's
+  first two runs killed the VM mid-boot and reported five confident failures,
+  because SLIRP accepts a forwarded port with nothing behind it. **A probe's
+  liveness signal must come from the thing under test, not from the plumbing in
+  front of it.**
 
 ## [1.7.20] — 2026-07-31
 
