@@ -38,9 +38,14 @@ bug/security fixes that do not change observable behaviour.
 
 ### 2. `@`-admin namespace (`src/session.cyr` + `server.cyr`)
 
-- `@stats`, `@who`, `@reset`. **Gated behind `YD_ADMIN` (default off)** — when
+- `@stats`, `@who`, `@reset`, `@shutdown`. **Gated behind `YD_ADMIN` (default
+  off)** — when
   disabled they read as unknown commands and are hidden from `help`. The *names
-  and output shape* are frozen; operator authentication (replacing the env gate)
+  **`@shutdown` added 1.7.21** — an amendment in the 1.7.2 style: additive, behind
+  the already-frozen gate, and it exists because the AGNOS event loop had no exit
+  at all (its `stop` flag was declared and never assigned, so 1.7.11's shutdown
+  save was unreachable code on that target).
+  The *names and output shape* are frozen; operator authentication (replacing the env gate)
   is explicitly **deferred to M8, post-1.0**.
 
 ### 3. Save-record schema — **version 1** (`src/persist.cyr`)

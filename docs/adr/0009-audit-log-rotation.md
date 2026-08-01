@@ -102,6 +102,25 @@ simple multiplication (`threshold × keep`) rather than a function of traffic.
   to the tail of the **highest-numbered segment** when the live file yields no
   hash. This closes the only crash window and is load-bearing.
 
+### Amended 1.7.21 — what changed under the verification walk
+
+Three things moved after this ADR was written, and an operator running the walk
+below on a current server can read a **legitimate failure as tampering**:
+
+- **Prune sweeps, it does not pick one victim.** `_audit_prune` now walks DOWN
+  from `newest - AUDIT_SEG_KEEP` to 1, so one rotation can retire several
+  segments. The old single-arithmetic-victim form meant a skipped prune was never
+  named again, which permanently inverted the segment numbering (item **BM**).
+- **`audit.rotate.fail` is a third marker this ADR never mentions.** It is emitted
+  when a prune cannot be attested (no readable tail hash) or when the `xunlink`
+  fails. **A `audit.prune` marker naming a segment that is STILL ON DISK, next to
+  an `audit.rotate.fail`, means the unlink failed — not that anyone tampered.**
+- **Only the first `audit.prune` per 60 s window is verbatim.**
+  `AUDIT_VERBATIM_MAX = 1` with a 60 s rollup window, so on exactly the
+  multi-segment sweep above, the later prunes coalesce into a rollup whose
+  `NAME_MAX = 16` truncation cannot carry a 64-hex hash. **Per-segment hash
+  attestation is therefore not guaranteed** when several segments retire at once.
+
 ## Consequences
 
 **Positive**

@@ -20,7 +20,7 @@
   `.tmp`+rename writes ([ADR 0006](../adr/0006-persistence-shape.md)); **libro**
   (append-only SHA-256 hash-chain) for the audit log + **sigil** (Ed25519
   identity, [ADR 0004](../adr/0004-identity-and-authentication.md))
-- **Game management interface**: a `@`-admin verb set (`@stats`/`@who`/`@reset`,
+- **Game management interface**: a `@`-admin verb set (`@stats`/`@who`/`@reset`/`@shutdown`,
   gated behind `YD_ADMIN`); a full operator interface (Joshua) is a post-1.0
   milestone
 
@@ -30,7 +30,21 @@ To preserve the 90s text-MUD feel, combat avoids deterministic MMO-style cooldow
 
 ### 2.1 Tick architecture
 
-Combat resolves automatically once engaged (via `kill <target>`). The server calculates one combat round every **2.5 seconds (the Combat Tick)**. During this tick, both the player and the target execute their attacks, and the parser translates the math into dynamic text output.
+Combat resolves automatically once engaged (via `kill <target>`). The server calculates one combat round every **2.5 seconds (the Combat Tick)**, and the parser translates the math into dynamic text output.
+
+**The two sides are independent latches, not a symmetric exchange** — this is the
+single most misread thing in the combat model, and it cost two releases to get
+right. The player's round is gated on being at the command prompt
+(`SS_PHASE == PHASE_CMD`, `src/server.cyr`); the mob's round is **not**
+(`mob_tick_all`, `src/mob.cyr`), and a mob's target (`MI_TARGET`) is set by
+assist/leash and outlives the player's (`SS_TARGET`). Two consequences follow:
+
+- **A player who steps into the passphrase prompt mid-fight takes damage without
+  dealing any.** (Before 1.7.16 neither side swung, which made that player
+  *permanently invulnerable*.)
+- **A mob can attack a player who has no target at all.** Before 1.7.17 such a
+  player was treated as out of combat and regenerated every tick — measured at 70
+  incoming swings in 60 s with HP never dropping below 36/40.
 
 ### 2.2 Base attributes
 
@@ -43,7 +57,7 @@ Combat resolves automatically once engaged (via `kill <target>`). The server cal
 | --- | --- |
 | **STR** (Strength) | **Nothing yet.** Stored, shown by `examine me`, read by no game rule. Pikeman abilities use a flat bonus, not STR. |
 | **DEX** (Dexterity) | `backstab` damage only — `base + dex/2`, tripling to `base*3 + dex` from stealth. Not in the hit roll and not evasion. |
-| **CON** (Constitution) | Out-of-combat regeneration: `1 + CON/5` HP per tick while not engaged. **Not** maximum HP — that comes from the class's authored `hp`. |
+| **CON** (Constitution) | Out-of-combat regeneration: `1 + CON/5` HP per tick while not in combat — where "in combat" means `session_in_combat`, i.e. **either you have a target OR any mob in the room has latched onto you** (1.7.17). It is *not* a test of your own target alone; that was the bug. **Not** maximum HP — that comes from the class's authored `hp`. |
 | **TEC** (Tech) | Splicer and Chaplain ability riders: `hack` `+TEC/2`, `overload` `+TEC`, `patch` `+TEC/2`, `rally` `+TEC`. No "energy weapon scaling". |
 
 Carrying capacity is a flat **100-item cap** (1.6.13), not a STR-scaled weight
@@ -110,7 +124,23 @@ The backend replicates the Telnet era while benefiting from modern stability.
   `kill 2.scavver`). Note that the single-target verbs — `put`,
   `give`, `kill`, `examine` — take `all.X` to mean *the first* X, since they have
   no plural form; only `get` and `drop` act on every match.
-- **Zones & resets** — the game world is compartmentalized into zones. A routine "zone reset" triggers on a per-zone timer (authored as `reset_secs`; the Hub uses 15 min), respawning mobs and loot, **but only while no active player occupies the zone** (the reset defers until it empties).
+- **Zones & resets** — a routine "zone reset" fires on a timer (authored as
+  `reset_secs`; the Hub uses 15 min) **only while no active player is in the
+  world** (it defers until empty). Two clarifications the design intent hides:
+  - **There is exactly ONE zone today.** Boot loads a single hardcoded
+    `data/zones/hub.*` triple and the cadence is two globals. A zone *registry*
+    with per-zone timers is **M15 / 2.0**, not current behaviour.
+  - **The object half is a max-exist CEILING, not a per-room respawn.** The reset
+    asks "how many of this authored id exist anywhere?" — counting room floors,
+    containers, connected inventories **and the save records of players who are
+    offline** (the 1.7.16 census) — and mints only up to the authored count. That
+    offline term is why an object a logged-off player is carrying is not
+    duplicated, and getting it wrong has produced defects in three separate
+    releases.
+  - **Objects have a lifetime.** A corpse and its contents are freed after
+    `CORPSE_TICKS` (120 ticks ≈ 5 min); an item a *player* dropped — including
+    everything a death dumps on the floor — is freed after two reset intervals
+    (≈30 min in the Hub). Authored room furniture never ages.
 
 ## See Also
 

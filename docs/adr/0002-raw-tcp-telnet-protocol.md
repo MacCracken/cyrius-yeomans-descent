@@ -18,7 +18,7 @@ The design doc commits to "accurately reflecting the DikuMUD and LPMud era," whi
 
 The server speaks **raw TCP with Telnet line discipline** as its primary transport. Browser clients are supported via an external Telnet-over-WebSocket wrapper — we do not ship a web client of our own, and we do not natively speak WebSocket.
 
-In scope: line-oriented Telnet (CR/LF), basic option negotiation (echo on/off for passwords, terminal-type discovery), ANSI color sequences inline in the text stream.
+In scope: line-oriented Telnet (CR/LF), basic option negotiation (echo on/off for passwords, terminal-type discovery), ANSI color sequences inline in the text stream.  **(Amended 1.7.21: NOT implemented, and deliberately so.** `OPT_TERMINAL_TYPE = 24` is defined in `src/telnet.cyr` and referenced nowhere else. ADR 0007 freezes naive-refuse for every option except ECHO and SGA, so this is out of scope for 1.x, not pending.)
 
 Out of scope: MUD-specific protocol extensions (MCCP, MSP, MXP, GMCP) for v1.0. May be added post-v1.0 once the base game is stable.
 

@@ -54,18 +54,29 @@ data/zones/<zone>.objs.cyml      object templates
 ```
 
 Each file is a multi-entry CYML document: a file-level header carrying
-zone metadata (`zone`, `name`, `reset_secs`), then one `[[entries]]` per
+zone metadata (`zone`, `name`, `reset_secs`, **`start`**), then one `[[entries]]` per
 entity. The split is not only thematic — it keeps each file under the
 **32-entry-per-file** ceiling imposed by `lib/cyml.cyr` (its entry-marker
 scan uses a 256-byte / 32-slot stack buffer; see *Consequences*).
 
 **Schema (v0.4.0 / M3 scope).**
 
-Rooms file — file header then one entry per room:
+Rooms file — file header then one entry per room. **`start` names the room new
+characters spawn into**, and is also the fallback when a saved record's room no
+longer resolves and the respawn target on death.
+
+> **A mistyped `start` stops the server — amended 1.7.21.** An unresolvable
+> `start` is a load error (`WL_ERR_NOSTART`), and since 1.7.18 **any** non-OK
+> rooms result refuses the boot with exit 1. That is deliberate: a half-published
+> table silently empties player inventories, which is irreversible because records
+> are signed with a key the server never holds. An **absent** `start` remains
+> legal and means room 0 — only a `start` that is present and does not resolve is
+> an error.
 
 ```
 zone = "hub"
 name = "The Hub"
+start = "hub.gate"
 reset_secs = 900
 ---
 [[entries]]

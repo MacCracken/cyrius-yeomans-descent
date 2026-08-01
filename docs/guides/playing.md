@@ -20,7 +20,13 @@ New operative — choose a passphrase (4-64 chars): ********
 Confirm passphrase: ********
 ```
 
-Your **passphrase never leaves your terminal in cleartext on a conformant
+Your passphrase is **not echoed** — the server sends `IAC WILL ECHO` so a
+conformant client stops displaying what you type, and the server masks it too.
+**That is display, not transport.** Telnet has no TLS and this server does not add
+any ([ADR 0004](../adr/0004-identity-and-authentication.md) records the cleartext
+wire as an accepted cost), so **your passphrase crosses the network in the
+clear**. Play over a network you trust or through an SSH tunnel, and do not reuse
+a passphrase you use anywhere else.
 client** — the server sends `IAC WILL ECHO` so your client stops echoing your
 keystrokes. The passphrase is *not* stored: the server derives an Ed25519
 keypair from `SHA-256(salt ‖ passphrase)` and keeps only the salt and public
@@ -74,7 +80,10 @@ cleave               — Pikeman: a heavy swing
 `examine me` shows your energy draining and cooldowns ticking back. Win and the
 mob leaves a corpse; `get all from corpse` to loot it. Out of combat your HP
 recovers on its own. If you die you wake at the gate, your gear dropped where
-you fell — go back for it.
+you fell — **go back for it soon.** Anything a player leaves on a floor,
+including a whole inventory dumped by death, is destroyed after two zone-reset
+intervals (about **30 minutes** in the Hub); a corpse and its loot go after about
+**5 minutes**. Authored scenery never expires — only what a player put down.
 
 Each class clears the Hub solo and can down the Foundry's Sentinel boss: the
 Pikeman tanks, the Splicer bursts, the Courier strikes from stealth, the

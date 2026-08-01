@@ -32,7 +32,7 @@
 #     occupancy: real cost, different quantity, measured against the 2.5 s
 #     interval rather than the drift allowance. Those are REPORTED, not gated.
 #
-# Gating the sum of the two would mix in 43.3 ms of legitimate combat fan-out
+# Gating the sum of the two would mix in ~27 ms of legitimate combat fan-out
 # (bench_combat BIGPLAYERS, passing) that nothing in this release can reduce, and
 # the pressure would then be to quietly size the threshold to whatever the tree
 # happens to measure. That is exactly how a budget stops meaning anything.
@@ -314,7 +314,14 @@ fn main(): i64 {
     var idle_us = (clock_now_ns() - t3) / 1000;
     g_session_head = 0;
     tb_line("sweep_idle (IDLE_REAP_MAX)     ", idle_us);
-    println("    plus combat fan-out, 256 co-located: 43 ms (bench_combat, passing)");
+    # 1.7.21 — was hardcoded at "43 ms" from 1.7.0 onward. Gate re-run #5
+    # re-measured it at 26-28 ms on this class of host and derived the shape:
+    # p99 = 0.432 us x N², breaching the 50 ms drift budget at N ~= 345. A
+    # hardcoded figure in a bench's own output is a number nobody re-derives —
+    # this one was quoted onward into ADR 0001 and roadmap item K and went stale
+    # in all three places at once.
+    println("    plus combat fan-out, 256 co-located: ~27 ms (bench_combat, passing;");
+    println("      p99 = 0.432 us x N^2, so the 50 ms drift budget breaches at N ~= 345)");
     print("    tick-body total (excl. combat) : ", 37);
     print_num((save_us + idle_us) / 1000); print(" ms of the ", 11);
     print_num(g_tick_ms); println(" ms interval");

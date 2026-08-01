@@ -25,7 +25,13 @@ Two shapes of state to persist, with different access patterns:
 **Player state lives in one file per player; security events live in a libro
 audit chain. Both writes are crash-safe.**
 
-- **Player record**: `data/players/<lower(name)>.cyml`, a single `[player]`
+- **Player record**: `data/players/<c>/<lower(name)>.cyml`, a single `[player]`
+  section. **Sharded into a one-character subdirectory since 1.7.2** (36 buckets,
+  by the first character of the name) so a world with thousands of accounts is not
+  one directory of thousands of files. Pre-1.7.2 records sit flat at
+  `data/players/<lower(name)>.cyml`; the load path still reads them and the next
+  save migrates the record and unlinks the flat copy. **An operator looking for a
+  character's file must look in the shard, not the top level.**
   TOML section (reusing the project's existing toml/cyml reader — same family
   as [ADR 0005](0005-zone-file-format.md) zones). Fields: identity (salt +
   pubkey per [ADR 0004](0004-identity-and-authentication.md)), class, room
@@ -66,7 +72,14 @@ audit chain. Both writes are crash-safe.**
 - **Positive** — O(1) load by name; whole-record rewrite is simple and matches
   how player state actually changes; atomic rename gives crash-safety without a
   journal or WAL; the audit chain gives tamper-evidence and exercises libro for
-  real. Reusing the toml reader means zero new parser surface.
+  real. Reusing the toml reader meant zero new parser surface **at 1.0. That is no longer
+true**: 1.7.8 added a strict raw scanner for the pre-auth `salt`/`pubkey` read, and
+1.7.20 extended it so that an authenticated login whose record is canonical is read
+**entirely by the scanner** (`_scan_kv` / `_scan_kv_bare` / `_scan_canonical`),
+skipping `toml_parse` altogether — 2,332 bytes/login of never-reclaimed arena down
+to 84. A "NO PARSER DIFFERENTIAL" guard and a per-field agreement test keep the two
+readers honest. **Anyone scoping a fuzz target from this sentence would fuzz
+`lib/toml.cyr` and miss the reader that actually runs**.
 - **Negative** — one file per player doesn't scale to millions of accounts (fine
   for a MUD; revisit with `PatraStore` if it ever matters). Records are
   human-readable/editable on disk, but the Ed25519 signature makes unauthorized

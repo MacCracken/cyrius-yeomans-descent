@@ -25,39 +25,52 @@ ownership and fix size.
 
 | # | Next | Items | Contains | Blocks 2.0? |
 |---|---|---|---|---|
-| — | ~~1.7.0~~ | ~~2~~ | ✅ **Shipped.** The tick budget becomes a budget — the auth reorder, the charge window, the drain re-arm, the teardown charge, and the bench that should have caught it | — |
-| — | ~~1.7.1~~ | ~~3~~ | ✅ **Shipped.** Bound what the reconnect rate sets — the audit rollup window, `passwd`'s rate limit, ADR 0009, and a live audit-log integrity bug found on the way | — |
-| — | ~~1.7.2~~ | ~~5~~ | ✅ **Shipped.** The carry cap becomes a bound (both halves) · operator config + account cap · sharded player records · ADR 0007 amended. Found the defect class recurring inside 1.7.1's fix for it | — |
-| — | ~~1.7.3~~ | ~~4 of 6~~ | ✅ **Shipped.** `cmd_give`'s overshoot · the per-tick save-failure retry · the two uncovered guards · the borrowed audit chain-link | — |
-| — | ~~1.7.4~~ | ~~1 of 3~~ | ✅ **Shipped.** Audit-log rotation (ADR 0009 mechanism), incl. the crash window, the prune attestation, and the clobber guard | — |
-| — | ~~1.7.5~~ | ~~1 of 2~~ | ✅ **Shipped.** Ground decay — player-dropped items expire after two zone-reset intervals (30 min). The last item of the 1.6/1.7 audit line | — |
-| — | ~~1.7.6~~ | ~~2~~ | ✅ **Shipped.** The room listing no longer breaks the wire (it ended mid-escape with no prompt at 86 floor objects) · 1.6.12's audit granularity restored | — |
-| — | ~~1.7.7~~ | ~~2~~ | ✅ **Shipped.** Carried two existing fixes to the sites they were never applied to — `get` of a container (silent item loss at 199 against a cap of 100) · five listing verbs that truncated mid-line with no prompt | — |
-| — | ~~1.7.8~~ | ~~2~~ | ✅ **Shipped.** AGNOS saves never published (syscalls 82/87 are GPU calls there) · the pre-auth parse, 2,248 B/attempt → **0** · CI now builds `--agnos` | — |
-| — | ~~1.7.9~~ | ~~9~~ | ✅ **Shipped.** The RX-side class — a half-sent Telnet escape on a full queue, at the negotiation drain AND at the `WILL/WONT ECHO` sites every real client hits · the unguarded room-header prose · the class menu · `mob_swing` on the tick path. Item Y settled as **doc-only**, item AA carried | — |
-| — | ~~1.7.10~~ | — | ✅ **Shipped.** Toolchain `6.4.86 → 6.5.4` + a refreshed dependency snapshot. No source change; closed the **sakshi shadow gap** carried since 1.2.0 and the toolchain-drift warning | — |
-| — | ~~gate re-run #2~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **2 high**, 3 medium, 3 low. Nothing dropped; ten reports collapsed to eight distinct defects | — |
-| — | ~~1.7.11~~ | ~~2~~ | ✅ **Shipped.** **AC** shutdown now saves every live session (verified against a running server) · **AD** closed at all three points — the disconnect gate, the login heal for records already on disk, and a fatal boot on an empty class table | — |
-| — | ~~1.7.12~~ | ~~2~~ | ✅ **Shipped.** **AE** the refused duplicate now disowns the record · **AF** both batch loops charge the teardown — and `bench_tick_budget` gained the arm that could not fire, which now FAILS at 118% of the drift allowance when reverted | — |
-| — | ~~1.7.13~~ | ~~1~~ | ✅ **Shipped.** **AG** both altitudes — `examine`'s borrowed bodies now share one clamp with the room header, and the header/exits decline whole so accumulation across a read cannot run the queue dry | — |
-| — | ~~1.7.14~~ | ~~2~~ | ✅ **Shipped.** **AH** `ident_derive` and the confirm path now wipe their key scratch · **AI** the reap budget is spent only on reaps that cost a signature | — |
-| — | ~~gate re-run #3~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **4 high**, 5 medium, 7 low. Finders could BUILD AND RUN this time; three of the four highs were demonstrated against a live server | — |
-| — | ~~1.7.15~~ | ~~3~~ | ✅ **Shipped.** **AJ** a rejected objects table is now fatal (exit 1), and a dropped id is counted, audited and reported · **AN** `class` by stable id, both forms read · **AO** a healed character keeps its room | — |
-| — | ~~1.7.16~~ | ~~3~~ | ✅ **Shipped.** **AK** the two tick consumers now agree what a phase means · **AM** an offline census, seeded once and moved by login/disconnect · **AL** the account is counted where the record is written | — |
-| — | ~~1.7.17~~ | ~~10~~ | ✅ **Shipped.** **AP** combat is two-sided · **AQ** the fuzz gate reached `NORM_CAP` for the first time (7,988x/run) and now asserts its own coverage · **AW** two benches that could not fail · plus AR, AT, AU, AV, AX, AY; **AS** documented as a content rule | — |
-| — | ~~gate re-run #4~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **3 high**, 3 medium, 3 low. Twelve reports collapsed to **nine distinct defects** (AZ-BH); one refuted. **Nine of nine are a rule applied at one site and not its sibling — and six are siblings of fixes from 1.7.15/16/17, one from the head commit itself** | — |
-| — | ~~1.7.18~~ | ~~4~~ | ✅ **Shipped.** **BE** the ordinal bound moved out of the shared reader — `parse_uint` now closes AR's wrap by exact i64 arithmetic, and `created` survives a login · **AZ** the boot spawn runs after the census is seeded (measured 13/13/13/13 → 13/12/12/12) · **BA** a rejected rooms table is fatal, so AJ's guard is reachable at last · **BH** `WL_ERR_NOSTART` | — |
-| — | ~~1.7.19~~ | ~~4~~ | ✅ **Shipped.** Sessions that are not a normal logged-in player — **BC** the refused duplicate poisons the census · **BD** `classes_upkeep` frozen in a peer-held menu (AK's other half) · **BF** the classless heal double-counts an account · **BG** the class-menu squatter's deadline (a new 90 s tier) | — |
-| — | ~~1.7.20~~ | ~~1~~ | ✅ **Shipped.** **BB** — the post-auth `toml_parse`, 2,248 B on every successful login, 883 MB/h from one socket. **2,332 → 84 bytes per login (96%)**, and the bench arm that could not fail now gates at 256 and exits 1 when reverted. **Every finding from gate re-run #4 is now closed** | — |
-| — | ~~gate re-run #5~~ | — | ⛔ **Ran 2026-07-31 — DO-NOT-CLOSE.** 0 critical, **3 high**, 5 medium, 4 low — 12 distinct defects from 15 reports. **All three highs are AGNOS-only; x86_64 came back with ZERO highs, a first.** The "our own recent fixes are incomplete" signal collapsed from 7-of-9 to 1-of-12 | — |
-| — | ~~1.7.21~~ | ~~10~~ | ✅ **Shipped.** The target nobody had ever run — **BI** AGNOS had no clean shutdown at all (`stop` was never assigned) · **BK** descent owns its scheduling clock, since #40 is documented frozen on the `run` path · **BL** 1.7.19's mirror image, fixed by refusing the duplicate *before* the restore · plus BM, BN, BO, BP, BQ, BR, BS | — |
-| 1 | [**BJ**](#open-issues--gate-re-run-5-returned-do-not-close-2026-07-31) | 1 | **Next, and it is a DECISION not a patch.** `session_drain`'s only would-block arm is Linux `EAGAIN`; AGNOS `sys_write` routes to blocking `sock_send` #48. agnos exposes **no non-blocking send at all**, so this needs the same upstream `lib/` conversation as item **AA** — take them together | **yes** |
-| — | ~~the AGNOS harness~~ | — | ✅ **BUILT (1.7.21).** `scripts/agnos-qemu-smoke.sh` — QEMU-direct, boots a real AGNOS kernel and drives descent over TCP. Needs **no kernel patch** (rides the `/etc/probe-cmd` hook). The retired agnosticos container harness is not coming back: its QEMU-in-Docker architecture was killed on purpose | — |
-| 1 | [**BU**](#bu--descent-cannot-authenticate-anyone-on-a-real-agnos-kernel) | 1 | **NEW, and it supersedes BJ/BK in severity.** On a real kernel descent **dies the instant a passphrase is entered** — `run: exit 142`, a ring-3 page fault at `ident_derive`. Character creation and login have NEVER worked on AGNOS. The fault is in `cbank()` → `thread_local_get` (vendored `lib/` + kernel TLS), so it is **not fixable from this repo** | **yes** |
-| 3 | [**gate re-run #6**](#the-gate--what-closes-the-1x-line) | — | After BU, BJ and now that the harness exists. Target what #5 could not: a real kernel boot, the conservation invariant, CYML loader fuzz, a multi-hour soak | **yes** |
-| 6 | [**carried**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 2 | Item **AA** (16 B/connection at accept, needs a `lib/net.cyr` decision) and item **AB** (the stateless-refusal amplifier) — neither blocking | — |
-| 2 | **2.0.0** | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) | — |
-| 3 | 2.1.0 – 2.4.0 | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
+| **1** | [**BU**](#bu--descent-cannot-authenticate-anyone-on-a-real-agnos-kernel) | 1 | **A decision, not a patch.** On a real AGNOS kernel descent **dies the instant a passphrase is entered** — `run: exit 142`, a ring-3 page fault at `ident_derive`. **Character creation and login have never worked on that target.** The fault is in `cbank()` → `thread_local_get` — vendored `lib/` plus the kernel's TLS support — so it is **not fixable from this repo** | **yes** |
+| **2** | [**BJ**](#still-open) | 1 | **Same conversation as BU.** `session_drain`'s only would-block arm is Linux `EAGAIN`; on AGNOS `sys_write` routes to blocking `sock_send` #48. agnos exposes **no non-blocking send at all**, so this needs the upstream `lib/` decision item **AA** has been waiting on since 1.7.9. Pointless to fix before BU — there is no one to stall | **yes** |
+| **3** | [**gate re-run #6**](#the-gate--what-closes-the-1x-line) | — | After BU and BJ. The harness now exists, so #6 can finally boot a real kernel. Target what #5 could not: the **conservation invariant** (`world + offline == authored`, named the highest-value instrument two sweeps running and still not built), CYML loader fuzz, audit self-hash verification, a multi-hour soak | **yes** |
+| **4** | [**2.0.0**](#the-gate--what-closes-the-1x-line) | 4 | [M14](#m14--adr-0008-and-save-schema-v2-v200) contract + schema v2 · [M15](#m15--zone-registry-and-the-entry-cap-v200) zone registry · [M16](#m16--xp-levels-and-a-death-cost-v200) XP/levels/death · [broadcast fan-out](#20--bound-the-broadcast-fan-out) (**breach point now measured: N≈345**) | — |
+| **5** | [**2.1.0 – 2.4.0**](#m17m23--the-2x-tail) | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
+| — | [**carried, not blocking**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 3 | **AA** (16 B/connection at accept — the `lib/net.cyr` decision BU and BJ join) · **AB** (the stateless-refusal amplifier) · **BT** (`corpse_of` mints loot outside the object ceiling — belongs with M15) | — |
+
+**Everything else is shipped.** 1.6.0 through 1.7.21 closed every finding of the
+1.6.0 sweep and of gate re-runs #1–#4, and ten of gate re-run #5's twelve.
+Per-release detail is in [`CHANGELOG.md`](../../CHANGELOG.md); the sweep rulings
+and their retained write-ups are below.
+
+<details>
+<summary><b>Release history — 1.7.0 through 1.7.21 (click to expand)</b></summary>
+
+| Release | Items | What |
+|---|---|---|
+| 1.7.0 | 2 | The tick budget becomes a budget — the auth reorder, the charge window, the drain re-arm, the teardown charge |
+| 1.7.1 | 3 | Bound what the reconnect rate sets — the audit rollup window, `passwd`'s rate limit, ADR 0009 |
+| 1.7.2 | 5 | The carry cap becomes a bound · operator config + account cap · sharded player records |
+| 1.7.3 | 4 of 6 | `cmd_give`'s overshoot · the per-tick save-failure retry · two uncovered guards |
+| 1.7.4 | 1 of 3 | Audit-log rotation (ADR 0009), incl. the crash window and the clobber guard |
+| 1.7.5 | 1 of 2 | Ground decay — player-dropped items expire after two reset intervals |
+| 1.7.6 | 2 | The room listing no longer breaks the wire at 86 floor objects |
+| 1.7.7 | 2 | `get` of a container (silent loss at 199 against a cap of 100) · five truncating listing verbs |
+| 1.7.8 | 2 | **AGNOS saves never published** (syscalls 82/87 are GPU calls there) · the pre-auth parse, 2,248 B → 0 |
+| 1.7.9 | 9 | The RX-side class — a half-sent Telnet escape on a full queue, at every site a real client hits |
+| 1.7.10 | — | Toolchain `6.4.86 → 6.5.4`; closed the sakshi shadow gap carried since 1.2.0 |
+| **gate re-run #2** | — | ⛔ 0 critical / **2 high** / 3 medium / 3 low — items AC–AI |
+| 1.7.11 | 2 | **AC** shutdown now saves every live session · **AD** the classless record, closed at all three points |
+| 1.7.12 | 2 | **AE** the refused duplicate disowns the record · **AF** both batch loops charge the teardown |
+| 1.7.13 | 1 | **AG** `examine`'s borrowed bodies share one clamp with the room header |
+| 1.7.14 | 2 | **AH** key scratch is wiped · **AI** the reap budget is spent only on reaps that cost a signature |
+| **gate re-run #3** | — | ⛔ 0 critical / **4 high** / 5 medium / 7 low — items AJ–AY. First run whose finders could build and run |
+| 1.7.15 | 3 | **AJ** a rejected objects table is fatal · **AN** `class` by stable id · **AO** a healed character keeps its room |
+| 1.7.16 | 3 | **AK** the two tick consumers agree what a phase means · **AM** the offline census · **AL** accounts counted at the write |
+| 1.7.17 | 10 | **AP** combat is two-sided · **AQ** the fuzz gate reached `NORM_CAP` for the first time · **AW** two benches that could not fail |
+| **gate re-run #4** | — | ⛔ 0 critical / **3 high** / 3 medium / 3 low — items AZ–BH. **Nine of nine were a rule applied at one site and not its sibling**, six of them siblings of the three releases immediately prior |
+| 1.7.18 | 4 | **BE** the ordinal bound leaves the shared reader · **AZ** the boot spawn runs after the census is seeded · **BA** a rejected rooms table is fatal · **BH** `WL_ERR_NOSTART` |
+| 1.7.19 | 4 | **BC** the refused duplicate poisons the census · **BD** `classes_upkeep` frozen in a peer-held menu · **BF**, **BG** |
+| 1.7.20 | 1 | **BB** the post-auth `toml_parse` — **2,332 → 84 bytes per login**, and the bench arm that could not fail now gates at 256 |
+| **gate re-run #5** | — | ⛔ 0 critical / **3 high** / 5 medium / 4 low — items BI–BT. **All three highs AGNOS-only; x86_64 came back with ZERO highs, a first.** The "our own fixes are incomplete" signal collapsed from 7-of-9 to 1-of-12 |
+| 1.7.21 | 10 | **BI** AGNOS had no clean shutdown at all · **BK** descent owns its scheduling clock · **BL** 1.7.19's mirror image · plus BM, BN, BO, BP, BQ, BR, BS — **and the QEMU harness**, which immediately found **BU** |
+
+</details>
+
 
 **Every issue the 1.6.0 sweep and its two re-runs produced is closed** — 1.6.0
 through 1.6.15. The **third (gate) sweep found 8 items, two of them high**;
@@ -158,8 +171,9 @@ which is the property all three violated.
   here would be a patch written against an API nobody has agreed to yet. **Take
   AA and BJ as one conversation.**
 
-**BU. Descent cannot authenticate anyone on a real AGNOS kernel.** *(high — found
-by the 1.7.21 harness, NOT by gate re-run #5)*
+### BU — descent cannot authenticate anyone on a real AGNOS kernel
+
+*(high — found by the 1.7.21 QEMU harness, **not** by gate re-run #5)*
 
 - **What breaks.** A player connects, is greeted, gives a name, is prompted for a
   passphrase — and the server **dies the moment the passphrase is submitted**.
@@ -266,7 +280,11 @@ Three things that make this directly actionable for M14/M15:
   apart.** Item K no longer needs a TCP probe. H15's TX valve lost **zero** prose
   at both 150 and 250 players.
 
-**New gaps for re-run #6:** a real AGNOS kernel boot; **the conservation
+**New gaps for re-run #6:** ~~a real AGNOS kernel boot~~ — **that one is CLOSED:
+`scripts/agnos-qemu-smoke.sh` was built in 1.7.21, boots a real kernel and drives
+the server over TCP, and within minutes of existing it found **BU** (nobody can
+log in on AGNOS) and confirmed BK's frozen-clock premise. The remaining gaps:
+**the conservation
 invariant still does not exist** (#4 called it the highest-value instrument to
 build, and #5 produced two more census defects — BL and BT — that it would have
 caught); `cyrius fuzz` still has **no CYML loader target**; no multi-hour soak in
@@ -2024,11 +2042,27 @@ zone field and a cap, both frozen by ADR 0007)*
 `@stats` field, which ADR 0007 freezes until then)*
 
 - `room_combat_line` and `room_broadcast` each walk every session per line, with
-  up to four combat lines per engaged player per round. At 256 co-located players
-  that is **43.3 ms of tick body** (`bench_combat` BIGPLAYERS — **passing**, and
-  1.7.0 deliberately did not tighten its gate; putting a legitimate scenario 4%
-  from failing on a shared runner is a coin flip, and this repo has been burned
-  twice by nondeterministic gates).
+  up to four combat lines per engaged player per round.
+- **RE-MEASURED BY GATE RE-RUN #5 (1.7.21), and the old number was wrong in a way
+  that mattered.** This said **43.3 ms of tick body** at 256 co-located players
+  from 1.7.0 onward, and the scoping argument below rested on being "4% from
+  failing". The real cost on current hosts is **26-28 ms — 53% of the budget, not
+  96%.** The same stale figure had been quoted onward into ADR 0001 and into
+  `bench_tick_budget.bcyr`'s own printed output; all three are corrected.
+- **The shape, which the single figure never captured:** combat tick-body
+  **p99 = 0.432 us x N²** for N co-located, mutually engaged players. So the 50 ms
+  drift budget breaches at **N ≈ 345** (bracketed 336-352 across two independent
+  sweeps) and the 250 ms tick-body budget at **N ≈ 760**. `MAX_SESSIONS` is 256 —
+  **the breach is 1.35x the population the server will accept**, which is the
+  number this item exists to act on.
+- **The limiting term was MEASURED, not assumed.** Holding 256 sessions engaged
+  and varying only the room split gives `cost(k) = A/k + B` with **A = 26.4 ms
+  (96.7%) = the per-recipient prose append** and B = 0.9 ms (3.3%) = the whole
+  session-list walk, combat resolution and flush combined. **It is not the room
+  walk. Bounding fan-out means bounding the append.**
+- **Volume: 110 x N² prose bytes per tick** — 7.24 MB/tick at 256 in-process,
+  validated over real TCP at 7.08 MB/tick with 250 co-located players (2.2%
+  apart). This item no longer needs a TCP probe; it has one.
 - **1.7.0's arithmetic deliberately does not subtract this from the drift
   allowance**, because a pre-work drift sample cannot see tick-body cost. That
   subtraction was proposed during the design work, would have produced budgets
@@ -2040,10 +2074,11 @@ zone field and a cap, both frozen by ADR 0007)*
   `render_who`, `room_append_present`, `find_player_global`, `room_find_player`,
   `sessions_forget_mob`.
 - **The honest ceiling.** If a reviewer insists on one 50 ms reading covering
-  everything, then 43.3 ms of legitimate combat plus 27 ms of worst-case input is
-  70 ms and no per-pass budget can fix it — with **both** budgets set to zero, one
-  pass at that population still costs 43.3 + 2 × 13.5 ms from two indivisible
-  sigil calls. `ed25519_verify` is ~4.7× its own sign, `lib/` is off-limits, and
+  everything, then ~27 ms of legitimate combat plus 27 ms of worst-case input is
+  ~54 ms and no per-pass budget can fix it — with **both** budgets set to zero,
+  one pass at that population still costs ~27 + 2 × 13.5 ms from two indivisible
+  sigil calls. (These were 43.3 and 70 ms against the pre-1.7.21 figure; the
+  argument is unchanged, the margin is simply wider than it looked.) `ed25519_verify` is ~4.7× its own sign, `lib/` is off-limits, and
   single-threaded there is nowhere to defer it. **The highest-leverage change to
   this server's tick behaviour is a sigil release**: at 500 µs per verify the
   dearest line drops from 54 charge units to ~9. Descent's own job — which 1.7.0
@@ -2065,12 +2100,34 @@ zone field and a cap, both frozen by ADR 0007)*
 ## The gate — what closes the 1.x line
 
 **The 1.x line closes when a re-run sweep comes back with no critical or high
-findings.** That has not happened. **Gate re-run #4 came back 0/3/3/3** — see
-[its open issues](#open-issues--gate-re-run-4-returned-do-not-close-2026-07-31).
-Re-run #5 runs after 1.7.20, and it plus 1.7.18–1.7.20 are what block 2.0.
+findings.** That has not happened. **Gate re-run #5 came back 0/3/5/4** — see
+[its open issues](#open-issues--gate-re-run-5-returned-do-not-close-2026-07-31).
 
-**The trend is real and it is downward** — #2 was 0/2/3/3, #3 was 0/4/5/7, #4 was
-0/3/3/3 — but no run has yet cleared the bar.
+**But the reason it did not close has narrowed to one thing, and that is the
+headline.** Every one of #5's three highs was on the **AGNOS** build, and
+**x86_64 came back with zero highs for the first time in seven sweeps** — after
+five finders drove a live server for hours, forced ~95 audit rotations, forged
+~40 signed records, put 250 real TCP players in sustained combat and soaked for
+39 minutes. Then the QEMU harness built in 1.7.21 found **BU**, which is worse
+than any of them: on a real kernel **nobody can log in at all.**
+
+| Run | Result | Critical / high / medium / low |
+|---|---|---|
+| #2 | DO-NOT-CLOSE | 0 / 2 / 3 / 3 |
+| #3 | DO-NOT-CLOSE | 0 / 4 / 5 / 7 |
+| #4 | DO-NOT-CLOSE | 0 / 3 / 3 / 3 |
+| #5 | DO-NOT-CLOSE | 0 / 3 / 5 / 4 — **all three highs AGNOS-only** |
+
+**So the 1.x gate is now blocked by ONE target, and by defects this repo cannot
+fix.** BU and BJ both land in vendored `lib/` plus the agnos kernel; item AA has
+been waiting on the same decision since 1.7.9. That is a conversation to have
+upstream, not a patch to write here.
+
+**There is a policy option, and it should be taken deliberately or not at all:**
+scope AGNOS out of the 1.x gate. Against it — item **T** (1.7.8) was an
+AGNOS-only defect rated high and closed as high, and `running.md` has advertised
+AGNOS as a supported deployment since 1.1.0. **If that call is made it belongs in
+ADR 0007 as a contract change, not in a sweep verdict.**
 
 Every sweep so far has **found serious defects the previous pass had missed**, and
 each found them in a place the previous pass had no instrument for: a remote crash
@@ -2254,7 +2311,7 @@ which the server never has, so **migration is lazy-at-login and additive only.**
 - **M14-A — ADR 0008.** Supersede 0007. Enumerate the new frozen-for-2.x surface: verb table, `@`-namespace, schema 2 field set, wire behaviour, zone format (with its own `format` stamp), env knobs. Record the no-offline-migration constraint as the reason schema 2 is designed to be the last bump of the line.
 - **M14-B — Schema 2.** Bump `SCHEMA_VERSION`; `v >= 2` reads the v2 path, else v1. Every v2 field is read-with-default so a v1 record upgrades silently on the next successful login. Unknown keys are ignored, never fatal.
 - **M14-C — Signed-integer support.** ✅ **Pulled forward into 1.6.7** (batch B). `toml_int` accepts a leading `-`; the writer already emitted one. Additive and behaviour-preserving for every value that parsed before, so it did not need to wait for the contract change. M16/M17 can assume signed fields read back.
-- **M14-D — Zone format stamp, strict field parsing, and integer-overflow rejection.** A `format` key in the zone header plus a `WL_ERR_FORMAT`, so zone authors get a real error instead of a misparse when the format moves again. **This is also where `toml_int` gets to be strict** — carried forward from 1.6.7 batch B, which fixed the signed gap but deliberately left the lenient fallback in place: a typo'd field still reads as "absent" and silently takes the default. Rejecting it would reject zone files that load today, and ADR 0007 §5 freezes the zone format for all of 1.x, so strictness has nothing to hang off until the format carries a version. Once it does: an unparseable value under `format >= 2` is a load error, and under an absent/`1` stamp it keeps the 1.x fallback. **Also carried here from 1.6.8 batch C:** `parse_uint` accumulates `v * 10 + d` with no overflow check, so an absurd authored literal wraps to an arbitrary value rather than being rejected. Every `toml_int` caller is affected — class stats, save fields, zone fields — which is why it did not land in a patch release.
+- **M14-D — Zone format stamp, strict field parsing, and integer-overflow rejection.** A `format` key in the zone header plus a `WL_ERR_FORMAT`, so zone authors get a real error instead of a misparse when the format moves again. **This is also where `toml_int` gets to be strict** — carried forward from 1.6.7 batch B, which fixed the signed gap but deliberately left the lenient fallback in place: a typo'd field still reads as "absent" and silently takes the default. Rejecting it would reject zone files that load today, and ADR 0007 §5 freezes the zone format for all of 1.x, so strictness has nothing to hang off until the format carries a version. Once it does: an unparseable value under `format >= 2` is a load error, and under an absent/`1` stamp it keeps the 1.x fallback. **The `parse_uint` overflow half of this is CLOSED — item BE, 1.7.18.** It now does exact i64 arithmetic at both bounds (verified by gate re-run #5 as "exactly correct at both bounds"), and the ordinal domain bound moved to `qual_parse`, its only ordinal caller. Do not re-fix it; re-adding a domain bound inside the shared reader is precisely what BE removed. **What remains open here is the LENIENT-FALLBACK half:** a typo'd value still reads as "absent" and silently takes its default, which needs a format version to hang off.
 - **M14-E — `validate` argv verb.** Offline zone/save validation, outside the command surface. Also the natural home for an authored-prose 0xFF check (M10's gate covers player bytes, not authored files).
 
 **Gate:** a 1.2.0 save loads, upgrades to schema 2 on login, and round-trips; a schema-3 record is refused with the "newer server" message; ADR 0008 is Accepted and 0007 marked Superseded.
@@ -2344,8 +2401,11 @@ unblocked, and from [Out of scope](#out-of-scope), which is a decision against.*
 - **Quests** — needs a state machine per player, which is a schema conversation, and a lot of authored content.
 - **Skills separate from levels** — a second progression axis; not worth it until the first one is proven.
 - **aarch64** — no longer blocked: the epoll-layout defect that made this unsafe
-  was fixed in 1.6.14 and CI builds `--aarch64`. Deferred only because no ARM
-  target is planned, so nobody has run the suite on one.
+  was fixed in 1.6.14. **CI does NOT build it** — `.github/` has exactly two build
+  steps, native and `--agnos`; this said "CI builds `--aarch64`" for several
+  releases, which is the same false compile-protection claim the 1.7.8 `--agnos`
+  step was added to prevent. Deferred because no ARM target is planned; add the
+  step before relying on the arm.
 - Everything in the v1.0 **Out of scope** list below still stands, except that PvP and MUD protocol extensions move from "not our problem" to "post-2.0, on merit".
 
 ---
@@ -2423,7 +2483,7 @@ checklist itself is retired — see [v2.0 criteria](#v20-criteria) for the live 
 
 ## ADRs
 
-All ADRs are filed and **Accepted** — none open at 1.0. Index in [`../adr/README.md`](../adr/README.md):
+All ADRs are filed and **Accepted** — 0001–0007 and **0009** (audit-log rotation, 1.7.4); **0008 is RESERVED for M14**. Index in [`../adr/README.md`](../adr/README.md):
 
 - [0001](../adr/0001-tick-based-combat-over-cooldowns.md) tick-based combat · [0002](../adr/0002-raw-tcp-telnet-protocol.md) raw TCP/Telnet · [0003](../adr/0003-single-thread-event-loop-concurrency.md) single-thread event loop
 - [0004](../adr/0004-identity-and-authentication.md) Ed25519 identity from a passphrase (resolved at M6) · [0005](../adr/0005-zone-file-format.md) CYML zone format (M3) · [0006](../adr/0006-persistence-shape.md) per-player signed saves + libro audit (M6)

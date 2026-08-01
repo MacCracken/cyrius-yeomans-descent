@@ -46,9 +46,18 @@ In scope: all combat resolution. Out of scope: non-combat actions (movement, par
     gates. Worst case after 1.7.0 is ~27 ms (54%); unauthenticated worst ~8.5 ms.
   - **TICK-BODY OCCUPANCY — 250 ms, i.e. 10% of the 2.5 s interval.** Bounds
     everything inside `advance_tick`: `combat_tick_all`, `save_sweep`,
-    `mob_tick_all`, the zone reset. `bench_combat`'s 43.3 ms broadcast fan-out at
-    256 co-located players lives here, at 17% of a budget it fits — rather than
-    87% of one that was never the right instrument for it.
+    `mob_tick_all`, the zone reset. `bench_combat`'s broadcast fan-out at 256
+    co-located players lives here — **26-28 ms, re-measured by gate re-run #5**
+    (this said 43.3 ms from 1.7.0 through 1.7.21) — so ~11% of a budget it fits,
+    rather than 56% of one that was never the right instrument for it.
+
+    That run also measured the SHAPE, which the old figure did not capture:
+    **combat tick-body p99 = 0.432 us x N²** for N co-located, mutually engaged
+    players, so the 50 ms drift budget breaches at **N ≈ 345** and this 250 ms
+    tick-body budget at **N ≈ 760**. `MAX_SESSIONS` is 256, i.e. the breach is
+    1.35x the population the server will accept. **96.7% of the cost is the
+    per-recipient prose append, not the room walk** — which is what item K has to
+    bound.
 
   These are separate because `record_tick_drift(now - next_tick)` takes a
   **pre-work** sample. Under absolute scheduling a sub-interval overrun is

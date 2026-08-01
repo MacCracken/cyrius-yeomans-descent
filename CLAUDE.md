@@ -70,7 +70,8 @@ cyrius test                          # run [build].test + tests/*.tcyr
 - [`docs/guides/`](docs/guides/) — Task-oriented how-tos
 - [`docs/examples/`](docs/examples/) — Runnable examples
 - [`docs/development/state.md`](docs/development/state.md) — Live state snapshot
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — Milestones through v1.0
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — What is left, then history
+- [`docs/development/handoff.md`](docs/development/handoff.md) — **Start here if picking the project up cold.** Point-in-time; trust `state.md` / `roadmap.md` over it if the date is old
 
 ## Process
 

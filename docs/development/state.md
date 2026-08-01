@@ -1072,7 +1072,7 @@ src/
   mob.cyr        M4 mobs: templates (CYML kind=mob) + live instances,
                  room-occupant list, keyword lookup, dice parse, spawn;
                  M7 mob respawn (zone_reset_mobs — top-up to authored)
-  session.cyr    Session struct (376 B), login (M1-E) + class select (M5-A)
+  session.cyr    Session struct (392 B), login (M1-E) + class select (M5-A)
                  + world entry, dispatch (movement, render, examine sheet,
                  social, kill/flee, abilities, get/drop/inv), ANSI SGR,
                  combat + class + ability state (SS_HP..SS_STEALTH), g_epfd
@@ -1110,7 +1110,7 @@ data/zones/
   example.rooms.cyml            3-room schema example (ADR 0005)
 
 tests/
-  cyrius-yeomans-descent.tcyr   unit suite (1387 assertions)
+  cyrius-yeomans-descent.tcyr   unit suite (1502 assertions)
   cyrius-yeomans-descent.bcyr   scaffold-family placeholder (real benches
                                 live in benches/ — see below)
   cyrius-yeomans-descent.fcyr   scaffold-family stub; real fuzz harness in
@@ -1153,7 +1153,7 @@ dropped the monolith, entirely x509/RSA bignum tables nothing calls.
 
 ## Tests
 
-`cyrius test` — **1387** unit assertions (bare form runs both the .tcyr corpus and [build].test):
+`cyrius test` — **1502** unit assertions (bare form runs both the .tcyr corpus and [build].test):
 
 - **telnet** — data passthrough, escaped `IAC IAC`, naive-refuse,
   single-byte commands, subnegotiation collection, escaped-IAC-in-SB,
@@ -1302,7 +1302,7 @@ Direct (declared in `cyrius.cyml`):
   thread, thread_local, random, sakshi, chrono, tagged) are **not** hand-listed —
   libro's `dist/libro.deps` sidecar declares them and `cyrius deps` auto-resolves
   them in topological order, fail-loud on a missing one.
-- **libro** `2.8.2` (git, `path = "../libro"`) — append-only SHA-256 hash-chain
+- **libro** `2.8.4` (git, `path = "../libro"`) — append-only SHA-256 hash-chain
   store (the crash-safe primitive behind "T.Ron" persistence). Pulls **sigil
   3.12.1** (Ed25519, ADR 0004 identity) + **patra 1.12.12** + **sakshi** + **bayan**
   transitively. Resolved by `cyrius deps` into `lib/` (+ `cyrius.lock`).
@@ -1361,31 +1361,39 @@ _None yet._
 above — not repeated here, because they were, and the two copies had already
 drifted apart.
 
-**Next: gate re-run #4.** Every finding from re-run #3 is closed (AJ-AY); the only
-carried items are **AA** (16 B/connection at accept, needs a `lib/net.cyr`
-decision) and **AB** (the stateless-refusal amplifier). Run it against a TAGGED
-commit and let it BUILD AND RUN — that is what made #3 find three highs no
-read-only pass could have. Note that 1.7.16 already built much of the
-offline-population machinery #3 named as its biggest gap — which should first build the
-offline-population conservation harness and the phase x tick matrix — which must be allowed to **run the suite and
-the benches**, because AF survived only because a bench fixture could not reach
-the code path it measures.
+**Next: resolve BU, then BJ, then gate re-run #6.** Re-runs #4 and #5 have both
+run; #5 ruled DO-NOT-CLOSE at 0/3/5/4 with **all three highs on AGNOS**, and
+x86_64 came back with zero highs for the first time in seven sweeps.
 
-**Next: 1.7.0** — re-derive both per-tick line budgets from the measured worst
-case and land the bench that gates a whole tick pass. Then 1.7.1–1.7.3, a gate
-re-run, and only then 2.0.0 starting with **M14 — ADR 0008 + save schema v2**. Before touching M14, read the critical path in
-[`roadmap.md`](roadmap.md#critical-path): records are signed with a key
-re-derived from the player's passphrase, which the server never holds, so **there
-is no offline migration and there cannot be one** — every 2.0 field must be
-additive, defaulted, and migrated lazily at login. M11 already repaired the gate
-that makes the bump safe.
+The open items are **BU**, **BJ** and **BT** — see
+[`roadmap.md`](roadmap.md#what-is-left). **BU and BJ are not fixable from this
+repo**: both land in vendored `lib/` plus the agnos kernel, alongside item **AA**,
+and they are one upstream conversation rather than three patches.
+
+Re-run #6 has an instrument its predecessors did not:
+**`scripts/agnos-qemu-smoke.sh`** boots a real AGNOS kernel and drives the server
+over TCP. It found BU within minutes of existing. What #6 should build next is the
+**conservation harness** (`world + offline == authored`), named the
+highest-value missing instrument by two consecutive sweeps and still not built —
+plus a CYML loader fuzz target and a multi-hour soak. *(This paragraph named gate
+re-run #4 for eleven releases after #4 had shipped.)*
+
+**The M14 constraint, which has not changed and is the one thing to read before
+starting 2.0:** records are signed with a key re-derived from the player's
+passphrase, which the server never holds — so **there is no offline migration and
+there cannot be one.** Every 2.0 field must be additive, defaulted, and migrated
+lazily at login. See the critical path in
+[`roadmap.md`](roadmap.md#critical-path).
 
 **Carried, none blocking:**
 
 - ~~**sakshi shadow warning**~~ — **closed in 1.7.10**; resolves to 2.4.7 at 6.5.4.
-- ~~**Toolchain drift**~~ — **closed in 1.7.10**; the pin is `6.5.4` and matches
-  the installed `cycc`. It was taken as a release of its own per the 1.2.0
-  precedent, and required no source change.
+- **Toolchain drift — REOPENED (was closed in 1.7.10).** `cyrius --version` now
+  reports `6.5.5 / manifest-pin: 6.5.4 (drift — wrapper is 6.5.5)`, so **every**
+  build, test and bench invocation prints the warning. 1.7.10 closed this by
+  bumping the pin as a release of its own, per the 1.2.0 precedent; the wrapper
+  has since moved again. Either bump the pin the same way or record why it is
+  being held — an always-on warning is one nobody reads.
 - **mabda / yantra shadow** — two bundled libs `cyrius lib sync --full` does not
   actually sync. Neither is referenced by descent; a warning, not a defect.
 - ~~**aarch64 epoll layout**~~ — **closed in 1.6.14.** `epoll_ev_size()` /
@@ -1407,7 +1415,8 @@ audit sweep** — sixteen releases of fixes across three passes, with a fourth p
 ([ADR 0007](../adr/0007-frozen-1.0-surface.md)) — no new verbs / save fields /
 zone fields / env knobs.
 
-**Your next work is gate re-run #4**, not a milestone: see
+**Your next work is BU / BJ (an upstream `lib/` decision), then gate re-run #6** —
+not a milestone: see
 [`roadmap.md`](roadmap.md#what-is-left) for every open finding and the release it
 is batched into. 2.0.0 (starting with M14) is gated behind a clean gate re-run. Joshua is post-1.0 backlog, not next.
 
@@ -1455,7 +1464,7 @@ guard these.
 
 ```sh
 cyrius build src/main.cyr build/cyrius-yeomans-descent
-cyrius test                                      # 751 assertions, all pass
+cyrius test                                      # 1502 assertions, all pass
 ./build/cyrius-yeomans-descent serve 4000
 # new name → passphrase (echo-suppressed) → class → play; `save`/`passwd`/`quit`,
 # reconnect → restored + "last seen". kill -9 after a save → restart → no loss.
@@ -1474,5 +1483,5 @@ auth (replacing the `YD_ADMIN` gate) — see [roadmap M18](roadmap.md#milestones
 
 ### Open ADRs
 
-None outstanding. 0001–0007 all Accepted. M8 (post-1.0) earns one if the
+None outstanding. 0001–0007 and 0009 all Accepted (0008 RESERVED for M14). M18 (post-1.0, the operator channel — renumbered from M8) earns one if the
 operator channel adds a new wire/auth surface.

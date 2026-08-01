@@ -35,6 +35,28 @@ There are also two transport realities that the model has to coexist with:
 
 **(E) single-thread event loop**, with **(β) computed `epoll_wait` timeout** as the tick scheduler. One kernel thread owns the listening socket, every connected client fd, and every byte of world state. The loop is:
 
+> **Amended 1.7.21 — THERE ARE TWO DRIVERS, and this record did not admit it.**
+>
+> (E)+(β) above describes the **Linux/epoll** driver. A **second driver exists for
+> AGNOS**, because that target's `epoll` is 3-arg and watches only
+> signalfd/timerfd — it cannot watch a socket. That arm sweeps `g_session_head`
+> with non-blocking `sock_recv`, paced by `sys_sleep_ms(20)`, and has no signalfd,
+> so `@shutdown` is its only exit.
+>
+> **The concurrency model is unchanged** — still one thread, still single-writer,
+> still the same tick. What changed is that **every rule now has two homes**, and
+> the code already treats "ADR 0003 has two loops" as established fact when
+> justifying constants this ADR never mentions.
+>
+> **This omission has a measurable cost.** Three of the six releases 1.7.16–1.7.21
+> fixed a rule applied to one loop and not its sibling: the unmetered teardown
+> (AF), the phase gate (AK/BD), and the shutdown save — which on AGNOS was
+> *unreachable code* because that loop's `stop` flag was declared and never
+> assigned (BI). **A fix landing in one arm and not the other is this project's
+> single most recurrent defect**, and the record that would make the pairing
+> obvious is this one. Anything touching the loop must land in both arms, and the
+> two must share one budget, one shutdown flag and one tick scheduler.
+
 ```
 on startup:
   bind, listen, set listener non-blocking, add to epoll set
@@ -84,13 +106,21 @@ loop forever:
 **Negative**
 
 - **One CPU core is the ceiling.** A hot loop that pegs a single core caps total throughput. The hybrid (H) split is the documented escape hatch, but until then the upper bound is real.
-- **Any blocking call stalls every player.** A synchronous disk write inside the loop pauses combat, movement, and chat for everyone. The persistence layer (M6) must offer either non-blocking writes or a queue-and-flush model. _(Resolved at M6: persistence is libro+sigil — [ADR 0006](0006-persistence-shape.md) — with queued, debounced, never-inline saves; the original "T.Ron" framing was dropped.)_
+- **Any blocking call stalls every player.** A synchronous disk write inside the loop pauses combat, movement, and chat for everyone. The persistence layer (M6) must offer either non-blocking writes or a queue-and-flush model. _(**Mitigated at M6, not resolved — and the wording here overstated it.**
+Persistence is libro+sigil ([ADR 0006](0006-persistence-shape.md)), but there is
+**no queue**: `player_save` signs and writes synchronously on the loop thread, and
+"never-inline" is false for `drop_session`, whose first act is an unconditional
+save. What bounds it is three meters — `SAVE_BATCH_MAX = 4` per tick, the ~5-minute
+debounce, and `PASS_CHARGE_MAX` — sized after `save_sweep` was measured at 340.9 ms
+with 256 dirty sessions, 682% of the drift budget. **Any new save call site must be
+charged to one of those meters**, which is a live constraint rather than a solved
+problem.)_
 - **A bug in one player's command path can hang the world.** A parser infinite loop on a malformed input freezes every other player. The verb parser fuzz harness (M2 gate) earns its keep here — protection that wasn't strictly necessary in a fork-isolated model is necessary now.
 - **No "trivial" per-session resource isolation.** A pathological client cannot crash the server (no per-conn address space to corrupt the parent through), but it can consume the loop's CPU budget. Input rate limiting and slowloris-style timeouts move from "operational nicety" to "load-bearing safety net."
 
 **Neutral**
 
-- **Cross-platform reach follows `lib/net.cyr`.** Whatever `epoll`-shape primitive cyrius stdlib exposes is what we use. Linux today; macOS (kqueue-backed in stdlib) and Windows (IOCP-backed in stdlib) follow as stdlib backends mature.
+- **Cross-platform reach follows `lib/net.cyr`.** Whatever `epoll`-shape primitive cyrius stdlib exposes is what we use. Linux today; macOS (kqueue-backed in stdlib) and Windows (IOCP-backed in stdlib) follow as stdlib backends mature. **(Amended 1.7.21: this expectation did not survive contact. The second target that actually shipped — AGNOS — needed a hand-written poll loop in `src/server.cyr`, not a stdlib backend, because its `epoll` cannot watch sockets at all. Budget for a hand-written driver per target whose primitive is not epoll-shaped.)**
 - **The hybrid (H) refactor is a single split, not a redesign.** If we ever need it: move the tick into a second thread, put a single SPSC queue between it and the I/O thread for input events, and another for output deltas. The world-state owner stays single-writer.
 - **Per-session bump-allocator growth is bounded by session count, not session-hours.** Sessions are short-lived relative to the server process; a small per-session arena freed at disconnect handles the long-running-process memory shape without requiring a global allocator change.
 

@@ -42,7 +42,19 @@ seed   = SHA-256(salt(16 random bytes) || passphrase)      # sigil
 - **Record integrity** = each save file is Ed25519-**signed** over its own
   body with the derived secret key (held in-session); load verifies the
   signature before trusting any field, so silent corruption or tampering of a
-  save is rejected (returns "unreadable", never loads bad state).
+  save is rejected (returns "unreadable", never loads a record it cannot
+  attribute to the passphrase holder).
+
+  **A signature proves AUTHORSHIP, not field validity — amended 1.7.21.** The
+  player holds the signing key, so *any* field values they choose will verify
+  correctly. This sentence used to read "never loads bad state", which is the
+  opposite of the threat model: a valid signature says only "the passphrase holder
+  wrote this". Safety comes from the **load-side clamps**, which this ADR did not
+  mention and the code cites *this ADR* for — every scalar bounded, the relational
+  `hp > maxhp` clamp, the class index bounded before it feeds pointer arithmetic,
+  and (1.7.21) a control-byte guard on all four string fields so a value cannot
+  split the signed prefix. **Every field loaded from a record must be validated;
+  none may be trusted because the record verifies.**
 - New characters confirm the passphrase twice; the salt is generated with
   `random_bytes` at creation.
 
@@ -62,7 +74,7 @@ keypair + sign/verify primitives.
   No password-strength policy beyond a 4–64 char length bound. No passphrase
   recovery: lose it, lose the character (by design — the server can't recover a
   key it never stored).
-- **Neutral** — Telnet echo suppression for the passphrase prompt is deferred
+**Echo suppression SHIPPED in 0.8.1** — `session_echo_off` / `session_echo_on` wrap every passphrase prompt and the input is masked. This entry previously said it was deferred and tracked as a follow-up; ADR 0007 has since frozen it as 1.0 wire behaviour, so the two records contradicted each other.
   (the passphrase locally echoes in the client); tracked as a follow-up, it
   needs the IAC WILL/WONT ECHO dance through the RFC 1143 negotiator.
 

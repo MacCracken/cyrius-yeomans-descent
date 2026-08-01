@@ -17,7 +17,7 @@ Full design: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
 ## Status
 
-**v1.7.10 — feature-complete, maintained.** The full game loop is implemented and
+**v1.7.21 — feature-complete, maintained.** The full game loop is implemented and
 playable: the Telnet wire (RFC 854 / 1143), the verb-noun parser, a hand-authored
 21-room Hub zone, the 2.5 s combat tick with THAC0 hit/damage math, four playable
 classes with abilities, crash-safe player persistence (reconnect restores your
@@ -50,7 +50,7 @@ snapshot.
 ```sh
 cyrius deps                                               # resolve deps into lib/
 cyrius build src/main.cyr build/cyrius-yeomans-descent    # compile
-cyrius test                                               # 1039 unit + integration assertions
+cyrius test                                               # 1502 unit + integration assertions
 ./build/cyrius-yeomans-descent serve 4000                 # start the server on port 4000
 ```
 
@@ -80,19 +80,41 @@ cyrius build --agnos src/main.cyr build/descent-agnos     # static agnos ELF64
 [ASSIST] > run /bin/descent serve 4000
 ```
 
-The only difference from the Linux build is internal: AGNOS `epoll` watches only
+> ### ⚠ EXPERIMENTAL — a player cannot log in on AGNOS
+>
+> This section claimed the AGNOS build was "byte-identical" to the Linux server
+> and differed only internally. **Both halves were wrong**, and a QEMU harness
+> built in 1.7.21 — the first thing ever to run this target on a real kernel —
+> showed how:
+>
+> - **Authentication is broken.** The server **dies the instant a passphrase is
+>   submitted** (ring-3 page fault at `ident_derive`; roadmap item **BU**).
+>   **Nobody has ever logged in on AGNOS.** Everything before that works — the
+>   loaders, the listener, the MOTD, the Telnet salvo, name entry.
+> - **The population ceiling is 7, not 256** — the agnos syscall layer's
+>   connection table has 8 slots and the listener holds one.
+> - **One client that stops draining freezes the whole server** (item **BJ**).
+>
+> BU and BJ both land in vendored `lib/` plus the kernel's TLS and socket support,
+> so **neither is fixable from this repo**; they are an upstream conversation
+> alongside item AA. The build compiles, CI builds it, and the event loop, loaders
+> and wire all work — but **do not deploy it.**
+
+The internal difference is real and unchanged: AGNOS `epoll` watches only
 signalfd/timerfd (never sockets) and is 3-arg, so the Linux epoll socket-multiplexer
 becomes a `sleep_ms`-paced poll loop (non-blocking `sock_accept`#57 + `sock_recv`#49).
-The verbs, save format, telnet wire, and combat tick are **byte-identical** to the
-Linux server — the frozen 1.0 surface holds ([ADR 0003](docs/adr/0003-single-thread-event-loop-concurrency.md),
+There is no signalfd, so **`@shutdown` is the only clean exit**
+([ADR 0003](docs/adr/0003-single-thread-event-loop-concurrency.md),
 [ADR 0007](docs/adr/0007-frozen-1.0-surface.md)).
 
-To boot AGNOS and play the MUD off the sovereign kernel end-to-end (QEMU), use the
-container harness — boot, then telnet in from your host:
+To boot AGNOS and drive the MUD end-to-end under QEMU:
 
 ```sh
-cd ../agnosticos/docker/descent-sweep && ./run.sh serve   # then: telnet 127.0.0.1 4444
+scripts/agnos-qemu-smoke.sh        # see docs/guides/running.md for prerequisites
 ```
+
+The container harness this used to name (`agnosticos/docker/descent-sweep`) was
+**deleted on 2026-07-07** — that architecture was retired deliberately.
 
 ## Playing
 
@@ -119,9 +141,10 @@ is in [`docs/guides/playing.md`](docs/guides/playing.md).
 | Env var | Default | Effect |
 |---|---|---|
 | `YD_TICK_MS` | `2500` | Combat-tick interval (ms). Lower it for fast testing. |
-| `YD_IDLE_MS` | `300000` | Idle-disconnect threshold (ms) for **logged-in** players. A connection that has not authenticated is dropped after 30 s regardless (1.6.13). |
+| `YD_IDLE_MS` | `300000` | Idle-disconnect threshold (ms) for players who have authenticated **and chosen a class**. Two shorter deadlines sit under it and neither is tunable: **30 s** unauthenticated (1.6.13) and **90 s** parked at the class menu (1.7.19). |
 | `YD_RESET_SECS` | (zone's `reset_secs`) | Override the zone-reset interval (s). |
-| `YD_ADMIN` | unset (off) | Set to `1` to enable the `@stats` / `@who` / `@reset` admin verbs. Off by default ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)); real operator authentication is **M18**. |
+| `YD_ADMIN` | unset (off) | Set to `1` to enable the `@stats` / `@who` / `@reset` / `@shutdown` admin verbs. Off by default ([ADR 0007](docs/adr/0007-frozen-1.0-surface.md)); real operator authentication is **M18**. |
+| `YD_MAX_ACCOUNTS` | unset | Maximum player accounts; `0` = unlimited. Overrides `max_accounts` in the optional `data/server.cyml` (1.7.2). |
 
 See [`docs/guides/running.md`](docs/guides/running.md) for the operator guide.
 

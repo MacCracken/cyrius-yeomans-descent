@@ -168,9 +168,9 @@ Environment variables override the config file.
 | Env var | Default | Effect |
 |---|---|---|
 | `YD_TICK_MS` | `2500` | Combat-tick interval in ms. Set low (e.g. `200`) for fast testing. |
-| `YD_IDLE_MS` | `300000` | Idle-disconnect threshold in ms, for **logged-in** players. A connection that has not authenticated is dropped after 30 s regardless of this (1.6.13) — that is the slowloris reap, and it is not tunable. |
+| `YD_IDLE_MS` | `300000` | Idle-disconnect threshold in ms, for players who have **authenticated AND chosen a class**. **Two shorter deadlines sit under it and NEITHER is tunable**: 30 s for a connection that has not authenticated (1.6.13, the slowloris reap) and **90 s for one parked at the class menu** (1.7.19 — it has four descriptions to read, but it owns no record, no room and no account slot). Raising `YD_IDLE_MS` does not move either, which is worth knowing before debugging "players get dropped at the class menu". |
 | `YD_RESET_SECS` | per-zone `reset_secs` | Override the zone-reset interval in seconds. |
-| `YD_ADMIN` | unset → off | `YD_ADMIN=1` enables the `@`-admin verbs (`@stats` / `@who` / `@reset`). |
+| `YD_ADMIN` | unset → off | `YD_ADMIN=1` enables the `@`-admin verbs (`@stats` / `@who` / `@reset` / `@shutdown`). **Required on AGNOS**, where `@shutdown` is the only clean exit. |
 | `YD_MAX_ACCOUNTS` | unset → use `data/server.cyml` | Overrides `max_accounts` above, for container deployments that configure through the environment. `0` = unlimited. |
 
 ```sh
@@ -197,7 +197,12 @@ real operator auth (the Joshua interface) is a post-1.0 milestone.
 
 ## Persistence & data files
 
-State lives under `data/` (created on first run, git-ignored):
+State lives under `data/` (created on first run, git-ignored). **`data/classes.cyml`
+and the three `data/zones/hub.*` tables are CONTENT, not state — they ship with the
+repo and the server refuses to start without them.** Since 1.7.11 / 1.7.15 /
+1.7.18 a rejected classes, objects or rooms table is **fatal at boot (exit 1)**,
+not a degraded start: a half-published table silently empties player inventories,
+which is what those three releases exist to prevent.
 
 - `data/players/<c>/<name>.cyml` — one signed record per player (attrs, class,
   room by id, inventory, identity salt + pubkey, signature). Atomic `.tmp` +
@@ -238,12 +243,21 @@ and wondered what it was, this is it.
   servers resume from the wrong segment and report the chain as *tampered with*
   when nothing had been. 1.7.21 makes that self-heal, but a hand-renumbered
   directory is still the one input the format cannot reason about.
-- **If the log stops.** Since 1.7.21 the server prints
-  `server: AUDIT LOG IS NOT BEING WRITTEN` **once** if the store refuses a write
-  — a read-only `data/`, a full disk, wrong ownership. Before that it failed in
-  complete silence: the server carried on authenticating players while writing
-  nothing at all, with byte-identical output. If you see that line, the security
-  log has a hole in it from that moment until you fix the disk and restart.
+- **If the log stops, you will not be told.** A read-only `data/`, a full disk or
+  wrong ownership makes every audit write fail **silently**: the server carries on
+  authenticating players while writing nothing at all, with byte-identical
+  output. Measured with `chmod 0444` and with the log symlinked to `/dev/full` —
+  zero new entries, server alive, stdout+stderr identical at 305 bytes.
+
+  1.7.21 added the detector and a one-line operator warning, **and it cannot fire
+  yet.** It tests `filestore_append(...) < 0`, and libro's `filestore_append`
+  ([`lib/libro.cyr:3791`](../../lib/libro.cyr:3791)) discards its own callee's
+  return and ends `return 0;` unconditionally. The arm is in place for the day
+  that widens upstream; until then it is dead code.
+
+  **So detection is out-of-band and manual.** Watch `data/audit.libro`'s size and
+  mtime, and check them after any change to disk, permissions or ownership under
+  `data/`. This is an open hole, tracked as item **BN**'s upstream half.
 
 Records are crash-safe: a `kill -9` mid-write leaves the previous complete
 record intact. Each record is Ed25519-signed and version-stamped (`schema = 1`);

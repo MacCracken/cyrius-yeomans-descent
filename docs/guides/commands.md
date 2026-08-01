@@ -67,7 +67,7 @@ flees, or leaves. Hits are a hidden `1d20 + modifiers` vs. armour class.
 | `flee` | Break off and bolt to a random exit. |
 
 Outside combat you slowly recover HP (CON-scaled). Die, and you wake at the Hub
-gate with your inventory dropped where you fell.
+gate with your inventory dropped where you fell. That dropped gear is destroyed after two zone-reset intervals (~30 min in the Hub), so retrieve it promptly.
 
 ## Class abilities
 
@@ -118,3 +118,4 @@ authentication is a post-1.0 item.
 | `@stats` | Live server counters: connections, logged-in, ticks, tick-drift p99, idle timeout. |
 | `@who` | Connected players and the room each is standing in. |
 | `@reset` | Force an immediate zone reset (respawn dead mobs / missing loot). |
+| `@shutdown` | Stop the server cleanly: saves every connected session, flushes the audit tally, closes the listener. Same exit path as `SIGINT`/`SIGTERM`. **On AGNOS this is the only clean shutdown** — that build has no signalfd. *(1.7.21)* |
