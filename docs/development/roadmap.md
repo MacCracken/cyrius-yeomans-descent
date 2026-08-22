@@ -1,10 +1,13 @@
 # cyrius-yeomans-descent — Roadmap
 
-> **Last Updated**: 2026-07-31 (v1.7.21 — **gate re-run #5 returned DO-NOT-CLOSE**
-> (0/3/5/4, items BI-BT); **ten of its twelve are closed**. Open: **BJ** (needs the
-> `lib/net.cyr` decision AA is waiting on) and **BT** (belongs with M15). The 1.x
-> gate is now blocked by ONE target — and **x86_64 came back with zero highs for
-> the first time in seven sweeps**)
+> **Last Updated**: 2026-08-22 (v1.7.22 — a **toolchain + dependency bump**,
+> `6.5.4 → 6.5.33` / libro `2.8.4 → 2.8.10`, with no behavioural source change.
+> **Nothing below moved.** Gate re-run #5's DO-NOT-CLOSE still stands (0/3/5/4,
+> items BI-BT), **ten of its twelve are closed**, and the open ones are unchanged:
+> **BJ** (needs the `lib/net.cyr` decision AA is waiting on) and **BT** (belongs
+> with M15). **BU still blocks the 1.x gate**, and that is measured rather than
+> assumed — `lib/thread_local.cyr`, where the real-kernel page fault lands, is
+> byte-identical across the bump)
 >
 > **This file is the remaining work.** It opens with
 > [What is left](#what-is-left) — every open item, assigned to a release, worst
@@ -32,13 +35,13 @@ ownership and fix size.
 | **5** | [**2.1.0 – 2.4.0**](#m17m23--the-2x-tail) | 7 | [M17–M23](#m17m23--the-2x-tail), the 2.x tail | — |
 | — | [**carried, not blocking**](#raised-by-177s-own-class-sweep-2026-07-30--1-high-3-medium-4-low) | 3 | **AA** (16 B/connection at accept — the `lib/net.cyr` decision BU and BJ join) · **AB** (the stateless-refusal amplifier) · **BT** (`corpse_of` mints loot outside the object ceiling — belongs with M15) | — |
 
-**Everything else is shipped.** 1.6.0 through 1.7.21 closed every finding of the
+**Everything else is shipped.** 1.6.0 through 1.7.22 closed every finding of the
 1.6.0 sweep and of gate re-runs #1–#4, and ten of gate re-run #5's twelve.
 Per-release detail is in [`CHANGELOG.md`](../../CHANGELOG.md); the sweep rulings
 and their retained write-ups are below.
 
 <details>
-<summary><b>Release history — 1.7.0 through 1.7.21 (click to expand)</b></summary>
+<summary><b>Release history — 1.7.0 through 1.7.22 (click to expand)</b></summary>
 
 | Release | Items | What |
 |---|---|---|
@@ -68,6 +71,7 @@ and their retained write-ups are below.
 | 1.7.20 | 1 | **BB** the post-auth `toml_parse` — **2,332 → 84 bytes per login**, and the bench arm that could not fail now gates at 256 |
 | **gate re-run #5** | — | ⛔ 0 critical / **3 high** / 5 medium / 4 low — items BI–BT. **All three highs AGNOS-only; x86_64 came back with ZERO highs, a first.** The "our own fixes are incomplete" signal collapsed from 7-of-9 to 1-of-12 |
 | 1.7.21 | 10 | **BI** AGNOS had no clean shutdown at all · **BK** descent owns its scheduling clock · **BL** 1.7.19's mirror image · plus BM, BN, BO, BP, BQ, BR, BS — **and the QEMU harness**, which immediately found **BU** |
+| 1.7.22 | — | Toolchain `6.5.4 → 6.5.33`, libro `2.8.4 → 2.8.10`. No open item closed. Found and closed a **CI/developer divergence carried since 1.2.0** — a sibling-free resolve of 1.7.21 produced sakshi 2.4.3 against the 2.4.7 committed at HEAD; also ended the `./lib/ shadows version-pinned` warning carried since 6.4.83 |
 
 </details>
 

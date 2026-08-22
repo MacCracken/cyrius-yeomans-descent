@@ -1170,7 +1170,7 @@ fn _audit_prune_one(victim, now_ms): i64 {
     # Writing the rule down is not checking it.
     if (hlen <= 0) {
         audit_keyed(AK_AUDIT_ROTFAIL, SEV_WARNING, "audit.rotate.fail",
-        g_audit_segbuf, _slen(g_audit_segbuf), now_ms);
+          g_audit_segbuf, _slen(g_audit_segbuf), now_ms);
         return 0;
     }
     var mlen = _audit_mark(victim, g_audit_head, hlen);
@@ -1186,7 +1186,7 @@ fn _audit_prune_one(victim, now_ms): i64 {
     # advanced, and `ls -l` showed the directory still there.
     if (xunlink(g_audit_segbuf) != 0) {
         audit_keyed(AK_AUDIT_ROTFAIL, SEV_WARNING, "audit.rotate.fail",
-        g_audit_segbuf, _slen(g_audit_segbuf), now_ms);
+          g_audit_segbuf, _slen(g_audit_segbuf), now_ms);
         return 0;
     }
     g_audit_pruned = g_audit_pruned + 1;
@@ -1696,7 +1696,7 @@ fn _build_record(s): i64 {
             # writes an audit entry so the operator can see it happened.
             if (off > SAVE_CAP - SIG_TAIL) {
                 audit_keyed(AK_SAVE_INV_TRUNC, SEV_WARNING, "save.inv.truncated",
-                load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+                  load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
                 it = 0;
                 continue;
             }
@@ -1746,8 +1746,8 @@ fn _build_record(s): i64 {
                 # dereference null on the way out.
                 if (off > SAVE_CAP - SIG_TAIL) {
                     audit_keyed(AK_SAVE_INV_TRUNC, SEV_WARNING, "save.inv.truncated",
-                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN),
-                    mud_now_ms());
+                      load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN),
+                      mud_now_ms());
                     stop = 1;
                     inner = 0;
                     continue;
@@ -2883,7 +2883,7 @@ fn login_on_pass(s, buf, len): i64 {
         session_appendtx_cstr(s, "\r\nThat character is already connected from another session.\r\n");
         store64(s + SS_QUIT, 1);
         audit_keyed(AK_LOGIN_DUP, SEV_WARNING, "login.dup",
-        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+          load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
         return 0;
     }
     if (rc == 1) {
@@ -2915,7 +2915,7 @@ fn login_on_pass(s, buf, len): i64 {
         # merely stops making new ones would leave those players stuck forever.
         if (load64(s + SS_CLASS) < 0) {
             audit_keyed(AK_CHAR_CREATE, SEV_WARNING, "class.reselect",
-            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+              load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
             session_appendtx_cstr(s, "\r\nYour calling did not survive the grid. Choose again.\r\n");
             store64(s + SS_PHASE, PHASE_CLASS);
             class_send_prompt(s);
@@ -2939,7 +2939,7 @@ fn login_on_pass(s, buf, len): i64 {
         # flood signal is fully preserved.
         if (fails >= MAX_LOGIN_FAILS) {
             audit_keyed(AK_LOGIN_FAIL, SEV_WARNING, "login.fail",
-            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+              load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
             session_appendtx_cstr(s, "\r\nToo many failed attempts. Closing.\r\n");
             store64(s + SS_QUIT, 1);
             return 0;
@@ -3044,7 +3044,7 @@ fn _confirm_mismatch(s): i64 {
     # that forced it was gone, rather than left in place because the code looked
     # deliberate.
     audit_keyed(AK_CREATE_FAIL, SEV_WARNING, "create.fail",
-    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+      load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
     if (fails >= MAX_LOGIN_FAILS) {
         session_echo_on(s);
         session_appendtx_cstr(s, "\r\nToo many failed attempts. Closing.\r\n");
@@ -3063,7 +3063,7 @@ fn _create_taken(s): i64 {
     session_appendtx_cstr(s, "\r\nThat name was just taken. Please reconnect and choose another.\r\n");
     store64(s + SS_QUIT, 1);
     audit_keyed(AK_CREATE_DUP, SEV_WARNING, "create.dup",
-    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+      load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
     return 0;
 }
 
@@ -3139,7 +3139,7 @@ fn login_on_confirm(s, buf, len): i64 {
         session_appendtx_cstr(s, " Please contact the operator.\r\n");
         store64(s + SS_QUIT, 1);
         audit_keyed(AK_ACCOUNTS_FULL, SEV_WARNING, "accounts.full",
-        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+          load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
         return 0;
     }
     # 1.7.16 (AL) — the increment MOVED to where the record is actually written
@@ -3159,7 +3159,7 @@ fn login_on_confirm(s, buf, len): i64 {
     store64(s + SS_AUTHED, 1);
     session_echo_on(s);   # 0.8.1 — passphrase set; restore echo
     audit_keyed(AK_CHAR_CREATE, SEV_INFO, "char.create",
-    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+      load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
     session_appendtx_cstr(s, "\r\nIdentity sealed into the grid.\r\n");
     store64(s + SS_PHASE, PHASE_CLASS);
     class_send_prompt(s);
@@ -3318,7 +3318,7 @@ fn _chpass_mismatch(s): i64 {
     var fails = load64(s + SS_FAILS) + 1;
     store64(s + SS_FAILS, fails);
     audit_keyed(AK_PASSWD_FAIL, SEV_WARNING, "passwd.fail",
-    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+      load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
     if (fails >= MAX_LOGIN_FAILS) {
         store64(s + SS_FAILS, 0);
         store64(s + SS_PHASE, PHASE_CMD);
@@ -3378,7 +3378,7 @@ fn chpass_on_confirm(s, buf, len): i64 {
         # disk failure and a mistyped passphrase as one number, which is actively
         # misleading in the log an operator reaches for first.
         audit_keyed(AK_PASSWD_ROLLBACK, SEV_WARNING, "passwd.rollback",
-        load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+          load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
         session_appendtx_cstr(s, "\r\nThe re-key could not be saved. Your passphrase is UNCHANGED.\r\n");
         session_send_cmd_prompt(s);
         return 0;
@@ -3387,7 +3387,7 @@ fn chpass_on_confirm(s, buf, len): i64 {
     store64(s + SS_PHASE, PHASE_CMD);
     session_echo_on(s);
     audit_keyed(AK_PASSWD_CHANGE, SEV_INFO, "passwd.change",
-    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+      load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
     session_appendtx_cstr(s, "\r\nPassphrase changed. Your record is re-keyed.\r\n");
     session_send_cmd_prompt(s);
     return 0;

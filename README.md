@@ -17,7 +17,7 @@ Full design: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
 ## Status
 
-**v1.7.21 — feature-complete, maintained.** The full game loop is implemented and
+**v1.7.22 — feature-complete, maintained.** The full game loop is implemented and
 playable: the Telnet wire (RFC 854 / 1143), the verb-noun parser, a hand-authored
 21-room Hub zone, the 2.5 s combat tick with THAC0 hit/damage math, four playable
 classes with abilities, crash-safe player persistence (reconnect restores your
@@ -36,7 +36,10 @@ are GPU calls on that target (1.7.8); every login against an existing name
 permanently consumed 2.2 kB before the passphrase was checked (1.7.8); and the
 account cap stopped enforcing after records were sharded (1.7.6). 1.7.9 then closed
 the RX-side class those releases' own sweeps turned up — a full queue could put a
-half-sent Telnet escape on the wire — and 1.7.10 moved the toolchain to 6.5.4.
+half-sent Telnet escape on the wire. 1.7.10 moved the toolchain to 6.5.4, and
+**1.7.22 moved it to 6.5.33** (libro `2.8.4 → 2.8.10`) — a dependency-only release
+that found CI and the developer machine had been resolving different versions of a
+vendored library since 1.2.0, and closed it.
 
 **The line closes when a re-run comes back with nothing critical or high, not when
 a checklist reaches zero.** Three sweeps have run and every one found real defects

@@ -613,7 +613,7 @@ fn mob_move_to(m, dest, dir): i64 {
     var from = mi_room(m);
     # Departure line first, while the watchers can still see it leave.
     room_combat_line(from, 0, mi_name_ptr(m), mi_name_len(m),
-    " heads ", dir_name(dir), strlen(dir_name(dir)), ".\r\n");
+      " heads ", dir_name(dir), strlen(dir_name(dir)), ".\r\n");
     mob_unlink(m);
     store64(m + MI_ROOM, dest);
     var r = room_at(dest);
@@ -690,7 +690,7 @@ fn _mob_assist(m): i64 {
                 if (load64(s + SS_ROOM) == mi_room(m)) {
                     mi_set_target(m, s);
                     room_combat_line(mi_room(m), 0, mi_name_ptr(m), mi_name_len(m),
-                    " snaps round and joins the fight!", 0, 0, "\r\n");
+                      " snaps round and joins the fight!", 0, 0, "\r\n");
                     return 1;
                 }
             }
@@ -716,7 +716,7 @@ fn _mob_flee(m): i64 {
     if (nd == 0) { return 0; }          # cornered — it has to fight
     mi_set_target(m, 0);
     room_combat_line(mi_room(m), 0, mi_name_ptr(m), mi_name_len(m),
-    " breaks and flees!", 0, 0, "\r\n");
+      " breaks and flees!", 0, 0, "\r\n");
     var pick = load64(&dirs + rng_below(nd) * 8);
     mob_move_to(m, room_exit(room_at(mi_room(m)), pick), pick);
     return 1;

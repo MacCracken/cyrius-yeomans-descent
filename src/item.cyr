@@ -296,7 +296,7 @@ fn item_new(tpl): i64 {
     store64(o + OI_DESC_PTR, load64(tpl + OT_DESC_PTR));
     store64(o + OI_DESC_LEN, load64(tpl + OT_DESC_LEN));
     var idn = copy_bytes_capped(o + OI_TPL_ID, OI_TPL_ID_CAP - 1,
-    tpl + OT_ID, load64(tpl + OT_ID_LEN));
+      tpl + OT_ID, load64(tpl + OT_ID_LEN));
     store64(o + OI_TPL_ID_LEN, idn);
     return o;
 }

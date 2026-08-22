@@ -123,6 +123,146 @@ survived because `bench_tick_budget.bcyr` memsets its fixture, leaving
 allowed to run the suite and the benches.**
 
 
+## [1.7.22] — 2026-08-22
+
+**Toolchain `6.5.4` → `6.5.33`, libro `2.8.4` → `2.8.10`, and the whole
+dependency snapshot with them.** A release of its own, per the 1.2.0 and 1.7.10
+precedent. 1502 assertions; `cyrius audit` exits 0; 6/6 benches; 2/2 fuzz
+targets; both targets build. **No behavioural source change.** The only edit
+under `src/` that is not the formatter's is `main.cyr`'s `VERSION_STRING` literal;
+`git diff -w` over the other five touched files is empty.
+
+**The finding worth the release: CI and the developer machine were building
+different servers.** `cyrius deps` applies a declared dep's copy *on top of* the
+`cyrius lib sync --full` snapshot on every resolve, so a dep pinning an older tag
+than the pinned toolchain folds silently **downgrades** that file for everyone
+downstream. It is invisible where a sibling checkout exists (`path` beats `tag`)
+and invisible to `deps --verify` (the lock is regenerated *from* the downgraded
+file, so it agrees with itself). Only CI, which has no siblings, takes it.
+
+Measured, by resolving 1.7.21's committed manifest in a sibling-free tree:
+
+| | committed at HEAD | sibling-free (CI) resolve |
+|---|---|---|
+| `lib/sakshi.cyr` | **2.4.7** | **2.4.3** |
+
+1.7.10 recorded "the sakshi shadow gap is CLOSED" and it was — *on this
+machine*. sigil 3.12.1's own `[deps.sakshi]` kept writing 2.4.3 over the synced
+copy anywhere `../sakshi` was absent, which is every CI run since 1.2.0. **sigil
+3.12.7 removed the cause** by moving sakshi out of `[deps.sakshi]` and into
+`[deps].stdlib`, where it tracks the toolchain fold instead of a stale tag.
+
+At 1.7.22 the divergence is gone and the check is now cheap to repeat: a
+sibling-free resolve of this manifest reproduces **all 113 `.cyr` files under
+`lib/` byte-identical** to the working tree (`diff -rq` is silent).
+
+### Changed — the pins
+
+- **`cyrius.cyml` pins `6.5.33`** (was `6.5.4`, 29 releases behind). The drift
+  warning `cyrius build` emitted on every run is gone.
+- **`[deps.libro]` `2.8.4` → `2.8.10`.** Brings, transitively: **sigil
+  `3.12.1` → `3.12.9`**, **patra `1.12.12` → `1.13.10`**.
+- **`cyrius lib sync --full` refreshed the vendored snapshot** — 108 stdlib
+  files, including **bayan `1.4.0` → `1.5.2`**, **sakshi `2.4.3` → `2.4.11`**,
+  `mabda 4.0.7 → 4.1.0`, `yantra 1.0.1 → 1.0.3`, `niyama → 1.0.7`. `cyrius deps`
+  re-resolved and rewrote `cyrius.lock` (113 entries, 3 commit-pinned).
+- **Three new vendored paths**, all from the 6.5.33 fold and all previously
+  absent: `lib/async_macos.cyr`, `lib/thread_macos.cyr`, and the whole
+  **`lib/unicode/`** tree (7 files, 352 KB — casefold / categories / normalize
+  plus their tables). `lib/` is committed in this repo, so these need adding.
+  Nothing in `src/` references them; they are carried because `lib sync --full`
+  vendors the snapshot whole.
+
+### Fixed — the shadow warning, after eight releases
+
+`./lib/ shadows version-pinned` named three files at the 6.5.4 pin: `patra`
+(libro's newer copy written over an older fold), plus `mabda` and `yantra`,
+which `cyrius lib sync --full` had **refused to move since 6.4.83** while
+reporting a full snapshot — a quirk `state.md` has carried that whole time.
+
+At 6.5.33 all three move. All 108 vendored stdlib files are now byte-identical
+to `~/.cyrius/versions/6.5.33/lib`; the only files in `lib/` that are *not* from
+that snapshot are libro's own bundle and the four sigil sub-bundles, which is
+exactly what `[deps.libro]` is supposed to land.
+
+`cyrius.cyml`'s comment block is rewritten around the pairing that has to hold —
+`[deps.patra]` in libro must equal the patra the pinned cyrius folds — with the
+two commands that check it.
+
+### Fixed — inherited, in the CYML/TOML path descent runs on every boot and login
+
+descent calls `cyml_*` for zone and class loading (`world.cyr`, `classes.cyr`)
+and `toml_*` for save records (`persist.cyr`, 26 × `toml_get`, 23 × `toml_int`).
+All of it is **bayan**, and 1.5.1 was a repair release. What descent inherits:
+
+- **An unterminated string in a save record no longer swallows the keys after
+  it.** The scan ran to the end of the *document* looking for a closing quote, so
+  `a = "oops` absorbed the following lines and deleted their keys silently. A
+  newline now terminates a basic string. This matters here because **a player
+  owns the key their own save record is signed with** (ADR 0004) — a validly
+  signed record is not a well-formed one, and every field still has to be
+  validated on load.
+- **The CYML entry scan no longer truncates at 256 entries.** 300 `[[entries]]`
+  blocks parsed as 256 with 44 gone and no diagnostic. descent's largest authored
+  file is `hub.rooms.cyml` at **21 entries**, so nothing shipped was truncated —
+  this removes a ceiling rather than fixing a live loss.
+- **A leading blank line no longer hides the first entry**, and
+  `bayan_cyml_doc_entry`'s out-of-bounds read is bounds-checked.
+- **`cyml` no longer uses raw x86_64 syscall numbers** for `${file:}` / `${env:}`
+  expansion, where on agnos the "open" returned the process's own pid, the
+  `fd < 0` guard did not fire, and the following "read" **killed the process**.
+  ⚠ **Latent for descent, not live**: nothing under `data/` uses `${…}`, so that
+  path was never reached. It is closed before anyone authors one.
+
+### Changed — the formatter, and nothing else, touched `src/`
+
+6.5.33's `cyrfmt` indents wrapped call arguments differently. Swept:
+`src/{persist,mob,classes,server,combat,item}.cyr`, two benches and the `.tcyr`
+corpus. **Continuation-indent only — `git diff -w` over `src/`, `tests/`,
+`benches/` and `fuzz/` is empty.**
+
+⚠ **`cyrius fmt` cannot take a path in 6.5.33** — `cyrius fmt -w src/` and a bare
+`cyrius fmt -w` both fail with `cyrfmt: cannot read file`. The sweep was run as
+`for f in …; do ~/.cyrius/bin/cyrfmt -w "$f"; done`. libro 2.8.8 hit the mirror
+image of this (`cyrfmt` reads only `argv[1]` and ignores the rest, so
+`cyrfmt --check src/*.cyr` was a vacuous gate); loop per file either way.
+
+### Verified rather than assumed
+
+- **Sibling-free resolution is byte-identical**, as above. This is the check that
+  would have caught the sakshi divergence at any point in the last twelve
+  releases, and it is now written down.
+- **`[deps.patra]` pairing holds.** 6.5.33 folds patra 1.13.10; libro 2.8.10
+  declares 1.13.10. libro 2.8.8 and 2.8.10 exist to keep exactly this equal.
+- **Benches are unmoved.** `bench_combat` p99 **456 µs** (32 × 64), against 444 µs
+  at 1.7.10 — noise. The broadcast breach point is still **N ≈ 345**
+  (`p99 = 0.432 µs × N²`), so the 2.0 fan-out item is unchanged.
+- **`lib/io.cyr` still carries the AGNOS branches.** `file_rename` and `xunlink`
+  keep the `#ifdef CYRIUS_TARGET_AGNOS` length-carrying arities that 1.7.8's
+  persistence fix routes through. `io.cyr` moved in this sync, so this was a real
+  risk, not a formality — same check 1.7.10 ran, same result.
+
+### Notes
+
+- **Binary 921,544 → 1,170,536 bytes (+248,992, +27%)**; the `--agnos` target
+  905,624 → 1,150,680. **Effectively all of it is bayan**, whose source tripled
+  (213 KB → 641 KB) when 1.5.0 added a greenfield PDF module descent never calls.
+  The unreachable-fn count rose 1721 → 2152 (457 KB → 629 KB of dead code) and
+  `CYRIUS_DCE=1` did not change the output size on this toolchain. Not fixable
+  from here: `bayan` is a `[deps].stdlib` leaf and libro's sidecar declares it
+  too, so descent gets the whole fold either way. Recorded so the next reader
+  knows the growth was not earned by this project's own code.
+- **BU is unchanged, and that is a measured statement, not an assumption.**
+  `lib/thread_local.cyr` — where the real-kernel page fault lands — is
+  **byte-identical** across this bump, and `cbank()`'s TLS install path in
+  `lib/sigil-mldsa.cyr` is untouched (3.12.9 only adds a sticky
+  `crypto_banks_exhausted()` counter beside it). Nothing here moves the 1.x gate.
+- **The QEMU harness did not run.** `scripts/agnos-qemu-smoke.sh` needs an agnos
+  kernel built with `BENCH_CONNECT_SELFTEST=1`; the one in `../agnos/build/` is
+  not, and rebuilding another repo's artifact was out of scope for a dependency
+  bump. Given the two byte-identical fault sites above there was nothing for it
+  to disprove, but the `--agnos` target is **built and unexecuted** at this tag.
+
 ## [1.7.21] — 2026-07-31
 
 **The target nobody had ever run** — gate re-run #5 (items **BI, BK, BL, BM, BN,

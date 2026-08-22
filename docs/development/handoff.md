@@ -1,6 +1,8 @@
 # cyrius-yeomans-descent — Handoff
 
-> **Written**: 2026-08-01, at **v1.7.21**.
+> **Written**: 2026-08-01, at **v1.7.21**. **Refreshed 2026-08-22 for v1.7.22**,
+> which was a toolchain + dependency bump only — everything this document says
+> about *what blocks 2.0* is unchanged.
 > **Read this first, then [`roadmap.md`](roadmap.md) "What is left".**
 >
 > This is a point-in-time handoff, not a living document. If the date above is
@@ -14,14 +16,24 @@
 this repo's to fix.**
 
 Six releases shipped in rapid succession — **1.7.16 through 1.7.21** — closing
-roughly thirty defects across gate re-runs #3, #4 and #5. All gates are green:
+roughly thirty defects across gate re-runs #3, #4 and #5. **1.7.22 then bumped the
+toolchain and dependencies and closed no open item.** All gates are green:
 
 | | |
 |---|---|
 | `cyrius audit` | exit 0 — fmt, lint, docs, tests, bench |
 | tests | **1502 assertions**, 0 failed |
 | benches | 6/6 · fuzz 2/2 · x86_64 **and** `--agnos` build |
-| version | `VERSION`, `cyrius.cyml`, CHANGELOG and `src/main.cyr:44` all say 1.7.21 |
+| version | `VERSION`, `cyrius.cyml`, CHANGELOG and `src/main.cyr:44` all say 1.7.22 |
+| toolchain | cyrius **6.5.33**, libro **2.8.10** (→ sigil 3.12.9, patra 1.13.10, sakshi 2.4.11, bayan 1.5.2) |
+
+⚠ **One thing 1.7.22 changed that you should know before you touch `lib/`.**
+`cyrius deps` writes a declared dep's copy *over* the `lib sync --full` snapshot,
+so a dep pinning an older tag than the toolchain folds downgrades that file — and
+`path` beating `tag` means a sibling checkout hides it completely. Until 1.7.22
+that had CI building against sakshi **2.4.3** while the repo carried **2.4.7**.
+After any dep or pin bump, resolve the manifest where `../<sibling>` does not
+exist and diff `lib/`; the recipe is in [`state.md`](state.md#dependencies).
 
 **Gate re-run #5 ruled DO-NOT-CLOSE at 0 critical / 3 high / 5 medium / 4 low —
 and every one of the three highs was on the AGNOS build.** On x86_64 the run came

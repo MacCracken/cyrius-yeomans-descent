@@ -280,7 +280,7 @@ fn save_sweep(): i64 {
                 # idea; the audit chain is the only durable record.
                 if (player_save(s) != 1) {
                     audit_keyed(AK_SAVE_FAIL_SWEEP, SEV_WARNING, "save.fail.sweep",
-                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+                      load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
                 }
                 budget = budget - 1;
                 saved = saved + 1;
@@ -868,7 +868,7 @@ fn drop_session(epfd, s): i64 {
         # find it afterwards.
         if (player_save(s) != 1) {
             audit_keyed(AK_SAVE_FAIL_DISC, SEV_WARNING, "save.fail.disconnect",
-            load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+              load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
         }
     }
     #ifndef CYRIUS_TARGET_AGNOS
@@ -951,7 +951,7 @@ fn shutdown_save_all(): i64 {
                 } else {
                     failed = failed + 1;
                     audit_keyed(AK_SAVE_FAIL_DISC, SEV_WARNING, "save.fail.shutdown",
-                    load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
+                      load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), mud_now_ms());
                 }
             }
         }

@@ -135,7 +135,7 @@ fn main(): i64 {
     var rec_ns = clock_now_ns() - t0;
     var rec_by = alloc_used() - b0;
     report_op("_build_record (serialize + Ed25519 sign)",
-              rec_ns, rec_by, NSAVE, SAVE_BUDGET_US, RECORD_BYTES_MAX);
+      rec_ns, rec_by, NSAVE, SAVE_BUDGET_US, RECORD_BYTES_MAX);
 
     # --- player_save: the whole thing — record, tmp write, rename, audit append.
     var b1 = alloc_used();
@@ -145,7 +145,7 @@ fn main(): i64 {
     var sav_ns = clock_now_ns() - t1;
     var sav_by = alloc_used() - b1;
     report_op("player_save (record + fsync-less write + rename + audit)",
-              sav_ns, sav_by, NSAVE, SAVE_BUDGET_US, SAVE_BYTES_MAX);
+      sav_ns, sav_by, NSAVE, SAVE_BUDGET_US, SAVE_BYTES_MAX);
 
     # What the metered sweep actually costs in one tick, stated in the terms
     # ADR 0001 cares about. Before 1.6.8 this line read "all of them".
@@ -199,7 +199,7 @@ fn main(): i64 {
     # far enough below 2,332 that restoring the `toml_parse` FAILS this bench
     # rather than quietly re-arming the leak. Verified both ways for this release.
     report_op("player_auth_load (derive keypair + verify signature)",
-              auth_ns, auth_by, NAUTH, AUTH_BUDGET_US, 256);
+      auth_ns, auth_by, NAUTH, AUTH_BUDGET_US, 256);
 
     # --- The audit rollup window (1.7.1). ===
     #

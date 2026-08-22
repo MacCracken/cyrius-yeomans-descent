@@ -3,17 +3,72 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-07-31 (v1.7.21 — **gate re-run #5 returned DO-NOT-CLOSE**
-> (0/3/5/4, items BI-BT); **ten of twelve are closed**. Open: **BJ** (an upstream
-> decision, paired with AA) and **BT** (M15). The 1.x gate is blocked by ONE
-> target, and **x86_64 came back with zero highs for the first time in seven
-> sweeps**)
+> **Last refresh**: 2026-08-22 (v1.7.22 — **toolchain + dependency bump**,
+> `6.5.4 → 6.5.33` and libro `2.8.4 → 2.8.10`. No behavioural source change. The
+> release found that **CI and this machine had been building different servers**
+> since 1.2.0 and closed it; the shadow warning carried since 6.4.83 is gone.
+> Gate state is UNCHANGED: re-run #5's ruling stands (0/3/5/4, items BI-BT), ten
+> of twelve closed, **BJ** and **BT** open, and the 1.x gate still blocked by
+> **BU** on one target)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.22** — 2026-08-22. **1502 assertions**; `cyrius audit` exits 0; 6/6 benches;
+**2/2 fuzz targets**; both targets build. Toolchain and dependency bump only —
+the only edit under `src/` that is not the 6.5.33 formatter's is `main.cyr`'s
+`VERSION_STRING` literal, and `git diff -w` over the other five touched files is
+empty.
+
+**CI and this machine were building different servers, and had been since 1.2.0.**
+`cyrius deps` applies a declared dep's copy *on top of* the `lib sync --full`
+snapshot on every resolve, so a dep pinning an older tag than the toolchain folds
+silently downgrades that file downstream. `path` beats `tag`, so a sibling
+checkout hides it; `deps --verify` regenerates the lock *from* the downgraded
+file, so it agrees with itself. Only a sibling-free tree sees it. Resolving
+1.7.21's committed manifest in one gave **`lib/sakshi.cyr` 2.4.3 against the
+2.4.7 committed at HEAD**. 1.7.10 called that gap closed and it was — on this
+machine. **sigil 3.12.7 removed the cause** (sakshi moved out of `[deps.sakshi]`
+into `[deps].stdlib`). At 1.7.22 a sibling-free resolve reproduces **all 113 `.cyr`
+files under `lib/` byte-identical** — `diff -rq` is silent — and that check is now
+written into `cyrius.cyml` and below under [Dependencies](#dependencies).
+
+**The `./lib/ shadows version-pinned` warning is gone after eight releases.** At
+6.5.4 it named `patra`, `mabda` and `yantra` — the latter two because
+`cyrius lib sync --full` had refused to move them since 6.4.83 while reporting a
+full snapshot. At 6.5.33 all three move; all 108 vendored stdlib files are
+byte-identical to `~/.cyrius/versions/6.5.33/lib`. The sync also brought three
+paths that were simply absent before — `lib/async_macos.cyr`,
+`lib/thread_macos.cyr` and the **`lib/unicode/`** tree (7 files, 352 KB). `lib/`
+is committed here, so they need adding; nothing in `src/` calls them.
+
+**What descent inherits in the loader path.** bayan 1.5.1 was a repair release,
+and descent runs bayan on every boot (`cyml_*` for zones and classes) and every
+login (`toml_*` for save records). An **unterminated string in a save record no
+longer swallows the keys after it** — it ran to end-of-document looking for a
+closing quote. That lands squarely on [ADR 0004](../adr/0004-identity-and-authentication.md):
+a player owns the key their own record is signed with, so a *validly signed*
+record was never a *well-formed* one. The CYML entry scan also stops truncating
+at 256 (descent's largest authored file is 21 entries — a ceiling removed, not a
+live loss), and `cyml`'s `${file:}`/`${env:}` expansion stops using raw x86_64
+syscall numbers that **killed the process on agnos**. That last one is **latent
+here**: nothing under `data/` uses `${…}`.
+
+**BU did not move, and that is measured.** `lib/thread_local.cyr` — where the
+real-kernel page fault lands — is **byte-identical** across this bump, and
+`cbank()`'s TLS install path in `lib/sigil-mldsa.cyr` is untouched (3.12.9 adds
+only a sticky `crypto_banks_exhausted()` counter beside it). The QEMU harness did
+not run: `../agnos/build/agnos` is not built with `BENCH_CONNECT_SELFTEST=1`, and
+rebuilding another repo's artifact was out of scope. **The `--agnos` target is
+built and unexecuted at this tag.**
+
+**Cost: the binary grew 921,544 → 1,170,536 bytes (+27%)**, `--agnos` 905,624 →
+1,150,680. Effectively all of it is **bayan**, whose source tripled (213 KB →
+641 KB) when 1.5.0 added a greenfield PDF module descent never calls. Not fixable
+from here — `bayan` is a `[deps].stdlib` leaf *and* libro's sidecar declares it.
 
 **1.7.21** — 2026-07-31. **1502 assertions**; `cyrius audit` exits 0; 6/6 benches;
 **2/2 fuzz targets**; both targets build.
@@ -1035,20 +1090,30 @@ written myself two releases earlier.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.4` (`cyrius.cyml [package].cyrius`) — bumped in 1.7.10
+- **Cyrius pin**: `6.5.33` (`cyrius.cyml [package].cyrius`) — bumped in 1.7.22
+  (was `6.5.4`, set in 1.7.10 and 29 releases behind by then)
 
-Two toolchain quirks (first hit at 6.4.83, still present at 6.5.4), worked
-around rather than fixed here:
+Toolchain quirks, worked around rather than fixed here:
 
-- `cyrius fmt -w <file>` does **not** write. Capture `cyrius fmt <file>` on stdout
-  instead. Flag order also differs per tool: `cyrius fmt <file> --check`, but
+- **`cyrius fmt` cannot take a path at 6.5.33.** `cyrius fmt -w <file>`,
+  `cyrius fmt -w src/` and a bare `cyrius fmt -w` all fail with
+  `cyrfmt: cannot read file`. Call the binary directly, **one file per
+  invocation**:
+  `for f in src/*.cyr; do ~/.cyrius/bin/cyrfmt -w "$f"; done`. The per-file loop
+  is not optional — `cyrfmt` reads only `argv[1]` and silently ignores the rest,
+  which is how libro 2.8.8 discovered its own `cyrfmt --check src/*.cyr` gate had
+  been vacuous. (This entry previously said `cyrius fmt -w` "does not write" and
+  to capture stdout; the failure at 6.5.33 is a hard error, not a silent no-op.)
+- Flag order still differs per tool: `cyrius fmt <file> --check`, but
   `cyrius doc --check <file>` — and `doc` writes its findings to **stderr**.
-- `cyrius lib sync --full` reports a full 99-file snapshot while leaving some
-  bundled libs untouched. At 6.5.4 that is `mabda` (4.0.7 vs 4.0.8) and `yantra`
-  (1.0.1 vs 1.0.2), which is why two shadow warnings survive a full sync. Neither
-  is referenced anywhere in `src/` / `tests/` / `benches/`. **Correction:** this
-  entry used to say both were "pruned as unused" — `yantra.cyr` is present in
-  `lib/`, so they were vendored, just never called.
+- ~~`cyrius lib sync --full` reports a full snapshot while leaving some bundled
+  libs untouched.~~ **RESOLVED at 6.5.33** (carried since 6.4.83). The sync now
+  moves everything: after `lib sync --full` + `cyrius deps`, all **108** vendored
+  stdlib files (101 top-level + 7 under the new `lib/unicode/`) are
+  byte-identical to `~/.cyrius/versions/6.5.33/lib`, and the
+  `./lib/ shadows version-pinned` warning is gone. The only files in `lib/` not
+  from that snapshot are libro's bundle and the four sigil sub-bundles, which is
+  what `[deps.libro]` is supposed to land.
 
 `cyrius audit` at 6.4.x is the **project sweep** (fmt / lint / docs / tests /
 bench over `src` + `programs`). `cyrius audit --internal` is the different,
@@ -1302,10 +1367,11 @@ Direct (declared in `cyrius.cyml`):
   thread, thread_local, random, sakshi, chrono, tagged) are **not** hand-listed —
   libro's `dist/libro.deps` sidecar declares them and `cyrius deps` auto-resolves
   them in topological order, fail-loud on a missing one.
-- **libro** `2.8.4` (git, `path = "../libro"`) — append-only SHA-256 hash-chain
+- **libro** `2.8.10` (git, `path = "../libro"`) — append-only SHA-256 hash-chain
   store (the crash-safe primitive behind "T.Ron" persistence). Pulls **sigil
-  3.12.1** (Ed25519, ADR 0004 identity) + **patra 1.12.12** + **sakshi** + **bayan**
-  transitively. Resolved by `cyrius deps` into `lib/` (+ `cyrius.lock`).
+  3.12.9** (Ed25519, ADR 0004 identity) + **patra 1.13.10** + **sakshi 2.4.11** +
+  **bayan 1.5.2** transitively. Resolved by `cyrius deps` into `lib/`
+  (+ `cyrius.lock`: 113 entries, 3 commit-pinned).
 
 **bayan is a direct dep as of 1.2.0.** 6.4.83 carved `cyml`/`toml` (and earlier
 `json`/`bigint`) out of the stdlib into bayan, and descent's own `world.cyr` /
@@ -1323,10 +1389,37 @@ the leaves descent actually resolves. 1.2.0 pruned 12 dead ones — `cyml`, `tom
 `json`, `bigint`, `base64`, `csv`, `u128`, `linalg`, `matrix`, `agnosys` (carved out
 of 6.4.83) plus `niyama`, `yantra` (never referenced).
 
-**The sakshi shadow gap is CLOSED (1.7.10).** It read: *sigil 3.12.1 pins sakshi
-2.4.3 in its own manifest, so `cyrius deps` writes it over the synced 2.4.6; needs
-a sigil-side bump.* At 6.5.4 it resolves to **sakshi 2.4.7** cleanly and no
-sigil-side change was needed after all. Carried as open for five releases.
+**The sakshi shadow gap is CLOSED — properly, at 1.7.22, and 1.7.10's closure was
+half a closure.** The gap read: *sigil 3.12.1 pins sakshi 2.4.3 in its own
+manifest, so `cyrius deps` writes it over the synced copy.* 1.7.10 declared it
+closed at **2.4.7**, which was true of *this machine*: `path` beats `tag`, so a
+`../sakshi` checkout hid sigil's git dep entirely. **Resolving 1.7.21's committed
+manifest in a sibling-free tree still produced 2.4.3** — so every CI run from
+1.2.0 to 1.7.21 built against a sakshi the repo did not carry. **sigil 3.12.7**
+removed the cause by moving sakshi out of `[deps.sakshi]` and into
+`[deps].stdlib`, where it tracks the toolchain fold (**2.4.11** at 6.5.33) and
+can no longer downgrade a consumer.
+
+⚠ **THE GENERAL RULE, and the check that catches it.** `cyrius deps` applies a
+declared dep's copy *on top of* the `lib sync --full` snapshot on every resolve.
+Any dep whose tag is older than what the pinned toolchain folds therefore
+**downgrades** that file for everything downstream — invisibly where a sibling
+checkout exists, and invisibly to `deps --verify`, which regenerates the lock
+*from* the downgraded file so it agrees with itself. The pairing to keep true is
+`[deps.patra]` in libro == the patra the pinned cyrius folds (both **1.13.10**
+today); libro 2.8.8 and 2.8.10 exist for exactly this. Verify a bump by resolving
+the manifest somewhere `../<sibling>` does not exist and diffing `lib/`:
+
+```sh
+REPO=$PWD
+rm -rf /tmp/ci-parity && mkdir -p /tmp/ci-parity
+cp -r cyrius.cyml VERSION src data tests benches fuzz programs docs /tmp/ci-parity/
+cd /tmp/ci-parity && cyrius lib sync --full && cyrius deps
+diff -rq /tmp/ci-parity/lib "$REPO/lib"    # must print nothing
+```
+
+`/tmp` matters: the copy has to sit somewhere `../libro`, `../sakshi` and the
+rest do **not** resolve, or `path` wins and the check passes vacuously.
 
 **M6 complete (0.7.0, 2026-06-09).** Full persistence shipped — see the Version
 section above and `src/persist.cyr`. The dep-landing (M6-A) lesson is preserved

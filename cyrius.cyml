@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Yeoman's Descent — a Cyrius-native text MUD server set in a techno-feudal arcology"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.5.4"
+cyrius = "6.5.33"
 
 [build]
 entry = "src/main.cyr"
@@ -36,8 +36,8 @@ output = "cyrius-yeomans-descent"
 # descent's non-core surface is listed explicitly.
 #
 # v6.4.83: `cyml` and `toml` are NO LONGER stdlib leaves — they were carved into
-# **bayan** (same carve that took json/bigint at 6.1.25); the 6.4.83 stdlib ships
-# no cyml.cyr / toml.cyr at all. Listing them here only ever resolved because
+# **bayan** (same carve that took json/bigint at 6.1.25); the stdlib has shipped
+# no cyml.cyr / toml.cyr since. Listing them here only ever resolved because
 # descent's committed lib/ still held the pre-carve Jun-2026 copies, which then
 # defined cyml_*/toml_* a SECOND time on top of bayan's (pulled in by libro's
 # sidecar) — 40 "duplicate fn … last definition wins" warnings, with the zone /
@@ -49,10 +49,10 @@ stdlib = ["std", "assert", "bench", "args", "net", "chrono", "result", "tagged",
 # M6 persistence (ADR 0004 Ed25519 identity + crash-safe hash-chain store).
 # libro = append-only SHA-256 hash-linked store (FileStore: flock +
 # .tmp/rename atomic replace) — the real crash-safe primitive behind the
-# "T.Ron" persistence subsystem. Pulls sigil 3.12.1 (Ed25519) + sakshi 2.4.3 +
-# patra 1.12.12 TRANSITIVELY (libro dropped its own [deps.agnosys] at the
+# "T.Ron" persistence subsystem. Pulls sigil 3.12.9 (Ed25519) + sakshi 2.4.11 +
+# patra 1.13.10 TRANSITIVELY (libro dropped its own [deps.agnosys] at the
 # agnosys → agnodrm decomposition; the trust stack lives in sigil now).
-# `path` resolves from the local sibling checkout (currently libro 2.8.4) —
+# `path` resolves from the local sibling checkout (currently libro 2.8.10) —
 # the `tag` documents the pinned release and must track that checkout's VERSION.
 #
 # NOTE — libro 2.8.0 thinned its sigil surface to capability sub-bundles, so
@@ -62,11 +62,34 @@ stdlib = ["std", "assert", "bench", "args", "net", "chrono", "result", "tagged",
 # back: the monolith redefines every one of those symbols and drags in the
 # x509/RSA bignum tables — ~13 MB of .bss nothing here calls. See src/main.cyr.
 #
-# sakshi resolves to 2.4.3 because sigil 3.12.1 pins that tag, while the 6.4.86
-# toolchain bundles 2.4.6 — hence the standing "./lib/ shadows version-pinned"
-# build warning. Needs a sigil-side bump; not fixable from descent.
+# ⚠ THE TRANSITIVE DOWNGRADE. `cyrius deps` applies a declared dep's copy ON TOP
+# OF the `cyrius lib sync --full` snapshot on every resolve, so a dep that
+# declares an OLDER tag than the pinned toolchain folds will silently DOWNGRADE
+# that file for everything downstream. It is invisible on any machine with a
+# sibling checkout (`path` beats `tag`) and invisible to `deps --verify` (the
+# lock is regenerated FROM the downgraded file, so it agrees with itself) — only
+# CI, which has no siblings, takes the hit. libro 2.8.8/2.8.10 exist to keep
+# `[deps.patra]` equal to the patra the pinned cyrius folds. When bumping the
+# toolchain pin above, check the pairing still holds:
+#     head -3 ~/.cyrius/versions/<pin>/lib/patra.cyr     # 6.5.33 folds 1.13.10
+#     grep -A3 -F '[deps.patra]' ../libro/cyrius.cyml    # libro 2.8.10 pins 1.13.10
+#
+# That pairing is what 1.7.22 verified, and it is why the "./lib/ shadows
+# version-pinned" warning is finally GONE. At the 6.5.4 pin it named three files
+# — patra (libro's newer copy written over an older fold), plus mabda and yantra,
+# which `cyrius lib sync --full` had refused to move since 6.4.83 despite
+# reporting a full snapshot. At 6.5.33 all 108 vendored stdlib files (101 at the
+# top level + the 7 in the new lib/unicode/ tree) are byte-identical to
+# ~/.cyrius/versions/6.5.33/lib; the only files in lib/ that are NOT from that
+# snapshot are libro's own bundle and the four sigil sub-bundles, which is
+# exactly what [deps.libro] is supposed to land.
+#
+# The sakshi half of this was closed earlier, at 1.7.10, and sigil 3.12.7 removed
+# the cause for good by moving sakshi out of its `[deps.sakshi]` git dep and into
+# `[deps].stdlib` — it tracks the toolchain fold (2.4.11 at 6.5.33) now, so it can
+# no longer downgrade lib/sakshi.cyr under a consumer.
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
 path = "../libro"
-tag = "2.8.4"
+tag = "2.8.10"
 modules = ["dist/libro.cyr"]

@@ -135,7 +135,7 @@ fn ansi_miss(): i64 { return "\x1b[2m"; }      # dim
 # everyone else in the room sees these third-person versions.
 fn cb_player_act(s, m, mid, tail): i64 {
     room_combat_line(load64(s + SS_ROOM), s, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN),
-    mid, mi_name_ptr(m), mi_name_len(m), tail);
+      mid, mi_name_ptr(m), mi_name_len(m), tail);
     return 0;
 }
 # cb_player_act with the roles swapped: mob as subject, player as object.
@@ -143,7 +143,7 @@ fn cb_player_act(s, m, mid, tail): i64 {
 # broadcast exclude — the combatant already got the first-person line.
 fn cb_mob_act(s, m, mid, tail): i64 {
     room_combat_line(load64(s + SS_ROOM), s, mi_name_ptr(m), mi_name_len(m),
-    mid, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), tail);
+      mid, load64(s + SS_NAME_BUF), load64(s + SS_NAME_LEN), tail);
     return 0;
 }
 
@@ -216,7 +216,7 @@ fn mob_died(s, m): i64 {
     session_appendtx_cstr(s, "\r\n");
     # Onlookers see the kill too.
     room_combat_line(mi_room(m), s, mi_name_ptr(m), mi_name_len(m),
-    " collapses, destroyed.", 0, 0, "\r\n");
+      " collapses, destroyed.", 0, 0, "\r\n");
     corpse_of(m, mi_room(m));     # M4-E: leave a lootable corpse
     # M12-C — every session pointing at this mob must let go, not just the
     # killer. A second attacker's SS_TARGET would otherwise outlive the

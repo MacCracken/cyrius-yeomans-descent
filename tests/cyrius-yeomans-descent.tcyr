@@ -701,16 +701,16 @@ fn test_idle(): i64 {
     # separate pre-auth timeout — was never implemented.
     store64(s + SS_AUTHED, 0);
     assert_eq(session_is_idle(s, 1000 + PREAUTH_TIMEOUT_MS - 1, 300000), 0,
-              "unauthed, just under the pre-auth deadline: live");
+      "unauthed, just under the pre-auth deadline: live");
     assert_eq(session_is_idle(s, 1000 + PREAUTH_TIMEOUT_MS, 300000), 1,
-              "unauthed, at the pre-auth deadline: reaped long before 5m");
+      "unauthed, at the pre-auth deadline: reaped long before 5m");
     assert(PREAUTH_TIMEOUT_MS < 300000, "and the pre-auth deadline is genuinely shorter");
 
     # The shorter deadline must never LENGTHEN anyone's grace: if the operator
     # sets an idle timeout below it, the smaller of the two still wins.
     store64(s + SS_AUTHED, 0);
     assert_eq(session_is_idle(s, 1000 + 5000, 4000), 1,
-              "a tighter operator timeout still applies to unauthed sessions");
+      "a tighter operator timeout still applies to unauthed sessions");
     fl_free(s);
     return 0;
 }
@@ -1004,9 +1004,9 @@ fn test_security(): i64 {
     # And the new short-circuit itself: an out-of-range passphrase is a plain
     # wrong-passphrase reject, and costs nothing — no record read, no verify.
     assert_eq(player_auth_load(_mk_sess("Forged", 6), "x", 1), 0,
-              "an under-length passphrase is rejected before the record is read");
+      "an under-length passphrase is rejected before the record is read");
     assert_eq(player_auth_load(_mk_sess("Forged", 6), _rep_a(200), 200), 0,
-              "an over-length passphrase is rejected before the record is read");
+      "an over-length passphrase is rejected before the record is read");
 
     # _clamp sanity.
     assert_eq(_clamp(5, 1, 10), 5, "clamp in-range");
@@ -1124,7 +1124,7 @@ fn test_wire_hygiene(): i64 {
     var n6 = load64(s6 + SS_TX_LEN);
     assert(n6 <= TX_CAP, "prose append respects TX_CAP");
     assert_eq(_lone_iac_count(load64(s6 + SS_TX_BUF), n6), 0,
-              "a full line of IAC truncates without splitting a pair");
+      "a full line of IAC truncates without splitting a pair");
 
     # --- Fuzz: every byte value at every position in a short window. No lone
     # IAC may survive, nothing below 32 may appear, and the write must stay in
@@ -1578,9 +1578,9 @@ fn test_preauth_meter(): i64 {
     # before the hoist this returned -1 (no record); now the length gate fires
     # first and it is a plain wrong-passphrase 0.
     assert_eq(player_auth_load(_mk_sess("Nonesuch", 8), "x", 1), 0,
-              "under-length passphrase short-circuits before the record read");
+      "under-length passphrase short-circuits before the record read");
     assert_eq(player_auth_load(_mk_sess("Nonesuch", 8), _rep_a(200), 200), 0,
-              "over-length passphrase short-circuits before the record read");
+      "over-length passphrase short-circuits before the record read");
 
     return 0;
 }
@@ -1701,7 +1701,7 @@ fn test_assist_real(): i64 {
     var before3 = load64(s3 + SS_HP);
     mob_tick_all(7900);
     assert_eq(load64(s3 + SS_HP), before3,
-              "the player's own target is left to combat_round, not swung twice");
+      "the player's own target is left to combat_round, not swung twice");
     mob_remove(m3);
 
     return 0;
@@ -1799,13 +1799,13 @@ fn test_load_and_save_failure(): i64 {
     var saved_rooms = g_room_count;
     var saved_start = g_start_room;
     assert_eq(world_load_rooms("tests/fixtures/wrongkind.rooms.cyml"), WL_ERR_KIND,
-              "a wrong-kind rooms file is rejected");
+      "a wrong-kind rooms file is rejected");
     assert_eq(g_room_count, 0, "and leaves no live room table");
     assert_eq(world_load_rooms("tests/fixtures/dangling.rooms.cyml"), WL_ERR_DANGLE,
-              "a dangling-exit rooms file is rejected");
+      "a dangling-exit rooms file is rejected");
     assert_eq(g_room_count, 0, "and likewise leaves nothing live");
     assert_eq(world_load_rooms("tests/fixtures/nosuchfile.cyml"), WL_ERR_IO,
-              "a missing file is rejected");
+      "a missing file is rejected");
     assert_eq(g_room_count, 0, "and leaves nothing live");
     # Restore the real world for the groups that follow.
     assert_eq(world_load_rooms(DP_ROOMS), WL_OK, "the real zone reloads");
@@ -1842,7 +1842,7 @@ fn test_load_and_save_failure(): i64 {
     chpass_on_new(s, "replacement", 11);
     chpass_on_confirm(s, "replacement", 11);
     assert_eq(_bytes_eq(blk + IDENT_PK, before, PK_LEN), 1,
-              "a failed re-key leaves the live identity UNCHANGED");
+      "a failed re-key leaves the live identity UNCHANGED");
     assert_eq(load64(s + SS_IDENT_CAND), 0, "and still releases the candidate block");
 
     return 0;
@@ -1886,10 +1886,10 @@ fn test_state_integrity(): i64 {
     assert(world_load_objs("tests/fixtures/longid.objs.cyml") > 0, "the maximal-id fixture loads");
     var probe = ot_at(0);
     assert_eq(load64(probe + OT_ID_LEN), OT_ID_CAP - 1,
-              "a 32-byte id is stored at CAP-1, leaving room for the NUL");
+      "a 32-byte id is stored at CAP-1, leaving room for the NUL");
     var sit = item_new(probe);
     assert_eq(oi_tpl_id_len(sit), load64(probe + OT_ID_LEN),
-              "and round-trips into the instance intact");
+      "and round-trips into the instance intact");
     obj_free(sit);
     # Restore the real object table for the groups that follow.
     assert(world_load_objs(DP_OBJS) > 0, "the real object table reloads");
@@ -1897,7 +1897,7 @@ fn test_state_integrity(): i64 {
     var tpl = ot_at(0);
     var it = item_new(tpl);
     assert_eq(oi_tpl_id_len(it), load64(tpl + OT_ID_LEN),
-              "the instance carries the template id at full length");
+      "the instance carries the template id at full length");
     var k = 0;
     var same = 1;
     while (k < load64(tpl + OT_ID_LEN)) {
@@ -1923,12 +1923,12 @@ fn test_state_integrity(): i64 {
     # The LAST record wins — the read window may begin mid-file.
     var two = "{\"hash\":\"first000\"}\n{\"hash\":\"second11\"}\n";
     assert_eq(str_eq_cstr(_audit_last_hash(two, strlen(two)), "second11"), 1,
-              "the last complete record wins");
+      "the last complete record wins");
 
     # A torn final write (no trailing newline) is skipped, not half-read.
     var torn = "{\"hash\":\"good0000\"}\n{\"hash\":\"trunc";
     assert_eq(str_eq_cstr(_audit_last_hash(torn, strlen(torn)), "good0000"), 1,
-              "a torn trailing record is ignored");
+      "a torn trailing record is ignored");
     assert_eq(_audit_last_hash("no newline here", 15), 0, "no complete record yields nothing");
 
     return 0;
@@ -2020,7 +2020,7 @@ fn test_item_verbs(): i64 {
     assert_eq(ilist_find_kw_nth(load64(&head), kw, kwl, 4), 0, "past the end → nothing");
     assert_eq(ilist_find_kw_nth(load64(&head), kw, kwl, 0), 0, "a zero ordinal → nothing");
     assert_eq(ilist_find_kw(load64(&head), kw, kwl), o3,
-              "the unqualified lookup is still first-match");
+      "the unqualified lookup is still first-match");
 
     # End to end through a real command: drop 2.<kw> must move the SECOND one
     # and leave the other two carried.
@@ -2138,7 +2138,7 @@ fn test_item_verbs(): i64 {
     assert_eq(_on_ilist(taker + SS_INV, gift), 1, "give moved the item to the recipient");
     assert_eq(_on_ilist(giver + SS_INV, gift), 0, "and out of the giver's hands");
     assert_eq(_contains(load64(taker + SS_TX_BUF), load64(taker + SS_TX_LEN), "gives you"), 1,
-              "the recipient is told, in the same tick");
+      "the recipient is told, in the same tick");
 
     # No such player in the room: the item must not evaporate.
     var keep = item_new(ot_at(0));
@@ -2171,14 +2171,14 @@ fn test_item_verbs(): i64 {
     parser_parse(pa, cmd, co);
     cmd_dispatch(s, pa, cmd, co);
     assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "arrive at M3"), 0,
-              "wear no longer claims the world is empty");
+      "wear no longer claims the world is empty");
     assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "rig to hold it"), 1,
-              "it says why it cannot, instead");
+      "it says why it cannot, instead");
     _tx_reset(s);
     parse_lit(pa, "wield sporkgun");
     cmd_dispatch(s, pa, "wield sporkgun", 14);
     assert_eq(_tx_is(s, "You aren't carrying that.\r\n"), 1,
-              "and it resolves the noun for real before answering");
+      "and it resolves the noun for real before answering");
     _drain_ilist(s + SS_INV);
 
     # --- B1, the other half: mobs. `kill 2.drone` went through a separate scan
@@ -2212,7 +2212,7 @@ fn test_item_verbs(): i64 {
         parser_parse(pa, cmd, co);
         cmd_examine(s, pa);
         assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "You see no"), 0,
-                  "examine 3.<kw> resolves rather than failing to find it");
+          "examine 3.<kw> resolves rather than failing to find it");
 
         store64(s + SS_TARGET, 0);
         mob_remove(k1); mob_remove(k2); mob_remove(k3);
@@ -2292,14 +2292,14 @@ fn test_reset_bounds(): i64 {
     var saved_rooms = g_room_count;
 
     assert_eq(world_load_rooms("tests/fixtures/badreset.rooms.cyml"), WL_OK,
-              "the negative-cadence fixture still loads (ADR 0007 §5 — no new rejections)");
+      "the negative-cadence fixture still loads (ADR 0007 §5 — no new rejections)");
     assert_eq(g_zone_reset_secs, RESET_SECS_MIN,
-              "an authored reset_secs = -1 is clamped to the floor");
+      "an authored reset_secs = -1 is clamped to the floor");
 
     assert_eq(world_load_rooms("tests/fixtures/zeroreset.rooms.cyml"), WL_OK,
-              "the zero-cadence fixture still loads");
+      "the zero-cadence fixture still loads");
     assert_eq(g_zone_reset_secs, RESET_SECS_MIN,
-              "an authored reset_secs = 0 is clamped to the floor");
+      "an authored reset_secs = 0 is clamped to the floor");
 
     # And an ordinary zone is untouched — the clamp must be invisible to every
     # file that was already correct.
@@ -2316,7 +2316,7 @@ fn test_reset_bounds(): i64 {
     g_zone_reset_secs = 0 - 1;                # the poisoned value
     g_zone_last_reset_ms = clock_now_ms();
     assert_eq(maybe_zone_reset(), 0,
-              "a negative cadence does not fire a reset on the very next tick");
+      "a negative cadence does not fire a reset on the very next tick");
     g_zone_reset_secs = 0;
     g_zone_last_reset_ms = clock_now_ms();
     assert_eq(maybe_zone_reset(), 0, "and neither does a zero cadence");
@@ -2382,7 +2382,7 @@ fn test_tick_schedule(): i64 {
     # double-counting, since an overrun already shows up as the next tick's
     # lateness. tick_step recorded `now - next_tick` = 0 - 0 = 0 above.
     assert_eq(load64(g_tick_drift_ring + ((g_tick_drift_idx + DRIFT_RING_CAP - 1) % DRIFT_RING_CAP) * 8), 0,
-              "drift is the pre-work lateness (0 here), not the tick's duration");
+      "drift is the pre-work lateness (0 here), not the tick's duration");
 
     return 0;
 }
@@ -2504,7 +2504,7 @@ fn test_tick_coalescing(): i64 {
     var n = file_read_all(path, buf, cap);
     assert(n > 0, "the sink captured the tick's output");
     assert_eq(_count_occurrences(buf, n, "[ hp "), E,
-              "every session's own condition line survived the tick");
+      "every session's own condition line survived the tick");
 
     # --- The SOLO combatant, driven through the real advance_tick.
     #
@@ -2543,7 +2543,7 @@ fn test_tick_coalescing(): i64 {
     var sn = file_read_all(solo_path, buf, cap);
     assert(sn > 0, "a solo combatant's round reaches the socket inside advance_tick");
     assert_eq(_count_occurrences(buf, sn, "[ hp "), 1,
-              "with nobody else in the room to mark them dirty");
+      "with nobody else in the room to mark them dirty");
     return 0;
 }
 
@@ -2592,7 +2592,7 @@ fn test_tx_compaction(): i64 {
     var left = want - sent;
     assert_eq(load64(s + SS_TX_LEN), left, "the queue is now just the unsent remainder");
     assert_eq(load64(s + SS_TX_OFF), 0,
-              "a partial drain compacts to offset 0 instead of parking dead space at the front");
+      "a partial drain compacts to offset 0 instead of parking dead space at the front");
     # Content, not just offsets: memcpy in the wrong direction would leave these
     # lengths looking right and the bytes garbled.
     var buf = load64(s + SS_TX_BUF);
@@ -2639,13 +2639,13 @@ fn test_save_meter(): i64 {
 
     store64(s + SS_SAVE_DIRTY, 1);
     assert_eq(save_sweep_due(s, settled), 1,
-              "a dirty session that has never saved is due immediately");
+      "a dirty session that has never saved is due immediately");
     # THE regression. SS_LAST_SAVE_MS == 0 is a sentinel, not a timestamp to do
     # arithmetic on: `now - 0 >= SAVE_SWEEP_MIN_MS` is a statement about how long
     # the MACHINE has been up. Relying on it meant every character created in the
     # first five minutes of uptime silently skipped the autosave.
     assert_eq(save_sweep_due(s, uptime), 1,
-              "and still due when the host booted a second ago");
+      "and still due when the host booted a second ago");
     assert_eq(save_sweep_due(s, 0), 1, "the never-saved sentinel does not depend on the clock at all");
 
     store64(s + SS_LAST_SAVE_MS, settled);
@@ -2656,10 +2656,10 @@ fn test_save_meter(): i64 {
     # The two intervals must stay distinct: SAVE_MIN_INTERVAL_MS is the anti-burst
     # gate on the `save` verb, SAVE_SWEEP_MIN_MS is the autosave cadence.
     assert(SAVE_SWEEP_MIN_MS > SAVE_MIN_INTERVAL_MS,
-           "the sweep cadence is not the verb's rate limit");
+      "the sweep cadence is not the verb's rate limit");
     store64(s + SS_LAST_SAVE_MS, settled);
     assert_eq(save_sweep_due(s, settled + SAVE_MIN_INTERVAL_MS + 1), 0,
-              "the verb's interval is far too short to make the sweep fire");
+      "the verb's interval is far too short to make the sweep fire");
 
     # --- The batch cap. This is the whole point: an unmetered sweep signed every
     # dirty session in one tick — measured at 332 ms with 256 of them, 664% of
@@ -2682,7 +2682,7 @@ fn test_save_meter(): i64 {
         i = i + 1;
     }
     assert_eq(save_sweep(), SAVE_BATCH_MAX,
-              "the sweep stops at the batch cap even with more sessions due");
+      "the sweep stops at the batch cap even with more sessions due");
 
     # And it is a cap per tick, not a cap forever — the sessions it skipped are
     # still due, so the backlog drains on following ticks rather than starving.
@@ -2721,7 +2721,7 @@ fn test_save_meter(): i64 {
         i = i + 1;
     }
     assert_eq(save_sweep(), SAVE_BATCH_MAX,
-              "sessions that are not due are walked past without spending budget");
+      "sessions that are not due are walked past without spending budget");
 
     g_session_head = saved_head;
     return 0;
@@ -2822,7 +2822,7 @@ fn test_hex_identity(): i64 {
     assert_eq(player_save(s), 1, "the character saves");
     var s2 = _mk_sess("HexHero", 7);
     assert_eq(player_auth_load(s2, "hexpassphrase", 13), 1,
-              "and the record still verifies under its own signature");
+      "and the record still verifies under its own signature");
     # --- F7: the idle reap is metered. drop_session's first act is a full
     # player_save (1.30 ms, 89% ed25519_sign), and H16 capped save_sweep at 4
     # per tick for exactly that reason — sweep_idle could do 256 of them in one
@@ -2860,7 +2860,7 @@ fn test_hex_identity(): i64 {
     }
     assert_eq(_sess_list_len(), n, "all of them are on the list");
     assert_eq(sweep_idle(0, g_idle_timeout_ms + 1000000), IDLE_REAP_MAX,
-              "one tick reaps at most IDLE_REAP_MAX sessions that COST a signature");
+      "one tick reaps at most IDLE_REAP_MAX sessions that COST a signature");
     assert_eq(_sess_list_len(), n - IDLE_REAP_MAX, "and the rest are still connected");
     # Not a stall — successive ticks drain the backlog.
     var guard = 0;
@@ -2889,7 +2889,7 @@ fn test_hex_identity(): i64 {
         u = u + 1;
     }
     assert_eq(sweep_idle(0, g_idle_timeout_ms + 1000000), IDLE_REAP_MAX * 3,
-              "unauthenticated idle sessions are ALL reaped in one tick, uncapped");
+      "unauthenticated idle sessions are ALL reaped in one tick, uncapped");
     assert_eq(_sess_list_len(), 0, "...leaving none of them holding a slot");
 
     # The predicate must be sampled BEFORE the teardown: `drop_session` calls
@@ -2904,7 +2904,7 @@ fn test_hex_identity(): i64 {
     assert(costly_at > 0, "sweep_idle samples the cost predicate");
     assert(reap_drop_at > 0, "...and tears the session down");
     assert(costly_at < reap_drop_at,
-           "...in that ORDER — reading it after session_free is a use-after-free");
+      "...in that ORDER — reading it after session_free is a use-after-free");
     g_session_head = rh;
 
     # --- F5: secret-key material is WIPED before it goes back to the freelist.
@@ -2979,14 +2979,14 @@ fn test_roomless_safety(): i64 {
     parse_lit(pa, "examine thing");
     cmd_examine(s, pa);
     assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "You see no"), 1,
-              "examine answers instead of dereferencing a room that does not exist");
+      "examine answers instead of dereferencing a room that does not exist");
 
     # `examine me` must still work with no zone — it needs no room at all.
     _tx_reset(s);
     parse_lit(pa, "examine me");
     cmd_examine(s, pa);
     assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "You are"), 1,
-              "and the character sheet still renders without a world");
+      "and the character sheet still renders without a world");
 
     # A CARRIED object is still examinable without a room: the guard covers the
     # room lookup only, not the whole command.
@@ -3004,7 +3004,7 @@ fn test_roomless_safety(): i64 {
     parser_parse(pa, cmd, co);
     cmd_examine(s, pa);
     assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "You see no"), 0,
-              "an item in hand is examinable with no zone loaded");
+      "an item in hand is examinable with no zone loaded");
 
     g_room_count = saved_count;
     g_rooms = saved_rooms;
@@ -3150,7 +3150,7 @@ fn test_preauth_scale(): i64 {
     # Unbudgeted, all 40 sessions would each lose up to RX_MAX_LINES lines in one
     # tick — 320 lines. Budgeted, at most DRAIN_LINES_MAX move across the lot.
     assert(drained_bytes <= DRAIN_LINES_MAX * 3,
-           "the tick spent at most DRAIN_LINES_MAX lines across ALL sessions");
+      "the tick spent at most DRAIN_LINES_MAX lines across ALL sessions");
     # And it is not a stall: repeated ticks eventually clear the whole list.
     var guard = 0;
     while (after_total > 0) {
@@ -3248,7 +3248,7 @@ fn test_create_guards(): i64 {
     assert_eq(load64(s + SS_QUIT), 1, "and MAX_LOGIN_FAILS closes the creation session");
     assert_eq(load64(s + SS_AUTHED), 0, "a capped-out session is never sealed");
     assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "Too many failed"), 1,
-              "and it is told why");
+      "and it is told why");
 
     # A CORRECT confirm on a fresh session seals it and clears the counter, so
     # the cap cannot leak across a successful creation.
@@ -3287,10 +3287,10 @@ fn test_create_guards(): i64 {
     _tx_reset(rival);
     login_on_confirm(rival, "rivalphrase", 11);
     assert_eq(load64(rival + SS_AUTHED), 0,
-              "a second concurrent creation of the same name is refused");
+      "a second concurrent creation of the same name is refused");
     assert_eq(load64(rival + SS_QUIT), 1, "and the rival session is closed");
     assert_eq(_contains(load64(rival + SS_TX_BUF), load64(rival + SS_TX_LEN), "just taken"), 1,
-              "and told the name was taken, not silently overwritten");
+      "and told the name was taken, not silently overwritten");
     assert_eq(load64(ok + SS_AUTHED), 1, "the session that got there first is untouched");
 
     # The other half of the window: the first creator finished and DISCONNECTED
@@ -3302,7 +3302,7 @@ fn test_create_guards(): i64 {
     assert_eq(player_save(ok), 1, "the first creator's record reaches disk");
     g_session_head = 0;                        # ...and then they disconnect
     assert_eq(session_already_online("Createling", 10, 0), 0,
-              "no live session holds the name any more");
+      "no live session holds the name any more");
 
     var late = _mk_sess("Createling", 10);
     store64(late + SS_LINE_BUF, fl_alloc(LINE_CAP));
@@ -3317,7 +3317,7 @@ fn test_create_guards(): i64 {
     _tx_reset(late);
     login_on_confirm(late, "latephrase", 10);
     assert_eq(load64(late + SS_AUTHED), 0,
-              "a creation that would overwrite an existing record is refused");
+      "a creation that would overwrite an existing record is refused");
     assert_eq(load64(late + SS_QUIT), 1, "and that session is closed too");
 
     g_session_head = saved_head;
@@ -3373,7 +3373,7 @@ fn test_object_maxexist(): i64 {
     var authored = _obj_id_authored_count(p, idlen);
     assert(authored >= 1, "the id is authored somewhere");
     assert_eq(_obj_id_world_count(p, idlen), authored,
-              "a freshly-reset world holds exactly the authored count");
+      "a freshly-reset world holds exactly the authored count");
     assert_eq(zone_reset_objs(), 0, "and a second reset mints nothing");
 
     # --- The 1.6.7 driver: hide the instance inside a container, in its own
@@ -3402,9 +3402,9 @@ fn test_object_maxexist(): i64 {
     # top level. A scan that walks only oi_next therefore returns 0 here; one
     # that descends OI_CONTENTS returns 1. That difference is the whole bug.
     assert_eq(_obj_id_count_list(load64(slot), p, idlen), 1,
-              "the room count descends into containers to find the hidden instance");
+      "the room count descends into containers to find the hidden instance");
     assert_eq(_obj_id_world_count(p, idlen), authored,
-              "hiding an instance in a container does not make it vanish from the count");
+      "hiding an instance in a container does not make it vanish from the count");
     assert_eq(zone_reset_objs(), 0, "so the reset does NOT mint a duplicate");
 
     # --- The OTHER driver, and the one the world-wide ceiling exists for:
@@ -3453,7 +3453,7 @@ fn test_object_maxexist(): i64 {
         store64(holder + SS_NEXT, 0);
         g_session_head = holder;
         assert_eq(_obj_id_world_count(p, idlen), authored,
-                  "an item in a player's inventory still counts against the ceiling");
+          "an item in a player's inventory still counts against the ceiling");
         # Put it back so the world is left exactly as this group found it.
         ilist_remove(holder + SS_INV, carried);
         ilist_push(slot, carried);
@@ -3600,7 +3600,7 @@ fn test_tail_guards(): i64 {
     _tx_reset(s);
     session_appendtx_tok(s, pa, 0);
     assert_eq(_lone_iac_count(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN)), 0,
-              "an echoed token never puts a lone IAC on the wire");
+      "an echoed token never puts a lone IAC on the wire");
 
     # --- F6: a rejected load must unpublish, including on the pre-alloc paths
     # (missing file, empty, over cap) that sit above the old zeroing line.
@@ -3633,7 +3633,7 @@ fn test_tail_guards(): i64 {
     render_who(viewer);
     assert(load64(viewer + SS_TX_LEN) > 0, "render_who answers instead of dereferencing a bad index");
     assert_eq(_contains(load64(viewer + SS_TX_BUF), load64(viewer + SS_TX_LEN), "no one in-world"), 1,
-              "and an out-of-range session is not counted as in-world");
+      "and an out-of-range session is not counted as in-world");
     g_session_head = saved_head;
 
     # --- F9: class stats are clamped where a character is MADE, matching the
@@ -3694,9 +3694,9 @@ fn test_tail_guards(): i64 {
             g_session_head = kh;
             assert_eq(killed, 1, "the mob died within 60 rounds (a natural 1 only misses)");
             assert_eq(_contains(load64(ks + SS_TX_BUF), load64(ks + SS_TX_LEN), "[ hp "), 1,
-                      "and the killing blow still prints the condition line");
+              "and the killing blow still prints the condition line");
             assert_eq(_contains(load64(ks + SS_TX_BUF), load64(ks + SS_TX_LEN), "> "), 1,
-                      "and the prompt");
+              "and the prompt");
             store64(ks + SS_TARGET, 0);
             _drain_ilist(room_at(0) + RM_OBJ_HEAD);   # the corpse it left
         }
@@ -3826,18 +3826,18 @@ fn test_event_budget(): i64 {
     # after servicing 16 sessions at a full slice each, i.e. the very thing the
     # budget exists to prevent. This is the assertion that sees that.
     assert_eq(served, EVENT_LINES_MAX / RX_MAX_LINES,
-              "and services exactly budget/slice sessions, not one per unit of budget");
+      "and services exactly budget/slice sessions, not one per unit of budget");
     assert(served < MAX_EPOLL_EVENTS,
-           "far short of MAX_EPOLL_EVENTS sessions each having had a full slice");
+      "far short of MAX_EPOLL_EVENTS sessions each having had a full slice");
     # The number that matters: unbudgeted, one pass was MAX_EPOLL_EVENTS x
     # RX_MAX_LINES = 512 lines. Budgeted it is EVENT_LINES_MAX = 16 — a 32x
     # reduction in the worst-case cost of a single event-loop pass. Asserted as
     # "at least 8x" so tuning either constant does not turn this into a flake,
     # with the exact ratio pinned separately.
     assert(spent * 8 <= MAX_EPOLL_EVENTS * RX_MAX_LINES,
-           "a bounded pass costs at most an eighth of the unbounded one");
+      "a bounded pass costs at most an eighth of the unbounded one");
     assert_eq((MAX_EPOLL_EVENTS * RX_MAX_LINES) / spent, 32,
-              "and on today's constants exactly a 32x reduction");
+      "and on today's constants exactly a 32x reduction");
 
     return 0;
 }
@@ -3876,7 +3876,7 @@ fn test_passwd_meter(): i64 {
     assert_eq(load64(s + SS_PHASE), PHASE_CMD, "the cap abandons the re-key");
     assert_eq(load64(s + SS_FAILS), 0, "and clears the counter for the next invocation");
     assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "UNCHANGED"), 1,
-              "telling the player their passphrase is untouched");
+      "telling the player their passphrase is untouched");
     # An authenticated player is NOT disconnected — they can type `passwd` again.
     # That still bounds the work per invocation, which is the point.
     assert_eq(load64(s + SS_QUIT), 0, "a fumbling player is not thrown off the server");
@@ -3932,15 +3932,15 @@ fn test_passwd_meter(): i64 {
     # first attempt instead of only from the fifth, and the rollup's count is the
     # true attempt total rather than a count of sessions that reached the cap.
     assert_eq(mid - before, 1,
-              "the FIRST failed creation attempt is durable — a flood is visible immediately");
+      "the FIRST failed creation attempt is durable — a flood is visible immediately");
     login_on_confirm(cs, "wrongphrase", 11);           # the fifth trips the cap
     assert_eq(load64(cs + SS_QUIT), 1, "the cap fired");
     assert_eq(g_audit_emitted - mid, 0,
-              "...and the attempts after it are TALLIED, not written — the arena cost is flat");
+      "...and the attempts after it are TALLIED, not written — the arena cost is flat");
     # The count is not lost: it is carried by the rollup, which is the whole point
     # of taking G3's trade back.
     assert(load64(_audit_slot(AK_CREATE_FAIL) + AKE_SUPP) > 0,
-           "the suppressed attempts are counted for the rollup to report");
+      "the suppressed attempts are counted for the rollup to report");
 
     # The SAME assertion on the returning-player path. Covering one of two
     # symmetric paths is precisely the mistake this release exists to correct —
@@ -3970,11 +3970,11 @@ fn test_passwd_meter(): i64 {
         k = k + 1;
     }
     assert_eq(g_audit_emitted - lbase, 0,
-              "four wrong passphrases write NO durable audit entries either");
+      "four wrong passphrases write NO durable audit entries either");
     login_on_pass(lp, "wrongphrase", 11);
     assert_eq(load64(lp + SS_QUIT), 1, "the login cap fired");
     assert_eq(g_audit_emitted - lbase, 1,
-              "and it writes exactly one entry at the cap — the assertion the byte delta could not make");
+      "and it writes exactly one entry at the cap — the assertion the byte delta could not make");
 
     return 0;
 }
@@ -3999,7 +3999,7 @@ fn test_carry_cap(): i64 {
     _tx_reset(s);
     assert_eq(inv_full(s), 1, "and reports full at the cap");
     assert_eq(_contains(load64(s + SS_TX_BUF), load64(s + SS_TX_LEN), "full"), 1,
-              "telling the player, which is the whole point — the old failure was silent");
+      "telling the player, which is the whole point — the old failure was silent");
 
     # --- `get` refuses at the cap rather than overfilling.
     var room_slot = room_at(0) + RM_OBJ_HEAD;
@@ -4051,8 +4051,8 @@ fn test_carry_cap(): i64 {
     while (i < MAX_INV) {
         var w = item_new(ot_at(0));
         store64(w + OI_TPL_ID_LEN,
-                copy_bytes_capped(w + OI_TPL_ID, OI_TPL_ID_CAP - 1,
-                                  "abcdefghijklmnopqrstuvwxyz01234", 31));
+          copy_bytes_capped(w + OI_TPL_ID, OI_TPL_ID_CAP - 1,
+            "abcdefghijklmnopqrstuvwxyz01234", 31));
         ilist_push(s + SS_INV, w);
         i = i + 1;
     }
@@ -4065,8 +4065,8 @@ fn test_carry_cap(): i64 {
     while (i < 60) {
         var x = item_new(ot_at(0));
         store64(x + OI_TPL_ID_LEN,
-                copy_bytes_capped(x + OI_TPL_ID, OI_TPL_ID_CAP - 1,
-                                  "abcdefghijklmnopqrstuvwxyz01234", 31));
+          copy_bytes_capped(x + OI_TPL_ID, OI_TPL_ID_CAP - 1,
+            "abcdefghijklmnopqrstuvwxyz01234", 31));
         ilist_push(s + SS_INV, x);
         i = i + 1;
     }
@@ -4100,7 +4100,7 @@ fn test_carry_cap(): i64 {
     assert_eq(inv_count(taker), MAX_INV, "give does not push the recipient past the cap");
     assert_eq(_on_ilist(giver + SS_INV, gift), 1, "the gift stays with the giver");
     assert_eq(_contains(load64(giver + SS_TX_BUF), load64(giver + SS_TX_LEN), "can't carry"), 1,
-              "and the giver is told why");
+      "and the giver is told why");
     g_session_head = gh;
     _drain_ilist(giver + SS_INV);
     _drain_ilist(taker + SS_INV);
@@ -4174,7 +4174,7 @@ fn test_account_cap(): i64 {
     assert_eq(accounts_full(0, 0), 0, "a cap of 0 means unlimited");
     assert_eq(accounts_full(999999, 0), 0, "...at any count whatsoever");
     assert_eq(accounts_full(999999, 0 - 1), 0,
-              "a negative cap is unlimited too, not inverted into 'always full'");
+      "a negative cap is unlimited too, not inverted into 'always full'");
 
     # --- A real cap is a boundary, and the boundary is 'at or above'.
     assert_eq(accounts_full(2499, 2500), 0, "one under the cap admits a new character");
@@ -4210,7 +4210,7 @@ fn test_account_cap(): i64 {
     store64(c1 + SS_AUTHED, 1);
     assert_eq(player_save(c1), 1, "a sharded record is written");
     assert_eq(accounts_count_disk(), base + 1,
-              "a record in a SHARD DIRECTORY is counted — the whole point of the fix");
+      "a record in a SHARD DIRECTORY is counted — the whole point of the fix");
 
     # A second record under a DIFFERENT shard letter, so the count cannot be
     # passing by accident on a single directory.
@@ -4224,7 +4224,7 @@ fn test_account_cap(): i64 {
     store64(c2 + SS_AUTHED, 1);
     assert_eq(player_save(c2), 1, "a record under another shard letter is written");
     assert_eq(accounts_count_disk(), base + 2,
-              "...and records across DIFFERENT shards are both counted");
+      "...and records across DIFFERENT shards are both counted");
 
     # A legacy flat record counts too — both layouts are live during migration.
     var rec = alloc(SLURP_CAP);
@@ -4234,7 +4234,7 @@ fn test_account_cap(): i64 {
     _path_for_flat("Legacycount", 11, g_persist_path);
     assert(file_write_all(g_persist_path, rec, rn2) >= 0, "a legacy flat record is planted");
     assert_eq(accounts_count_disk(), base + 3,
-              "a LEGACY flat record is counted as well — both layouts are live");
+      "a LEGACY flat record is counted as well — both layouts are live");
     syscall(87, g_persist_path);
 
     # And a shard DIRECTORY is not itself an account.
@@ -4242,13 +4242,13 @@ fn test_account_cap(): i64 {
     _player_unlink("Countaa", 7);
     _player_unlink("Zountaa", 7);
     assert_eq(accounts_count_disk(), base,
-              "...and the count returns to where it started — directories are not accounts");
+      "...and the count returns to where it started — directories are not accounts");
 
     # --- The config file. An absent file must leave the default alone, because
     # every existing deployment has no such file and must behave as 1.7.1 did.
     g_max_accounts = 0;
     assert_eq(config_load("data/does-not-exist-server.cyml"), 0,
-              "an absent config file is not an error");
+      "an absent config file is not an error");
     assert_eq(g_max_accounts, 0, "...and leaves the default untouched");
 
     # A real file is read from the document PREAMBLE, so the operator's config is
@@ -4261,7 +4261,7 @@ fn test_account_cap(): i64 {
     assert_eq(config_load("tests/fixtures/server-bad.cyml"), 1, "a malformed config still parses");
     assert_eq(g_max_accounts, 0, "...and a bad max_accounts falls back to UNLIMITED, not to 0 slots");
     assert_eq(accounts_full(999999, g_max_accounts), 0,
-              "so a typo cannot refuse every new character");
+      "so a typo cannot refuse every new character");
 
     # A NEGATIVE value specifically. The first version of this group used a
     # non-numeric value, which toml_int turns into the default before the clamp is
@@ -4292,7 +4292,7 @@ fn test_account_cap(): i64 {
     login_on_confirm(cap_s, "cappedphrase", 12);
     assert_eq(load64(cap_s + SS_QUIT), 1, "a correct confirm at the cap is REFUSED");
     assert(load64(cap_s + SS_PHASE) != PHASE_CLASS,
-           "...and the session never reaches class selection");
+      "...and the session never reaches class selection");
     assert_eq(g_account_count, 1, "...and no account was counted");
     assert_eq(player_exists("Capped", 6), 0, "...and no record was written");
 
@@ -4314,7 +4314,7 @@ fn test_account_cap(): i64 {
     # before the record exists is a slot a peer burns forever by hanging up at the
     # class menu. Measured at 436 slots/s, unauthenticated, with no records written.
     assert_eq(g_account_count, 0,
-              "sealing an identity does NOT count an account — no record exists yet");
+      "sealing an identity does NOT count an account — no record exists yet");
     _tx_reset(ok_s);
     login_on_class(ok_s, "1", 1);
     assert_eq(load64(ok_s + SS_PHASE), PHASE_CMD, "...choosing a class completes creation");
@@ -4339,7 +4339,7 @@ fn test_account_cap(): i64 {
         ai = ai + 1;
     }
     assert_eq(g_account_count, before_ab,
-              "THE ASSERTION AL EXISTS FOR: 25 abandoned creations burn ZERO account slots");
+      "THE ASSERTION AL EXISTS FOR: 25 abandoned creations burn ZERO account slots");
     assert_eq(player_exists("Abandon", 7), 0, "...and leave no record behind");
     _player_unlink("Abandon", 7);
 
@@ -4414,7 +4414,7 @@ fn test_room_listing_bounds(): i64 {
     # THE ASSERTION THIS GROUP EXISTS FOR. The old failure ended mid-escape with
     # the prompt discarded; a player was left with colour bleeding and no prompt.
     assert(_contains(tx, n, "> ") == 1,
-           "the PROMPT reaches the client — the failure this release fixes");
+      "the PROMPT reaches the client — the failure this release fixes");
 
     # And the stream does not end inside an escape sequence. ESC is 27; a
     # well-formed tail cannot have one in the last two bytes with no terminator.
@@ -4427,7 +4427,7 @@ fn test_room_listing_bounds(): i64 {
     # fewer things than are present — that is how a player walks past what they
     # came for.
     assert_eq(_contains(tx, n, "more items lie here."), 1,
-              "...and it says how many items it did not list");
+      "...and it says how many items it did not list");
 
     # --- With a small floor nothing is omitted and no summary appears.
     _drain_ilist(slot);
@@ -4438,7 +4438,7 @@ fn test_room_listing_bounds(): i64 {
     cmd_on_line(s, "look", 4);
     tx = load64(s + SS_TX_BUF); n = load64(s + SS_TX_LEN);
     assert_eq(_contains(tx, n, "more items lie here."), 0,
-              "a normal room gets no truncation notice");
+      "a normal room gets no truncation notice");
     assert_eq(_contains(tx, n, "> "), 1, "...and still gets its prompt");
     assert(n < TX_CAP, "...well inside the buffer");
 
@@ -4475,7 +4475,7 @@ fn test_ground_decay(): i64 {
     var expect = clamp_reset_secs(g_zone_reset_secs) * 1000 * GROUND_RESET_MULT / 2500;
     assert_eq(ground_decay_ticks(), expect, "the threshold is two reset intervals in ticks");
     assert_eq(ground_decay_ticks(), 720,
-              "...which at the authored 900 s cadence is 720 ticks — 30 minutes");
+      "...which at the authored 900 s cadence is 720 ticks — 30 minutes");
 
     # An operator override drives it too.
     # Above GROUND_TICKS_MIN, so this tests the DERIVATION rather than the floor —
@@ -4483,16 +4483,16 @@ fn test_ground_decay(): i64 {
     # this assertion silently about the clamp instead.
     g_reset_secs_override = 300;
     assert_eq(ground_decay_ticks(), 300 * 1000 * GROUND_RESET_MULT / 2500,
-              "YD_RESET_SECS drives ground decay as well as the reset itself");
+      "YD_RESET_SECS drives ground decay as well as the reset itself");
     assert(ground_decay_ticks() > GROUND_TICKS_MIN, "...and that value is above the floor");
 
     # And it is FLOORED. A zone authored `reset_secs = 1` would otherwise reclaim
     # a dropped item inside a second, which is a handoff nobody can complete.
     g_reset_secs_override = 1;
     assert_eq(ground_decay_ticks(), GROUND_TICKS_MIN,
-              "an absurdly fast zone still leaves time to pick something up");
+      "an absurdly fast zone still leaves time to pick something up");
     assert(GROUND_TICKS_MIN >= CORPSE_TICKS,
-           "...and a dropped item never expires faster than a corpse");
+      "...and a dropped item never expires faster than a corpse");
     g_reset_secs_override = saved_override;
 
     # --- ARMING. Authored zone furniture is minted at OI_AGE 0 and must NEVER
@@ -4518,7 +4518,7 @@ fn test_ground_decay(): i64 {
     while (k < GROUND_TICKS_MIN + 2) { corpse_decay_sweep(); k = k + 1; }
     assert_eq(_on_ilist(slot, dropped), 0, "the dropped item is reclaimed past its lifetime");
     assert_eq(_on_ilist(slot, furniture), 1,
-              "...and the zone's own furniture is UNTOUCHED, however long it sits");
+      "...and the zone's own furniture is UNTOUCHED, however long it sits");
     assert_eq(g_obj_live, live0 + 1, "exactly one instance was freed");
 
     # --- Re-arming restarts the clock: passing something hand to hand must not
@@ -4534,7 +4534,7 @@ fn test_ground_decay(): i64 {
     k = 0;
     while (k < 20) { corpse_decay_sweep(); k = k + 1; }
     assert_eq(_on_ilist(slot, relay), 1,
-              "...so it survives past where the ORIGINAL clock would have expired");
+      "...so it survives past where the ORIGINAL clock would have expired");
 
     # Retire the relay before the next section. It is still ARMED, so it would
     # expire during the bag's sweep and be counted as one of the bag's contents —
@@ -4553,7 +4553,7 @@ fn test_ground_decay(): i64 {
     while (k < GROUND_TICKS_MIN + 2) { corpse_decay_sweep(); k = k + 1; }
     assert_eq(_on_ilist(slot, bag), 0, "a dropped bag decays");
     assert_eq(g_obj_live, live_bag - 5,
-              "...and takes its four contents with it, so nothing is orphaned");
+      "...and takes its four contents with it, so nothing is orphaned");
 
     # --- ground_arm refuses a corpse, asserted DIRECTLY.
     #
@@ -4567,7 +4567,7 @@ fn test_ground_decay(): i64 {
     store64(body + OI_AGE, 7);
     ground_arm(body);
     assert_eq(load64(body + OI_AGE), 7,
-              "arming a CORPSE is refused — its own shorter clock is untouched");
+      "arming a CORPSE is refused — its own shorter clock is untouched");
     obj_free(body);
 
     # --- Cleanup.
@@ -4655,11 +4655,11 @@ fn test_audit_rotation(): i64 {
     var ln = file_read_all(DP_AUDIT, livebuf, SLURP_CAP - 1);
     assert(ln > 0, "the live log was recreated by the first append");
     assert(_find_cstr(livebuf, ln, "audit.rotate") >= 0,
-           "the new live file opens with an audit.rotate marker");
+      "the new live file opens with an audit.rotate marker");
     # The marker names the segment AND carries its head hash: a marker naming a
     # file with no hash attests nothing.
     assert(_find_cstr(livebuf, ln, "details") >= 0,
-           "...and the marker carries a details field");
+      "...and the marker carries a details field");
     # The marker names the segment AND its head hash. Checking for the hash text
     # is the assertion that matters: a marker naming a file with no hash attests
     # nothing, which is exactly what pruning-before-reading would produce.
@@ -4673,7 +4673,7 @@ fn test_audit_rotation(): i64 {
     memcpy(want + wo, tail, tlen);
     store8(want + wo + tlen, 0);
     assert(_find_cstr(livebuf, ln, want) >= 0,
-           "...and the marker itself names the segment AND its head hash");
+      "...and the marker itself names the segment AND its head hash");
 
     # --- THE CRASH WINDOW. Rename, then die before the first append. A boot must
     # resume from the newest SEGMENT, not restart at genesis.
@@ -4683,7 +4683,7 @@ fn test_audit_rotation(): i64 {
     _audit_resume_head();
     var resumed = chain_prev_hash(g_audit_chain);
     assert(resumed != 0,
-           "with the live file GONE, the head resumes from the newest segment");
+      "with the live file GONE, the head resumes from the newest segment");
     assert(str_len(resumed) > 0, "...with a real hash, not an empty string");
 
     # --- Prune: the segment falling out of the keep window is attested, then
@@ -4705,7 +4705,7 @@ fn test_audit_rotation(): i64 {
     assert_eq(file_exists(sp), 0, "...and is gone from disk");
     var pl = file_read_all(DP_AUDIT, livebuf, SLURP_CAP - 1);
     assert(_find_cstr(livebuf, pl, "audit.prune") >= 0,
-           "...with the deletion attested in the surviving chain");
+      "...with the deletion attested in the surviving chain");
     # THE ORDERING GUARD. The marker must carry the victim's hash, which is only
     # possible if it was read BEFORE the unlink. Asserting the marker merely
     # exists does not catch unlink-first — the entry is still written, it just
@@ -4715,7 +4715,7 @@ fn test_audit_rotation(): i64 {
     memcpy(pwant + pwo, vhash, vlen);
     store8(pwant + pwo + vlen, 0);
     assert(_find_cstr(livebuf, pl, pwant) >= 0,
-           "...and the attestation carries the deleted segment's HASH, so it was read first");
+      "...and the attestation carries the deleted segment's HASH, so it was read first");
 
     # A victim that does not exist is a no-op, not an error — pruning is
     # self-correcting if an operator removed a file by hand.
@@ -4779,20 +4779,20 @@ fn test_save_backoff(): i64 {
     store64(s + SS_LAST_SAVE_TRY_MS, 10000);
     assert_eq(save_sweep_due(s, 10000), 0, "an attempt just now is not retried immediately");
     assert_eq(save_sweep_due(s, 10000 + SAVE_RETRY_MIN_MS - 1), 0,
-              "...nor one millisecond inside the backoff");
+      "...nor one millisecond inside the backoff");
     assert_eq(save_sweep_due(s, 10000 + SAVE_RETRY_MIN_MS), 1,
-              "...and is retried once the backoff has passed");
+      "...and is retried once the backoff has passed");
 
     # Clean sessions are still never due, backoff or not.
     store64(s + SS_SAVE_DIRTY, 0);
     assert_eq(save_sweep_due(s, 10000 + SAVE_RETRY_MIN_MS), 0,
-              "a session with nothing to save is never due");
+      "a session with nothing to save is never due");
     store64(s + SS_SAVE_DIRTY, 1);
 
     # The retry gap is deliberately shorter than the autosave cadence: a transient
     # failure should recover in seconds, not in five minutes.
     assert(SAVE_RETRY_MIN_MS < SAVE_SWEEP_MIN_MS,
-           "the retry backoff is shorter than the autosave interval");
+      "the retry backoff is shorter than the autosave interval");
 
     # --- The real writer stamps the attempt even when it FAILS. Drive an actual
     # failure: an unwritable path. Without the stamp the session is due again on
@@ -4815,7 +4815,7 @@ fn test_save_backoff(): i64 {
     DP_PLAYERS_S = saved_dir;
     assert_eq(rc, 0 - 1, "the save really did fail");
     assert(load64(s + SS_LAST_SAVE_TRY_MS) != 0,
-           "a FAILED save still stamps the attempt, so the retry backs off");
+      "a FAILED save still stamps the attempt, so the retry backs off");
     assert_eq(load64(s + SS_SAVE_DIRTY), 1, "...and the session stays dirty, so nothing is lost");
 
     session_free(s);
@@ -4860,7 +4860,7 @@ fn test_legacy_guards(): i64 {
         i = i + 1;
     }
     assert_eq(still, 0,
-              "the secret key is WIPED before the block returns to the freelist");
+      "the secret key is WIPED before the block returns to the freelist");
     session_free(s);
 
     # --- G: the double-login refusal, asserted AT ITS CALL SITE. The predicate
@@ -4904,18 +4904,18 @@ fn test_legacy_guards(): i64 {
     # anything authed — so the duplicate wrote its load-time snapshot over
     # everything the live session had done since.
     assert_eq(load64(second + SS_QUIT), 1,
-              "a SECOND login to a character already online is REFUSED");
+      "a SECOND login to a character already online is REFUSED");
     assert_eq(load64(second + SS_AUTHED), 0,
-              "...and DISOWNS the record — it was never granted the session");
+      "...and DISOWNS the record — it was never granted the session");
     assert_eq(session_persistable(second), 0,
-              "...so nothing on the way out will save it");
+      "...so nothing on the way out will save it");
     assert(load64(second + SS_PHASE) != PHASE_CMD,
-           "...and never reaches the command prompt");
+      "...and never reaches the command prompt");
     assert_eq(load64(first + SS_QUIT), 0,
-              "...while the session that got there first is untouched");
+      "...while the session that got there first is untouched");
     assert_eq(_contains(load64(second + SS_TX_BUF), load64(second + SS_TX_LEN),
-                        "already connected"), 1,
-              "...and the second session is told why");
+        "already connected"), 1,
+      "...and the second session is told why");
 
     # --- AE END TO END: the victim's progress must survive the duplicate's
     # teardown. The window is not hypothetical — on the retained-line path the
@@ -4935,7 +4935,7 @@ fn test_legacy_guards(): i64 {
     var check = _mk_sess("Twinned", 7);
     assert_eq(player_auth_load(check, "twinnedphrase", 13), 1, "the record still loads");
     assert_eq(load64(check + SS_HP), 99,
-              "THE ASSERTION AE EXISTS FOR: the duplicate's stale snapshot did NOT overwrite it");
+      "THE ASSERTION AE EXISTS FOR: the duplicate's stale snapshot did NOT overwrite it");
 
 
     # --- 1.7.12: the RECIPIENT of a gift is marked dirty. `cmd_on_line` flags only
@@ -4970,7 +4970,7 @@ fn test_legacy_guards(): i64 {
     cmd_on_line(gv, "give scrip to Receiver", 22);
     assert_eq(inv_count(rc), 1, "the gift really moved to the recipient");
     assert_eq(load64(rc + SS_SAVE_DIRTY), 1,
-              "...and the RECIPIENT is flagged dirty, not just the giver");
+      "...and the RECIPIENT is flagged dirty, not just the giver");
     g_session_head = ghead;
     _drain_ilist(rc + SS_INV); store64(rc + SS_INV, 0);
     _drain_ilist(gv + SS_INV); store64(gv + SS_INV, 0);
@@ -4991,11 +4991,11 @@ fn test_legacy_guards(): i64 {
     # presence check is not enough — it passes with either batch loop reverted,
     # which is precisely the state that shipped for eleven releases.
     assert_eq(_src_count("src/server.cyr", "charge_stop(charge_spent(), g_charge_cap, 0)"), 3,
-              "the teardown meter is consulted at ALL THREE drop sites, not just the first");
+      "the teardown meter is consulted at ALL THREE drop sites, not just the first");
     # Four re-arm sites: the two teardown arms above, drain_pending_rx's own
     # condemned arm, and its retained-bytes arm (server.cyr:535).
     assert_eq(_src_count("src/server.cyr", "g_rx_backlog = g_rx_backlog + 1;"), 4,
-              "...and each one re-arms the loop so the remainder is not stranded");
+      "...and each one re-arms the loop so the remainder is not stranded");
 
     g_session_head = gh;
     _player_unlink("Twinned", 7);
@@ -5016,12 +5016,12 @@ fn test_player_sharding(): i64 {
     # --- The path itself.
     _path_for("Shardy", 6, g_persist_path);
     assert(_find_cstr(g_persist_path, 40, "/s/shardy.cyml") >= 0,
-           "a record's path carries a one-character shard directory");
+      "a record's path carries a one-character shard directory");
     _path_for_flat("Shardy", 6, g_persist_path);
     assert(_find_cstr(g_persist_path, 40, "/shardy.cyml") >= 0,
-           "and the legacy builder still produces the flat path");
+      "and the legacy builder still produces the flat path");
     assert_eq(_find_cstr(g_persist_path, 40, "/s/shardy.cyml"), 0 - 1,
-              "...which is NOT the sharded one");
+      "...which is NOT the sharded one");
 
     # The length bound at the primitive. PATH_CAP sized the buffers and was
     # compared against nothing; an over-long name is now clamped rather than
@@ -5032,9 +5032,9 @@ fn test_player_sharding(): i64 {
     while (q < 4000) { store8(longnm + q, 97); q = q + 1; }
     var wrote = _path_for(longnm, 4000, g_persist_path);
     assert(wrote < PATH_CAP,
-           "an over-long name cannot write past the path buffer");
+      "an over-long name cannot write past the path buffer");
     assert(wrote <= strlen(DP_PLAYERS_S) + 2 + NAME_MAX + 5,
-           "...because the name is clamped to NAME_MAX");
+      "...because the name is clamped to NAME_MAX");
 
     # --- THE MIGRATION. Write a record the OLD way, then prove it still loads.
     _player_unlink("Legacyman", 9);
@@ -5063,22 +5063,22 @@ fn test_player_sharding(): i64 {
     # This is the assertion that matters: a player who has not logged in since
     # before 1.7.2 must still be found and must still authenticate.
     assert_eq(player_exists("Legacyman", 9), 1,
-              "a LEGACY flat record is still found — the name is still taken");
+      "a LEGACY flat record is still found — the name is still taken");
     var back = _mk_sess("Legacyman", 9);
     assert_eq(player_auth_load(back, "legacyphrase", 12), 1,
-              "...and still authenticates, so nobody is locked out by the layout change");
+      "...and still authenticates, so nobody is locked out by the layout change");
     assert_eq(load64(back + SS_HP), 21, "...with their state intact");
 
     # And saving migrates them, lazily, with no operator action.
     assert_eq(player_save(back), 1, "their next save succeeds");
     _path_for("Legacyman", 9, g_persist_path);
     assert(file_read_all(g_persist_path, rec, SLURP_CAP - 1) > 0,
-           "the record is now at the SHARDED path");
+      "the record is now at the SHARDED path");
     _path_for_flat("Legacyman", 9, g_persist_path);
     # file_read_all returns a NEGATIVE error for a missing file, not 0 — assert
     # "not readable" rather than pinning the exact errno.
     assert(file_read_all(g_persist_path, rec, SLURP_CAP - 1) <= 0,
-           "...and the legacy copy is retired, so it cannot go stale");
+      "...and the legacy copy is retired, so it cannot go stale");
 
     _player_unlink("Legacyman", 9);
 
@@ -5112,7 +5112,7 @@ fn test_player_sharding(): i64 {
     store64(zs + SS_HP, 13); store64(zs + SS_MAXHP, 13);
     store64(zs + SS_AUTHED, 1);
     assert_eq(player_save(zs), 1,
-              "a save into a shard directory that does not exist yet CREATES it and succeeds");
+      "a save into a shard directory that does not exist yet CREATES it and succeeds");
     assert_eq(player_exists("Zephyr", 6), 1, "...and the record is findable afterwards");
     var zback = _mk_sess("Zephyr", 6);
     assert_eq(player_auth_load(zback, "zephyrphrase", 12), 1, "...and loads back");
@@ -5161,7 +5161,7 @@ fn test_carry_cap_container(): i64 {
     # THE ASSERTION. Before 1.7.2 this read 1: the five items were invisible to
     # the cap because they had left SS_INV.
     assert_eq(inv_count(s), 6,
-              "items inside a carried container COUNT — the bag is not a loophole");
+      "items inside a carried container COUNT — the bag is not a loophole");
 
     # --- ...but the cap must not OVER-apply. Counting bag contents made
     # `get <x> from <my own bag>` fail at the cap, because the total is unchanged
@@ -5173,7 +5173,7 @@ fn test_carry_cap_container(): i64 {
     assert_eq(inv_owns_slot(s, bag + OI_CONTENTS), 1, "a bag you carry is yours");
     var loose = item_new(ot_at(0));
     assert_eq(inv_owns_slot(s, loose + OI_CONTENTS), 0,
-              "a container you are NOT carrying is not yours");
+      "a container you are NOT carrying is not yours");
     assert_eq(inv_owns_slot(s, 0), 0, "and a null slot is not yours");
 
     # Drive the real verb at the cap: taking from a carried bag must succeed.
@@ -5196,11 +5196,11 @@ fn test_carry_cap_container(): i64 {
     var before_top = _top_count(atcap);
     var before_all = inv_count(atcap);
     get_from(atcap, cbag + OI_CONTENTS, atcap + SS_INV, 0,
-             oi_kw_ptr(load64(cbag + OI_CONTENTS)), 1, 1, "in your bag");
+      oi_kw_ptr(load64(cbag + OI_CONTENTS)), 1, 1, "in your bag");
     assert_eq(_top_count(atcap), before_top + 1,
-              "taking from your OWN bag at the cap REALLY MOVES the item into your hands");
+      "taking from your OWN bag at the cap REALLY MOVES the item into your hands");
     assert_eq(inv_count(atcap), before_all,
-              "...and the total you carry is unchanged, which is why the cap must not apply");
+      "...and the total you carry is unchanged, which is why the cap must not apply");
     _drain_ilist(atcap + SS_INV);
     session_free(atcap);
 
@@ -5218,7 +5218,7 @@ fn test_carry_cap_container(): i64 {
     }
     assert(inv_count(full) > MAX_INV, "the fixture really is over the cap");
     assert_eq(inv_full(full), 1,
-              "a session whose bag is over the cap is FULL — acquisition is refused");
+      "a session whose bag is over the cap is FULL — acquisition is refused");
     _drain_ilist(full + SS_INV);
     session_free(full);
 
@@ -5263,7 +5263,7 @@ fn test_carry_cap_container(): i64 {
     cmd_give(bgiver, pa);
 
     assert_eq(inv_count(btaker), taker_before,
-              "a gift whose CONTENTS would breach the cap is refused whole");
+      "a gift whose CONTENTS would breach the cap is refused whole");
     assert_eq(_on_ilist(bgiver + SS_INV, fullbag), 1, "...and the bag stays with the giver");
     assert(inv_count(btaker) <= MAX_INV, "the recipient is never pushed past MAX_INV");
 
@@ -5277,7 +5277,7 @@ fn test_carry_cap_container(): i64 {
     parser_parse(pa, bcmd, bco);
     cmd_give(bgiver, pa);
     assert_eq(inv_count(btaker), taker_before + 1,
-              "a single item under the cap is still handed over");
+      "a single item under the cap is still handed over");
 
     g_session_head = ggh;
     _drain_ilist(bgiver + SS_INV);
@@ -5324,17 +5324,17 @@ fn test_carry_cap_container(): i64 {
     var pa0 = g_audit_emitted;
     audit_coalesce_reset();
     assert(_build_record(poison) > 0,
-           "a record whose bag overflows the byte budget is BUILT, not refused");
+      "a record whose bag overflows the byte budget is BUILT, not refused");
     assert_eq(player_save(poison), 1,
-              "...and it SAVES — the player keeps persisting, minus the overflow items");
+      "...and it SAVES — the player keeps persisting, minus the overflow items");
     assert(g_audit_emitted - pa0 > 0,
-           "and the truncation is audited, so an operator can see it happened");
+      "and the truncation is audited, so an operator can see it happened");
 
     # It is genuinely still loadable afterwards — a truncated record is only
     # useful if it round-trips.
     var back = _mk_sess("Hoarder", 7);
     assert_eq(player_auth_load(back, "hoarderpass", 11), 1,
-              "the truncated record loads back cleanly");
+      "the truncated record loads back cleanly");
     assert_eq(load64(back + SS_HP), 7, "...with the non-inventory fields intact");
     # NOT session_free'd: _mk_sess leaves SS_TS == 0 and session_free calls
     # telnet_state_free unconditionally, which dereferences null. The suite's
@@ -5369,7 +5369,7 @@ fn test_audit_coalesce(): i64 {
     # byte-identical to 1.7.0, which is what makes this safe to land.
     var e0 = g_audit_emitted;
     assert_eq(audit_keyed(AK_LOGIN_FAIL, SEV_WARNING, "login.fail", nm, 7, 1000), 1,
-              "the first occurrence of a key is written verbatim");
+      "the first occurrence of a key is written verbatim");
     assert_eq(g_audit_emitted - e0, 1, "...and it really is one durable entry");
 
     # --- Every later occurrence in the window writes NOTHING.
@@ -5403,7 +5403,7 @@ fn test_audit_coalesce(): i64 {
     var slot = _audit_slot(AK_CREATE_FAIL);
     assert_eq(load64(slot + AKE_SUPP), 3, "three occurrences tallied");
     assert_eq(load64(slot + AKE_NNAMES), 2,
-              "two DISTINCT names captured — a repeat name does not consume a slot");
+      "two DISTINCT names captured — a repeat name does not consume a slot");
 
     # A name flood cannot grow the table: names are bounded at AUDIT_NAMES_MAX and
     # the count keeps counting. Keying on the name instead would have handed the
@@ -5422,7 +5422,7 @@ fn test_audit_coalesce(): i64 {
     var dslot = _audit_slot(AK_CREATE_DUP);
     assert_eq(load64(dslot + AKE_SUPP), 50, "all 50 distinct-name occurrences are counted");
     assert_eq(load64(dslot + AKE_NNAMES), AUDIT_NAMES_MAX,
-              "...but the names captured are capped, so the table cannot grow");
+      "...but the names captured are capped, so the table cannot grow");
 
     # --- THE COUNT ARM, and it reads no clock. This is where the bound lives: on
     # AGNOS clock_now_ms is sys_uptime_ms and is documented FROZEN for a
@@ -5437,14 +5437,14 @@ fn test_audit_coalesce(): i64 {
         i = i + 1;
     }
     assert_eq(g_audit_rollups - r3, 1,
-              "with the clock FROZEN at 0, the count arm still reports — exactly once per 8192");
+      "with the clock FROZEN at 0, the count arm still reports — exactly once per 8192");
     assert_eq(g_audit_emitted - e3, 2,
-              "...one verbatim opener plus one rollup, for 8202 occurrences");
+      "...one verbatim opener plus one rollup, for 8202 occurrences");
     # The property that matters, stated as arithmetic: entries grow like N/8192,
     # not like N. 8202 occurrences that would have cost 8202 x 1944 = 15.9 MB now
     # cost two entries.
     assert(g_audit_emitted - e3 < (AUDIT_SUPPRESS_MAX + 10) / 100,
-           "a frozen-clock flood costs entries proportional to N/8192, not to N");
+      "a frozen-clock flood costs entries proportional to N/8192, not to N");
 
     # --- audit_flush_due lands the tail of a flood that STOPPED. Without it a
     # finished attack stays counted but unwritten until its key fires again, which
@@ -5453,11 +5453,11 @@ fn test_audit_coalesce(): i64 {
     audit_keyed(AK_LOAD_TAMPER, SEV_SECURITY, "load.tamper", nm, 7, 5000);
     audit_keyed(AK_LOAD_TAMPER, SEV_SECURITY, "load.tamper", nm, 7, 5001);
     assert_eq(audit_flush_due(5000 + AUDIT_WINDOW_MS - 1), 0,
-              "a window that has not expired is not flushed early");
+      "a window that has not expired is not flushed early");
     assert_eq(audit_flush_due(5000 + AUDIT_WINDOW_MS), 1,
-              "an expired window is flushed by the tick even though the key went quiet");
+      "an expired window is flushed by the tick even though the key went quiet");
     assert_eq(audit_flush_due(5000 + AUDIT_WINDOW_MS), 0,
-              "...and flushing is idempotent — nothing pending, nothing written");
+      "...and flushing is idempotent — nothing pending, nothing written");
 
     # --- audit_flush_all ignores the clock entirely, for shutdown.
     audit_coalesce_reset();
@@ -5470,9 +5470,9 @@ fn test_audit_coalesce(): i64 {
     # the table. A forgotten AK_NKEYS bump must degrade, not corrupt.
     var e4 = g_audit_emitted;
     assert_eq(audit_keyed(AK_NKEYS, SEV_INFO, "test.oob", nm, 7, 1), 1,
-              "an out-of-range key falls back to writing verbatim");
+      "an out-of-range key falls back to writing verbatim");
     assert_eq(audit_keyed(0 - 1, SEV_INFO, "test.neg", nm, 7, 1), 1,
-              "...and so does a negative one");
+      "...and so does a negative one");
     assert_eq(g_audit_emitted - e4, 2, "both wrote a durable entry rather than being lost");
 
     # --- Keys are independent: one hot key must not suppress another. A flood of
@@ -5485,18 +5485,18 @@ fn test_audit_coalesce(): i64 {
     }
     var e5 = g_audit_emitted;
     assert_eq(audit_keyed(AK_LOAD_TAMPER, SEV_SECURITY, "load.tamper", nm, 7, 7000), 1,
-              "a SECURITY event is written verbatim despite another key flooding");
+      "a SECURITY event is written verbatim despite another key flooding");
     assert_eq(g_audit_emitted - e5, 1, "...as its own durable entry");
 
     # --- The table is sized as the arithmetic says. If someone adds a key without
     # bumping AK_NKEYS, or changes AUDIT_NAMES_MAX without AKE_SIZE, this fails.
     assert_eq(AKE_SIZE, AKE_NAMES + AUDIT_NAMES_MAX * AKE_NSTRIDE,
-              "AKE_SIZE is exactly the header plus the name slots");
+      "AKE_SIZE is exactly the header plus the name slots");
     assert_eq(AKE_NSTRIDE, 8 + NAME_MAX, "a name slot is a length plus NAME_MAX bytes");
     assert(AUDIT_SUPPRESS_MAX > 6000,
-           "the count arm sits above the design flood's per-window count, so the clock arm governs there");
+      "the count arm sits above the design flood's per-window count, so the clock arm governs there");
     assert(1 + 20 + AUDIT_NAMES_MAX * (1 + NAME_MAX) <= AUDIT_DET_CAP,
-           "the worst-case rollup details fits the scratch buffer");
+      "the worst-case rollup details fits the scratch buffer");
 
     # --- 1.7.2: the count arm must NOT re-stamp the window.
     #
@@ -5515,11 +5515,11 @@ fn test_audit_coalesce(): i64 {
         w = w + 1;
     }
     assert_eq(load64(wslot + AKE_WOPEN), 1000,
-              "the count arm does NOT move the window's start — the clock arm stays due");
+      "the count arm does NOT move the window's start — the clock arm stays due");
     # And it really does still fire on schedule afterwards.
     var rr = g_audit_rollups;
     assert_eq(audit_flush_due(1000 + AUDIT_WINDOW_MS), 1,
-              "...so an expired window is still flushed after a count-arm burst");
+      "...so an expired window is still flushed after a count-arm burst");
     assert(g_audit_rollups > rr, "and that flush produced a rollup");
 
     # AUDIT_VERBATIM_MAX is READ by the code, not merely documented. Until 1.7.2
@@ -5530,7 +5530,7 @@ fn test_audit_coalesce(): i64 {
     audit_keyed(AK_SAVE, SEV_INFO, "save", nm, 7, 2000);
     audit_keyed(AK_SAVE, SEV_INFO, "save", nm, 7, 2001);
     assert_eq(g_audit_emitted - v0, AUDIT_VERBATIM_MAX,
-              "exactly AUDIT_VERBATIM_MAX occurrences are written verbatim per window");
+      "exactly AUDIT_VERBATIM_MAX occurrences are written verbatim per window");
 
     # --- ADR 0009's size seam. A pure boundary predicate, so the threshold is
     # testable without an 8 MiB file — and 1.7.2's rotation trigger calls the SAME
@@ -5605,7 +5605,7 @@ fn test_audit_verifiable(): i64 {
         i = i + 1;
     }
     assert_eq(bad, 0,
-              "both entries just written verify against their own recorded hash");
+      "both entries just written verify against their own recorded hash");
 
     # The adjacent-link check over the same tail — an entry can self-verify and
     # still break the chain, so both properties are asserted.
@@ -5613,7 +5613,7 @@ fn test_audit_verifiable(): i64 {
     i = n - 2;
     while (i < n) { vec_push(tail, vec_get(loaded, i)); i = i + 1; }
     assert_eq(verify_chain(tail, 1), 0,
-              "...and they link to each other, so the chain is intact across them");
+      "...and they link to each other, so the chain is intact across them");
 
     return 0;
 }
@@ -5636,31 +5636,31 @@ fn test_chpass_rate(): i64 {
     # --- The predicate, over its whole domain.
     store64(s + SS_LAST_CHPASS_MS, 0);
     assert_eq(chpass_rate_limited(s, 0), 0,
-              "a session that has never re-keyed is not limited, even at now == 0");
+      "a session that has never re-keyed is not limited, even at now == 0");
     assert_eq(chpass_rate_limited(s, 5), 0,
-              "...and not limited on a host that booted 5 ms ago either");
+      "...and not limited on a host that booted 5 ms ago either");
     # THE GUARD THAT MATTERS. clock_now_ms() is ms since BOOT, so without the
     # `last == 0` check `now - 0 < CHPASS_MIN_INTERVAL_MS` refuses the first
     # `passwd` on any server up for less than ten seconds. This is the exact bug
     # 1.6.8 found in save_sweep_due, and the reason it is asserted here rather
     # than trusted.
     assert_eq(chpass_rate_limited(s, CHPASS_MIN_INTERVAL_MS - 1), 0,
-              "never-re-keyed is not limited even inside the interval since boot");
+      "never-re-keyed is not limited even inside the interval since boot");
 
     store64(s + SS_LAST_CHPASS_MS, 1000);
     assert_eq(chpass_rate_limited(s, 1000), 1, "a re-key at the same instant is limited");
     assert_eq(chpass_rate_limited(s, 1000 + CHPASS_MIN_INTERVAL_MS - 1), 1,
-              "one ms inside the interval is still limited");
+      "one ms inside the interval is still limited");
     assert_eq(chpass_rate_limited(s, 1000 + CHPASS_MIN_INTERVAL_MS), 0,
-              "exactly at the interval is allowed — the bound is a minimum GAP");
+      "exactly at the interval is allowed — the bound is a minimum GAP");
     assert_eq(chpass_rate_limited(s, 1000 + CHPASS_MIN_INTERVAL_MS + 1), 0,
-              "and past it, allowed");
+      "and past it, allowed");
 
     # The rate is deliberately slower than the `save` gate, because a re-key is a
     # rare deliberate act and the line behind it is far dearer. If someone
     # collapses the two constants this fails.
     assert(CHPASS_MIN_INTERVAL_MS > SAVE_MIN_INTERVAL_MS,
-           "the re-key gate is slower than the anti-burst gate on `save`");
+      "the re-key gate is slower than the anti-burst gate on `save`");
 
     # --- The verb honours it, and stamps on the way through.
     store64(s + SS_LAST_CHPASS_MS, 0);
@@ -5675,7 +5675,7 @@ fn test_chpass_rate(): i64 {
     store64(s + SS_PHASE, PHASE_CMD);
     passwd_begin(s);
     assert_eq(load64(s + SS_PHASE), PHASE_CMD,
-              "a re-key inside the interval is refused and leaves the phase alone");
+      "a re-key inside the interval is refused and leaves the phase alone");
 
     # And it is a RATE limit, not a one-shot: rewinding the stamp past the
     # interval lets it through again.
@@ -5683,7 +5683,7 @@ fn test_chpass_rate(): i64 {
     store64(s + SS_PHASE, PHASE_CMD);
     passwd_begin(s);
     assert_eq(load64(s + SS_PHASE), PHASE_CHPASS_NEW,
-              "once the interval has passed, `passwd` works again");
+      "once the interval has passed, `passwd` works again");
 
     # --- An UNAUTHENTICATED session is still refused for its own reason, and the
     # rate gate must not have moved ahead of that check: an unauthed session owns
@@ -5694,7 +5694,7 @@ fn test_chpass_rate(): i64 {
     passwd_begin(u);
     assert_eq(load64(u + SS_PHASE), PHASE_CMD, "an unauthed session cannot start a re-key");
     assert_eq(load64(u + SS_LAST_CHPASS_MS), 0,
-              "...and is not charged a rate-limit stamp for the attempt");
+      "...and is not charged a rate-limit stamp for the attempt");
     session_free(u);
     session_free(s);
 
@@ -5727,34 +5727,34 @@ fn test_charge_window(): i64 {
     # 20; without progress it could never run at any cap and the session would
     # wedge forever. This is the assertion that would catch removing it.
     assert(CHG_DERIVE + CHG_VERIFY > PASS_CHARGE_MAX,
-           "the dearest line really is dearer than the cap — so progress is load-bearing");
+      "the dearest line really is dearer than the cap — so progress is load-bearing");
     assert_eq(charge_stop(0, PASS_CHARGE_MAX, CHG_DERIVE + CHG_VERIFY), 0,
-              "a login dearer than the whole cap still runs as a window's first line");
+      "a login dearer than the whole cap still runs as a window's first line");
 
     # --- The charge table must not UNDERCHARGE the measurements it was derived
     # from. This is the arithmetic that used to live in a comment and be wrong.
     # A comment cannot fail CI; these can.
     assert(CHG_DERIVE * CHARGE_UNIT_US >= MEAS_DERIVE_US,
-           "CHG_DERIVE covers a measured ident_derive");
+      "CHG_DERIVE covers a measured ident_derive");
     assert(CHG_SIGN * CHARGE_UNIT_US >= MEAS_SIGN_LINE_US,
-           "CHG_SIGN covers the dearest measured sign-bearing line");
+      "CHG_SIGN covers the dearest measured sign-bearing line");
     assert(CHG_VERIFY * CHARGE_UNIT_US >= MEAS_VERIFY_US,
-           "CHG_VERIFY covers a measured ed25519_verify");
+      "CHG_VERIFY covers a measured ed25519_verify");
     assert((CHG_DERIVE + CHG_VERIFY) * CHARGE_UNIT_US >= MEAS_DEAREST_US,
-           "a full login charge covers the measured dearest line");
+      "a full login charge covers the measured dearest line");
     assert((CHG_DERIVE + CHG_SIGN) * CHARGE_UNIT_US >= MEAS_DEAR_UNAUTH_US,
-           "the dearest UNAUTHENTICATED line is covered by its charge");
+      "the dearest UNAUTHENTICATED line is covered by its charge");
 
     # --- The four sizing constraints on PASS_CHARGE_MAX, asserted rather than
     # asserted-in-prose. Each is a separate claim and each can rot alone.
     assert(2 * PASS_CHARGE_MAX * CHARGE_UNIT_US <= ADR1_DRIFT_US / 5,
-           "two sustained windows stay inside a fifth of the drift allowance");
+      "two sustained windows stay inside a fifth of the drift allowance");
     assert(CHG_DERIVE + CHG_SIGN <= PASS_CHARGE_MAX,
-           "the cap admits the dearest unauthenticated line from the cap, not by luck");
+      "the cap admits the dearest unauthenticated line from the cap, not by luck");
     assert(CHG_DERIVE + CHG_SIGN + CHG_DERIVE + CHG_SIGN > PASS_CHARGE_MAX,
-           "...but not two of them");
+      "...but not two of them");
     assert(PASS_CHARGE_MAX < CHG_DERIVE + CHG_VERIFY,
-           "the cap is below the dearest line, so a window overruns by at most one");
+      "the cap is below the dearest line, so a window overruns by at most one");
 
     # --- line_crypto_bound: the passphrase phases are known-cost, the open-ended
     # ones deliberately are not.
@@ -5764,24 +5764,24 @@ fn test_charge_window(): i64 {
     # wrong-passphrase path for no gain in the bound, since the progress clause
     # absorbs an over-cap line either way.
     assert_eq(line_crypto_bound(PHASE_PASS), CHG_DERIVE,
-              "PHASE_PASS pre-charges the CERTAIN derive, not the conditional verify");
+      "PHASE_PASS pre-charges the CERTAIN derive, not the conditional verify");
     assert_eq(line_crypto_bound(PHASE_NEWPASS), CHG_DERIVE, "PHASE_NEWPASS is one derive");
     assert_eq(line_crypto_bound(PHASE_CONFIRMPASS), CHG_DERIVE, "PHASE_CONFIRMPASS is one derive");
     assert_eq(line_crypto_bound(PHASE_CHPASS_CONFIRM), CHG_DERIVE,
-              "PHASE_CHPASS_CONFIRM's sign is conditional on the confirm matching");
+      "PHASE_CHPASS_CONFIRM's sign is conditional on the confirm matching");
     assert_eq(line_crypto_bound(PHASE_CLASS), CHG_SIGN, "PHASE_CLASS always saves, so the sign is certain");
     # The property that makes the cheaper bound safe: either way, one window
     # cannot exceed the dearest single line.
     assert(PASS_CHARGE_MAX < CHG_DERIVE + CHG_VERIFY,
-           "a window's overrun is bounded by one dear line, not by cap + one dear line");
+      "a window's overrun is bounded by one dear line, not by cap + one dear line");
     assert_eq(charge_stop(CHG_DERIVE, PASS_CHARGE_MAX, CHG_DERIVE), 0,
-              "two wrong passphrases fit one window (7 + 7 <= 20)");
+      "two wrong passphrases fit one window (7 + 7 <= 20)");
     assert_eq(charge_stop(2 * CHG_DERIVE, PASS_CHARGE_MAX, CHG_DERIVE), 1,
-              "...and a third does not (14 + 7 > 20)");
+      "...and a third does not (14 + 7 > 20)");
     assert_eq(charge_stop(CHG_DERIVE + CHG_VERIFY, PASS_CHARGE_MAX, CHG_DERIVE), 1,
-              "a successful login spends the window in one line and stops the pass");
+      "a successful login spends the window in one line and stops the pass");
     assert_eq(line_crypto_bound(PHASE_CMD), 0,
-              "PHASE_CMD is NOT flat (46 us to 4050 us) — metered after the fact, not predicted");
+      "PHASE_CMD is NOT flat (46 us to 4050 us) — metered after the fact, not predicted");
     assert_eq(line_crypto_bound(PHASE_NAME), 0, "PHASE_NAME is a stat(2) — nothing to pre-charge");
 
     # --- The window snapshots rather than zeroes, so work done BEFORE it opened
@@ -5802,7 +5802,7 @@ fn test_charge_window(): i64 {
     charge_window_close();
     assert_eq(g_charge_cap, 0, "closing a window returns to unmetered");
     assert_eq(charge_stop(charge_spent(), g_charge_cap, 0), 0,
-              "and a closed window never stops anything");
+      "and a closed window never stops anything");
 
     # --- Prose is charged by bytes ESCAPED, not bytes offered. Charging `len`
     # after a TX_CAP truncation would bill a peer for work the server declined,
@@ -5826,7 +5826,7 @@ fn test_charge_window(): i64 {
     store8(ctl + 0, 97); store8(ctl + 1, 1); store8(ctl + 2, 7); store8(ctl + 3, 98);
     assert_eq(session_appendtx_prose(t, ctl, 4), 2, "two control bytes are dropped");
     assert_eq(g_charge_prose_bytes - pb_ctl, 2,
-              "prose charges bytes ESCAPED (2), not bytes OFFERED (4)");
+      "prose charges bytes ESCAPED (2), not bytes OFFERED (4)");
 
     # (b) An IAC is DOUBLED, so w > len. The meter must follow the wire, not the
     # request — this is the direction that would under-charge a fan-out.
@@ -5835,7 +5835,7 @@ fn test_charge_window(): i64 {
     store8(iac + 0, 255); store8(iac + 1, 255);
     assert_eq(session_appendtx_prose(t, iac, 2), 4, "two IACs become four wire bytes");
     assert_eq(g_charge_prose_bytes - pb_iac, 4,
-              "...and all four are charged — the escape expansion is real work");
+      "...and all four are charged — the escape expansion is real work");
 
     # (c) Truncation mid-buffer: room for some but not all. The charge follows
     # what fit.
@@ -5846,7 +5846,7 @@ fn test_charge_window(): i64 {
     while (bi < 64) { store8(big + bi, 65); bi = bi + 1; }
     assert_eq(session_appendtx_prose(t, big, 64), 3, "only three bytes fit");
     assert_eq(g_charge_prose_bytes - pb_trunc, 3,
-              "a truncated append charges what fit, not what was offered");
+      "a truncated append charges what fit, not what was offered");
 
     # (d) A completely full queue returns before charging anything.
     store64(t + SS_TX_LEN, TX_CAP);
@@ -5890,11 +5890,11 @@ fn test_charge_window(): i64 {
     var admitted = g_charge_derives - d0;
     assert(admitted > 0, "the drain admits at least one line — the progress clause holds");
     assert(admitted < DRAIN_LINES_MAX,
-           "the drain is bounded by the CHARGE window, not by DRAIN_LINES_MAX = 16");
+      "the drain is bounded by the CHARGE window, not by DRAIN_LINES_MAX = 16");
     assert(admitted * CHG_DERIVE <= PASS_CHARGE_MAX + CHG_DERIVE + CHG_VERIFY,
-           "one window's spend never exceeds the cap plus one dear line");
+      "one window's spend never exceeds the cap plus one dear line");
     assert(g_rx_backlog > 0,
-           "refused lines set the re-arm flag — epoll cannot see bytes in SS_RX_BUF");
+      "refused lines set the re-arm flag — epoll cannot see bytes in SS_RX_BUF");
     assert_eq(g_charge_cap, 0, "the drain closes its window on the way out");
     g_session_head = 0;
 
@@ -5936,9 +5936,9 @@ fn test_charge_window(): i64 {
     var signs = g_charge_signs - sg0;
     assert(signs > 0, "at least one condemned session is torn down per pass");
     assert(signs < 8,
-           "the condemned teardown is CHARGED — 8 authed drops are not all done in one walk");
+      "the condemned teardown is CHARGED — 8 authed drops are not all done in one walk");
     assert(signs * CHG_SIGN <= PASS_CHARGE_MAX + CHG_SIGN,
-           "teardown spend never exceeds the cap plus one save");
+      "teardown spend never exceeds the cap plus one save");
     assert(g_rx_backlog > 0, "the un-reaped condemned keep the loop from sleeping");
     g_session_head = 0;
 
@@ -5981,20 +5981,20 @@ fn test_auth_order(): i64 {
     var v0 = g_charge_verifies;
     var d0 = g_charge_derives;
     assert_eq(player_auth_load(_mk_sess("Orderly", 7), "wrongpassphrase", 15), 0,
-              "a wrong passphrase is still rejected");
+      "a wrong passphrase is still rejected");
     assert_eq(g_charge_verifies - v0, 0,
-              "a wrong passphrase performs ZERO ed25519_verify calls");
+      "a wrong passphrase performs ZERO ed25519_verify calls");
     assert_eq(g_charge_derives - d0, 1,
-              "...and exactly one derive — the cheap question is the one asked");
+      "...and exactly one derive — the cheap question is the one asked");
 
     # --- The right passphrase must still pay for integrity. If this reads 0 the
     # verify has been skipped altogether, which would be a forged-record hole
     # rather than an optimisation — so the two assertions bracket the change.
     var v1 = g_charge_verifies;
     assert_eq(player_auth_load(_mk_sess("Orderly", 7), "orderlypass", 11), 1,
-              "the right passphrase still authenticates");
+      "the right passphrase still authenticates");
     assert_eq(g_charge_verifies - v1, 1,
-              "a correct passphrase DOES verify the signature — integrity is not skipped");
+      "a correct passphrase DOES verify the signature — integrity is not skipped");
 
     # --- A passphrase rejected on LENGTH costs neither operation. This is H5
     # (1.6.2) and it still holds after the reorder: the bounds moved with the
@@ -6002,7 +6002,7 @@ fn test_auth_order(): i64 {
     var v2 = g_charge_verifies;
     var d2 = g_charge_derives;
     assert_eq(player_auth_load(_mk_sess("Orderly", 7), "ab", 2), 0,
-              "an under-length passphrase is rejected");
+      "an under-length passphrase is rejected");
     assert_eq(g_charge_verifies - v2, 0, "a too-short passphrase performs no verify");
     assert_eq(g_charge_derives - d2, 0, "...and no derive either — H5 still first");
 
@@ -6020,9 +6020,9 @@ fn test_auth_order(): i64 {
     _write_record_raw("Orderly", 7, g_persist_slurp, tn);
     var v3 = g_charge_verifies;
     assert_eq(player_auth_load(_mk_sess("Orderly", 7), "orderlypass", 11), 0 - 2,
-              "a field-tampered record is still refused as tampered");
+      "a field-tampered record is still refused as tampered");
     assert_eq(g_charge_verifies - v3, 1,
-              "...and the tamper is caught BY the verify, which therefore ran");
+      "...and the tamper is caught BY the verify, which therefore ran");
 
     return 0;
 }
@@ -6070,11 +6070,11 @@ fn test_hygiene_tail(): i64 {
     # unchanged when the bug was reintroduced.)
     var saved_cc = g_class_count;
     assert(world_load_classes("tests/fixtures/longid.classes.cyml") > 0,
-           "the maximal-id class fixture loads");
+      "the maximal-id class fixture loads");
     assert_eq(load64(cl_at(0) + CL_ID_LEN), CL_ID_CAP - 1,
-              "a 32-byte class id is stored at CAP-1, leaving room for the NUL");
+      "a 32-byte class id is stored at CAP-1, leaving room for the NUL");
     assert_eq(load8(cl_at(0) + CL_ID + CL_ID_CAP - 1) & 0xFF, 0,
-              "and the last byte of the slot really is a terminator");
+      "and the last byte of the slot really is a terminator");
     assert(world_load_classes(DP_CLASSES) > 0, "the real class table reloads");
     assert_eq(g_class_count, saved_cc, "back to the authored class count");
 
@@ -6095,7 +6095,7 @@ fn test_hygiene_tail(): i64 {
         assert(load64(pc + SS_CON) >= 1, "and con");
         assert(load64(pc + SS_TEC) >= 1, "and tec");
         assert(load64(pc + SS_NDICE) <= 100,
-               "and ndice is bounded — it is a loop trip count, not a stat");
+          "and ndice is bounded — it is a loop trip count, not a stat");
         store64(c2 + CL_STR, sv_str); store64(c2 + CL_DEX, sv_dex);
         store64(c2 + CL_CON, sv_con); store64(c2 + CL_TEC, sv_tec);
         store64(c2 + CL_NDICE, sv_nd);
@@ -6157,7 +6157,7 @@ fn test_freeze(): i64 {
     # unreadable/tampered code. It is intact and correctly signed — it just
     # post-dates this server, which is what a rolled-back deploy looks like.
     assert_eq(player_auth_load(s3, "freezepass", 10), PL_ERR_SCHEMA,
-              "schema = 2 rejected as too-new, not as tampered");
+      "schema = 2 rejected as too-new, not as tampered");
 
     return 0;
 }
@@ -6212,7 +6212,7 @@ fn test_migration(): i64 {
     # becomes 2, reintroducing the SCHEMA_VERSION default makes it fail loudly.
     # The assertions below it (clamp, non-integer) do discriminate today.
     assert_eq(_record_schema(_pairs_of("[player]\nname = \"x\"\n")), 1,
-              "missing schema key reads as v1");
+      "missing schema key reads as v1");
     assert_eq(_record_schema(_pairs_of("[player]\nschema = 1\n")), 1, "schema = 1 reads as 1");
     assert_eq(_record_schema(_pairs_of("[player]\nschema = 2\n")), 2, "schema = 2 reads as 2");
     # Garbage clamps toward v1 rather than inventing a version. toml_int returns
@@ -6220,7 +6220,7 @@ fn test_migration(): i64 {
     # branch on `>= 2` without a third case.
     assert_eq(_record_schema(_pairs_of("[player]\nschema = 0\n")), 1, "schema = 0 clamps to v1");
     assert_eq(_record_schema(_pairs_of("[player]\nschema = \"abc\"\n")), 1,
-              "non-integer schema falls back to v1");
+      "non-integer schema falls back to v1");
 
     # --- M11-A seam + M11-B: the ceiling is the only thing that gates ---
     var s = _mk_sess("FreezeHero", 10);
@@ -6231,17 +6231,17 @@ fn test_migration(): i64 {
 
     _plant_record(blk, "schema = 2\nname = \"FreezeHero\"\nroom = \"\"\ninv = \"\"\n");
     assert_eq(player_auth_load(_mk_sess("FreezeHero", 10), "freezepass", 10), PL_ERR_SCHEMA,
-              "schema = 2 refused at a v1 ceiling");
+      "schema = 2 refused at a v1 ceiling");
     # Raise the ceiling: the same record now loads. Proves the refusal is the
     # ceiling talking, not a parse failure.
     g_schema_max = 2;
     assert_eq(player_auth_load(_mk_sess("FreezeHero", 10), "freezepass", 10), 1,
-              "schema = 2 loads once the ceiling allows it");
+      "schema = 2 loads once the ceiling allows it");
     # A stamp-less record still loads under a raised ceiling — it is v1, and v1
     # is below 2. This is the case a 0.7.0 save hits after the 2.0 bump.
     _plant_record(blk, "name = \"FreezeHero\"\nroom = \"\"\ninv = \"\"\n");
     assert_eq(player_auth_load(_mk_sess("FreezeHero", 10), "freezepass", 10), 1,
-              "stamp-less v1 record loads under a schema-2 ceiling");
+      "stamp-less v1 record loads under a schema-2 ceiling");
     g_schema_max = SCHEMA_VERSION;   # restore; later groups assume the default
 
     # --- M11-C: the control-byte guard, tested directly ---
@@ -6290,7 +6290,7 @@ fn test_migration(): i64 {
     store64(ok + SS_HP, 20); store64(ok + SS_MAXHP, 20); store64(ok + SS_CLASS, 0);
     assert_eq(player_save(ok), 1, "normal record still saves after the bound");
     assert_eq(player_auth_load(_mk_sess("FreezeHero", 10), "freezepass", 10), 1,
-              "normal record still loads after the bound");
+      "normal record still loads after the bound");
 
     return 0;
 }
@@ -6437,7 +6437,7 @@ fn test_carry_cap_get_contents(): i64 {
     var b = 0;
     while (b < 49) { ilist_push(bag + OI_CONTENTS, item_new(ot_at(0))); b = b + 1; }
     assert_eq(oi_move_count(bag), 50,
-              "a bag of 49 moves FIFTY — itself and its contents, which is what ilist_push carries");
+      "a bag of 49 moves FIFTY — itself and its contents, which is what ilist_push carries");
 
     # --- The guard, over the boundary. `inv_would_exceed` is the predicate the
     # acquisition paths now consult.
@@ -6465,11 +6465,11 @@ fn test_carry_cap_get_contents(): i64 {
     while (k < MAX_INV - 1) { ilist_push(big + OI_CONTENTS, item_new(ot_at(0))); k = k + 1; }
     assert_eq(oi_move_count(big), MAX_INV, "the bag plus its contents is a whole cap's worth");
     assert_eq(inv_full(s), 0,
-              "the OLD question — 'are you at the cap' — says there is room, and it is wrong");
+      "the OLD question — 'are you at the cap' — says there is room, and it is wrong");
     assert_eq(inv_would_exceed(s, oi_move_count(big)), 1,
-              "the NEW question — 'would this MOVE exceed it' — refuses. This is the fix.");
+      "the NEW question — 'would this MOVE exceed it' — refuses. This is the fix.");
     assert_eq(inv_count(s) + oi_move_count(big), 199,
-              "...because the old answer landed the player at 199 against a cap of 100");
+      "...because the old answer landed the player at 199 against a cap of 100");
 
     # --- End to end through the real parser, exactly as a player types it.
     var slot = room_at(0) + RM_OBJ_HEAD;
@@ -6490,9 +6490,9 @@ fn test_carry_cap_get_contents(): i64 {
     # Told, and told the TRUE thing: this player is at 99 of 100, so they are not
     # "full" — the bag they reached for is simply bigger than the room left.
     assert_eq(_contains(tx, n, "You can't carry all of that."), 1,
-              "...and the player is TOLD, rather than silently overfilled");
+      "...and the player is TOLD, rather than silently overfilled");
     assert_eq(_contains(tx, n, "hands and pockets are full"), 0,
-              "...with the message that is actually true at 99 of 100, not the one that isn't");
+      "...with the message that is actually true at 99 of 100, not the one that isn't");
 
     # --- THE `get all` ARM, WHICH IS A SEPARATE GUARD AND NEEDS A SEPARATE TEST.
     #
@@ -6531,7 +6531,7 @@ fn test_carry_cap_get_contents(): i64 {
     assert_eq(_ilist_len(aslot), 1, "...and the bag stays on the floor");
 
     assert_eq(_contains(load64(a + SS_TX_BUF), load64(a + SS_TX_LEN), "carry all of that"), 1,
-              "...and the refusal is HONEST: a player at half the cap is not told their hands are full");
+      "...and the refusal is HONEST: a player at half the cap is not told their hands are full");
 
     # A REFUSED ITEM MUST NOT BLOCK THE ONES BEHIND IT. Before this release the
     # arm aborted the whole sweep on refusal, which was correct while the only
@@ -6555,7 +6555,7 @@ fn test_carry_cap_get_contents(): i64 {
     assert_eq(inv_count(a), 5, "the five loose items behind the un-liftable bag are still taken");
     assert_eq(_ilist_len(aslot), 1, "...and only the bag is left on the floor");
     assert_eq(_contains(load64(a + SS_TX_BUF), load64(a + SS_TX_LEN), "carry all of that"), 1,
-              "...and the player is told once why one thing stayed behind");
+      "...and the player is told once why one thing stayed behind");
 
     # The positive half, so this group cannot pass by refusing everything.
     _drain_ilist(a + SS_INV); store64(a + SS_INV, 0);
@@ -6569,7 +6569,7 @@ fn test_carry_cap_get_contents(): i64 {
     assert_eq(inv_count(a), 6, "a bag that DOES fit is taken whole — itself and its five contents");
     assert_eq(_ilist_len(aslot), 0, "...and the floor is cleared");
     assert_eq(_contains(load64(a + SS_TX_BUF), load64(a + SS_TX_LEN), "carry all of that"), 0,
-              "...with no refusal message when nothing was refused");
+      "...with no refusal message when nothing was refused");
 
     # The OTHER branch of the refusal message, so the honest-message logic is
     # covered in both directions rather than only the one that changed.
@@ -6583,7 +6583,7 @@ fn test_carry_cap_get_contents(): i64 {
     cmd_on_line(a, "get all", 7);
     assert_eq(inv_count(a), MAX_INV, "...so one more bare item is refused");
     assert_eq(_contains(load64(a + SS_TX_BUF), load64(a + SS_TX_LEN), "hands and pockets are full"), 1,
-              "...and NOW 'your hands and pockets are full' is the true statement");
+      "...and NOW 'your hands and pockets are full' is the true statement");
 
     _drain_ilist(a + SS_INV); store64(a + SS_INV, 0);
     _drain_ilist(aslot); store64(aslot, apre);
@@ -6608,7 +6608,7 @@ fn test_carry_cap_get_contents(): i64 {
     _tx_reset(own);
     get_from(own, mybag + OI_CONTENTS, own + SS_INV, 0, "scrip", 5, 1, "in there");
     assert_eq(inv_count(own), before_own,
-              "taking from your OWN bag at the cap is still allowed — it moves nothing net");
+      "taking from your OWN bag at the cap is still allowed — it moves nothing net");
     assert_eq(_ilist_len(own + SS_INV), 2, "...and the item really did move to the top level");
 
     _drain_ilist(own + SS_INV); store64(own + SS_INV, 0);
@@ -6657,11 +6657,11 @@ fn test_listing_bounds(): i64 {
     assert_eq(load64(w + SS_TX_LEN), 0, "...and writes no bytes at all");
     list_append_more(w, 7, "items", " carried.\r\n");
     assert_eq(_contains(load64(w + SS_TX_BUF), load64(w + SS_TX_LEN), "...and 7 more items carried."), 1,
-              "the tail names the count and the subject, and does not claim they are 'here'");
+      "the tail names the count and the subject, and does not claim they are 'here'");
     _tx_reset(w);
     room_append_more(w, 3, "items lie");
     assert_eq(_contains(load64(w + SS_TX_BUF), load64(w + SS_TX_LEN), "...and 3 more items lie here."), 1,
-              "the room spelling is unchanged — 1.7.6's three sections keep their wording");
+      "the room spelling is unchanged — 1.7.6's three sections keep their wording");
 
     # Longest authored object name: the size at which the measurements above hold.
     var big = 0; var bl = 0; var t = 0;
@@ -6687,10 +6687,10 @@ fn test_listing_bounds(): i64 {
     var n = load64(s + SS_TX_LEN);
     assert(n <= TX_CAP, "the reply stays inside the buffer");
     assert_eq(_contains(tx, n, "> "), 1,
-              "THE PROMPT REACHES THE CLIENT — the failure this group exists for");
+      "THE PROMPT REACHES THE CLIENT — the failure this group exists for");
     assert(n < TX_CAP, "...and the buffer is not run dry, so the prompt was not merely lucky");
     assert_eq(_contains(tx, n, "more items carried."), 1,
-              "...and the listing says how much of the inventory it did not show");
+      "...and the listing says how much of the inventory it did not show");
     var tail1 = load8(tx + n - 1) & 0xFF;
     var tail2 = load8(tx + n - 2) & 0xFF;
     assert(tail1 != 27, "the stream does not end ON an ESC");
@@ -6764,7 +6764,7 @@ fn test_listing_bounds(): i64 {
     assert_eq(_contains(wtx, wn, "> "), 1, "...so the prompt reaches the client");
     assert_eq(_contains(wtx, wn, "more online not shown."), 1, "...and it says how many it omitted");
     assert_eq(_contains(wtx, wn, "(100 online)"), 1,
-              "...while the COUNT still answers for everyone, listed or not");
+      "...while the COUNT still answers for everyone, listed or not");
 
     # The admin twin, dormant behind YD_ADMIN and fixed in the same pass —
     # leaving the sleeping half of a defect in place is how three of the four
@@ -6926,7 +6926,7 @@ fn test_preauth_alloc(): i64 {
     }
     var spent = alloc_used() - b0;
     assert_eq(spent, 0,
-              "THE ASSERTION THIS GROUP EXISTS FOR: 20 wrong-passphrase logins allocate ZERO bytes");
+      "THE ASSERTION THIS GROUP EXISTS FOR: 20 wrong-passphrase logins allocate ZERO bytes");
 
     # The CONTRAST, so the zero above cannot be passing because the record is
     # unreadable or the function is short-circuiting for some other reason. This
@@ -6938,7 +6938,7 @@ fn test_preauth_alloc(): i64 {
     toml_parse(str_new(g_persist_slurp, n));
     var parse_cost = alloc_used() - c0;
     assert(parse_cost > 1000,
-           "...and parsing it really does cost real, unreclaimable memory (measured 2248 B)");
+      "...and parsing it really does cost real, unreclaimable memory (measured 2248 B)");
 
     # And the right passphrase still works — otherwise a function that simply
     # refused everything would pass every assertion above.
@@ -6979,7 +6979,7 @@ fn test_preauth_alloc(): i64 {
     var cs = _mk_sess("Crafted", 7);
     var cres = player_auth_load(cs, "rightpass", 9);
     assert_eq(cres, 0 - 2,
-              "a validly-signed record the two readers DISAGREE about is refused");
+      "a validly-signed record the two readers DISAGREE about is refused");
     assert(cres != 1, "...and above all it does not authenticate");
 
     # The same record without the decoy loads, so the refusal above is the
@@ -6994,7 +6994,7 @@ fn test_preauth_alloc(): i64 {
     _sign_record_as("Crafted", 7, blk, clean);
     var cs2 = _mk_sess("Crafted", 7);
     assert_eq(player_auth_load(cs2, "rightpass", 9), 1,
-              "...the identical record WITHOUT the decoy line loads normally");
+      "...the identical record WITHOUT the decoy line loads normally");
 
     # --- THE FAST PATH IS AN OPTIMISATION, NOT A SECOND RECORD FORMAT.
     #
@@ -7019,12 +7019,12 @@ fn test_preauth_alloc(): i64 {
     _sign_record_as("Crafted", 7, blk, lshape);
     var ls = _mk_sess("Crafted", 7);
     assert_eq(player_auth_load(ls, "rightpass", 9), 1,
-              "a record only BAYAN can read still loads — the fast path falls through, it does not refuse");
+      "a record only BAYAN can read still loads — the fast path falls through, it does not refuse");
     # And a wrong passphrase against that same record is still re-promptable (0),
     # never terminal — the slow path owes the same authentication.
     var ls2 = _mk_sess("Crafted", 7);
     assert_eq(player_auth_load(ls2, "wrongpass", 9), 0,
-              "...and a wrong passphrase on the slow path is still 0, not -2");
+      "...and a wrong passphrase on the slow path is still 0, not -2");
 
     # THE LENGTH HALF OF THE GUARD, which the byte comparison alone does NOT
     # cover. Give bayan a value whose first 32 bytes ARE the scanner's value and
@@ -7046,7 +7046,7 @@ fn test_preauth_alloc(): i64 {
     _sign_record_as("Crafted", 7, blk, pfx);
     var cs6 = _mk_sess("Crafted", 7);
     assert_eq(player_auth_load(cs6, "rightpass", 9), 0 - 2,
-              "a decoy whose value merely STARTS with the real one is still refused");
+      "a decoy whose value merely STARTS with the real one is still refused");
 
     # A decoy on `pubkey` is refused the same way — the guard covers both fields.
     var pdec = alloc(512);
@@ -7062,7 +7062,7 @@ fn test_preauth_alloc(): i64 {
     _sign_record_as("Crafted", 7, blk, pdec);
     var cs3 = _mk_sess("Crafted", 7);
     assert_eq(player_auth_load(cs3, "rightpass", 9), 0 - 2,
-              "a decoy `pubkey` line is refused too");
+      "a decoy `pubkey` line is refused too");
 
     # KEYS MUST START A LINE. `xsalt = "..."` is a different key and must not be
     # read as `salt`; a scanner that matched anywhere would take the decoy's value
@@ -7080,7 +7080,7 @@ fn test_preauth_alloc(): i64 {
     _sign_record_as("Crafted", 7, blk, pre);
     var cs4 = _mk_sess("Crafted", 7);
     assert_eq(player_auth_load(cs4, "rightpass", 9), 1,
-              "a key that merely ENDS with the name we want is not that key");
+      "a key that merely ENDS with the name we want is not that key");
 
     # An over-long `pubkey` hex is refused BEFORE the decode, exactly as the
     # 0.9.0 salt guard is. `hex_decode_into` writes len/2 bytes with no
@@ -7099,14 +7099,14 @@ fn test_preauth_alloc(): i64 {
     _write_record_raw("Crafted", 7, big, bo2);
     var cs5 = _mk_sess("Crafted", 7);
     assert_eq(player_auth_load(cs5, "rightpass", 9), 0 - 2,
-              "an over-long pubkey hex is rejected before decode (no overflow)");
+      "an over-long pubkey hex is rejected before decode (no overflow)");
 
     _player_unlink("Crafted", 7);
 
     # --- THE AGNOS GUARD. No test on this target can distinguish rename from GPU
     # dispatch, because on x86_64 syscall 82 really IS rename. The source can.
     assert_eq(_raw_syscalls_in("src/persist.cyr"), 0,
-              "persist.cyr calls NO raw numeric syscall — every one goes through a portable wrapper");
+      "persist.cyr calls NO raw numeric syscall — every one goes through a portable wrapper");
     assert_eq(_raw_syscalls_in("src/session.cyr"), 0, "...nor does session.cyr");
     assert_eq(_raw_syscalls_in("src/item.cyr"), 0, "...nor item.cyr");
     # And the scanner is not vacuous: it finds one when one is there.
@@ -7115,7 +7115,7 @@ fn test_preauth_alloc(): i64 {
     _write_record_raw("SyscallProbe", 12, probe, pl);
     _path_for("SyscallProbe", 12, g_persist_path);
     assert_eq(_raw_syscalls_in(g_persist_path), 1,
-              "...and the scanner counts a real one while ignoring the commented one");
+      "...and the scanner counts a real one while ignoring the commented one");
     _player_unlink("SyscallProbe", 12);
 
     # --- 1.7.8's other half: the portable mkdir. On this target it takes the
@@ -7183,7 +7183,7 @@ fn test_rx_bounds(): i64 {
     store64(a + SS_TX_LEN, TX_CAP - 2);
     assert_eq(session_appendtx_atomic_cstr(a, "abc"), 0, "a 3-byte escape into 2 bytes of room is refused");
     assert_eq(load64(a + SS_TX_LEN), TX_CAP - 2,
-              "...and leaves no partial escape behind, which is the whole point");
+      "...and leaves no partial escape behind, which is the whole point");
     session_free(a);
 
     # --- The IAC sites that fire for EVERY real client: the passphrase prompt
@@ -7239,10 +7239,10 @@ fn test_rx_bounds(): i64 {
     var triples = _iac_scan(tx, n, 4001, &partial);
 
     assert_eq(load64(&partial), 0,
-              "THE ASSERTION THIS GROUP EXISTS FOR: no bare IAC reaches the wire");
+      "THE ASSERTION THIS GROUP EXISTS FOR: no bare IAC reaches the wire");
     assert(triples > 0, "...and the replies that DID fit were still sent");
     assert_eq(load64(&fired), 0,
-              "negotiation completes NO line — which is why the line cap could never bound this");
+      "negotiation completes NO line — which is why the line cap could never bound this");
 
     # INPUT IS NOT COUPLED TO OUTPUT. An earlier cut of this fix refused to READ
     # while the queue was full, which deadlocked: every pass consumed nothing,
@@ -7298,7 +7298,7 @@ fn test_rx_bounds(): i64 {
     assert(hn <= TX_CAP, "an oversized room body stays inside the buffer");
     assert(hn < TX_CAP, "...without running it dry");
     assert_eq(_contains(htx, hn, "> "), 1,
-              "...and the PROMPT still reaches the client, which is what the reserve is for");
+      "...and the PROMPT still reaches the client, which is what the reserve is for");
     assert_eq(_contains(htx, hn, " ..."), 1, "...and the prose says it was cut");
     store64(rr + RM_PROSE_PTR, old_ptr);
     store64(rr + RM_PROSE_LEN, old_len);
@@ -7365,16 +7365,16 @@ fn test_tick_and_menu_bounds(): i64 {
     assert(n <= TX_CAP, "the menu stays inside the buffer");
     assert(n < TX_CAP, "...without running it dry");
     assert_eq(_contains(tx, n, "more callings not shown."), 1,
-              "...and it says how many callings it could not list");
+      "...and it says how many callings it could not list");
     assert_eq(_contains(tx, n, "Enter a number or name: "), 1,
-              "...while the PROMPT still reaches the client");
+      "...while the PROMPT still reaches the client");
 
     # With room, every class is listed and no notice appears.
     _tx_reset(s);
     class_send_prompt(s);
     tx = load64(s + SS_TX_BUF); n = load64(s + SS_TX_LEN);
     assert_eq(_contains(tx, n, "more callings not shown."), 0,
-              "an ordinary menu is not truncated");
+      "an ordinary menu is not truncated");
     assert_eq(_contains(tx, n, "Enter a number or name: "), 1, "...and still prompts");
     assert(n < TX_CAP, "...well inside the buffer");
     session_free(s);
@@ -7412,11 +7412,11 @@ fn test_tick_and_menu_bounds(): i64 {
     var n2 = load64(p + SS_TX_LEN);
 
     assert(hp_after < hp_before,
-           "THE ASSERTION THIS EXISTS FOR: the swing still LANDS when its prose cannot be sent");
+      "THE ASSERTION THIS EXISTS FOR: the swing still LANDS when its prose cannot be sent");
     assert(n2 <= TX_CAP, "...and the queue is not overrun");
     assert(n2 < TX_CAP, "...nor run dry");
     assert_eq(_contains(load64(p + SS_TX_BUF), n2, "hits you for"), 0,
-              "...the line itself was the thing dropped");
+      "...the line itself was the thing dropped");
 
     # With room, the same swing reports itself normally.
     _tx_reset(p);
@@ -7583,9 +7583,9 @@ fn test_shutdown_and_class_guard(): i64 {
     g_session_head = a;
 
     assert_eq(shutdown_save_all(), 1,
-              "THE ASSERTION THIS EXISTS FOR: shutdown saves the one session that should be saved");
+      "THE ASSERTION THIS EXISTS FOR: shutdown saves the one session that should be saved");
     assert_eq(player_exists("ShutThree", 9), 0,
-              "...and writes NO record for the classless session");
+      "...and writes NO record for the classless session");
 
     # The saved record really carries the unsaved progress, not the old snapshot.
     #
@@ -7600,7 +7600,7 @@ fn test_shutdown_and_class_guard(): i64 {
     var back = _mk_sess("ShutOne", 7);
     assert_eq(player_auth_load(back, "shutpassone", 11), 1, "the shutdown-saved record loads");
     assert_eq(load64(back + SS_HP), 37,
-              "...and holds the progress that only the shutdown walk could have captured");
+      "...and holds the progress that only the shutdown walk could have captured");
 
     _player_unlink("ShutOne", 7);
 
@@ -7626,7 +7626,7 @@ fn test_shutdown_and_class_guard(): i64 {
     drop_session(0, m);
     g_session_head = head2;
     assert_eq(player_exists("MenuQuit", 8), 0,
-              "quitting at the class menu leaves NO half-made record behind");
+      "quitting at the class menu leaves NO half-made record behind");
 
     # --- AD, the HEAL. Records in this state already exist on disk from before
     # this release, and the operator cannot repair them — so the load path has to.
@@ -7651,10 +7651,10 @@ fn test_shutdown_and_class_guard(): i64 {
     _tx_reset(heal);
     login_on_pass(heal, "classlesspass", 13);
     assert_eq(load64(heal + SS_PHASE), PHASE_CLASS,
-              "a classless record is sent BACK TO THE MENU, not resumed into the world");
+      "a classless record is sent BACK TO THE MENU, not resumed into the world");
     assert_eq(load64(heal + SS_QUIT), 0, "...without disconnecting them");
     assert_eq(_contains(load64(heal + SS_TX_BUF), load64(heal + SS_TX_LEN),
-                        "Choose your calling"), 1, "...and the menu is actually sent");
+        "Choose your calling"), 1, "...and the menu is actually sent");
     assert_eq(load64(heal + SS_HP), 25, "...with the rest of the character intact");
 
     # A HEALTHY record still resumes straight into the world — otherwise this
@@ -7678,11 +7678,11 @@ fn test_shutdown_and_class_guard(): i64 {
     assert(g_class_count > 0, "the shipped class table is loaded for the rest of the suite");
     var saved_count = g_class_count;
     assert(world_load_classes("tests/fixtures/nosuchfile.cyml") < 0,
-           "a missing class file is a load FAILURE");
+      "a missing class file is a load FAILURE");
     # An empty table is exactly the state cmd_serve now refuses to start in,
     # because the load path's clamp demotes every character when it is empty.
     assert_eq(g_class_count, 0,
-              "...and it UNPUBLISHES the table rather than leaving a partial one");
+      "...and it UNPUBLISHES the table rather than leaving a partial one");
     assert(world_load_classes(DP_CLASSES) > 0, "the real table reloads");
     assert_eq(g_class_count, saved_count, "...to the same population");
 
@@ -7700,7 +7700,7 @@ fn test_shutdown_and_class_guard(): i64 {
     assert(banner_at > 0, "...the shutdown epilogue is where we think it is");
     assert(call_at > banner_at, "...and the call is IN that epilogue");
     assert(flush_at > call_at,
-           "...and runs BEFORE audit_flush_all, so a save failure still reaches the log");
+      "...and runs BEFORE audit_flush_all, so a save failure still reaches the log");
     # --- AD's OPERATOR HALF, wired the same way and for the same reason. The
     # assertions above prove an empty class table unpublishes cleanly; they cannot
     # prove `cmd_serve` REFUSES TO START on it, because the suite never runs
@@ -7714,7 +7714,7 @@ fn test_shutdown_and_class_guard(): i64 {
 
     # Non-vacuous: the scanner finds nothing for a call that is not there.
     assert_eq(_src_offset_of("src/server.cyr", "shutdown_save_nobody();"), 0 - 1,
-              "...and the scanner does not simply match anything");
+      "...and the scanner does not simply match anything");
     return 0;
 }
 
@@ -7760,14 +7760,14 @@ fn test_queue_per_read(): i64 {
     assert_eq(session_append_bounded(b, src, 10), 10, "a short body is written whole");
     assert_eq(load64(b + SS_TX_LEN), 10, "...with no marker");
     assert_eq(_contains(load64(b + SS_TX_BUF), load64(b + SS_TX_LEN), " ..."), 0,
-              "...and nothing claiming it was cut");
+      "...and nothing claiming it was cut");
     _tx_reset(b);
     store64(b + SS_TX_LEN, TX_CAP - ROOM_TAIL_RESERVE - 4);
     assert_eq(session_append_bounded(b, src, 200), 0,
-              "at the reserve line it writes NOTHING of the body");
+      "at the reserve line it writes NOTHING of the body");
     assert(load64(b + SS_TX_LEN) < TX_CAP, "...and never runs the queue dry");
     assert_eq(_contains(load64(b + SS_TX_BUF), load64(b + SS_TX_LEN), " ..."), 1,
-              "...but does say it was cut");
+      "...but does say it was cut");
     session_free(b);
 
     # --- ALTITUDE 1. An authored body far larger than the whole queue.
@@ -7791,7 +7791,7 @@ fn test_queue_per_read(): i64 {
     var tx = load64(s + SS_TX_BUF);
     assert(n < TX_CAP, "an oversized MOB description never runs the queue dry");
     assert_eq(_contains(tx, n, "> "), 1,
-              "...and the PROMPT reaches the client, which it did not before 1.7.13");
+      "...and the PROMPT reaches the client, which it did not before 1.7.13");
     assert_eq(_contains(tx, n, " ..."), 1, "...and the body says it was cut");
     store64(tpl + MT_DESC_PTR, oldp);
     store64(tpl + MT_DESC_LEN, oldl);
@@ -7852,7 +7852,7 @@ fn test_queue_per_read(): i64 {
 
     assert_eq(load64(&fired), RX_MAX_LINES, "all eight commands really did dispatch");
     assert(n < TX_CAP,
-           "THE ASSERTION THIS GROUP EXISTS FOR: eight commands in one read never run the queue dry");
+      "THE ASSERTION THIS GROUP EXISTS FOR: eight commands in one read never run the queue dry");
     assert_eq(_contains(tx, n, "> "), 1, "...and a prompt still reaches the client");
     # The stream must not end mid-escape — the failure mode a run-dry queue
     # produces, and the one 1.7.6 shipped a release to remove from `look`.
@@ -7942,13 +7942,13 @@ fn test_key_scratch_wiped(): i64 {
     ident_derive(salt, "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", 32, sk, pk);
 
     assert_eq(_nonzero_in(g_ident_scratch, 256), 0,
-              "THE ASSERTION THIS GROUP EXISTS FOR: ident_derive leaves NO trace in its scratch");
+      "THE ASSERTION THIS GROUP EXISTS FOR: ident_derive leaves NO trace in its scratch");
     # The two regions named individually, so a partial wipe cannot pass by
     # clearing whichever one a future edit happens to remember.
     assert_eq(_nonzero_in(g_ident_scratch + SALT_LEN, 64), 0,
-              "...not the passphrase copy at [16, 80)");
+      "...not the passphrase copy at [16, 80)");
     assert_eq(_nonzero_in(g_ident_scratch + 200, 32), 0,
-              "...and not the Ed25519 seed at [200, 232)");
+      "...and not the Ed25519 seed at [200, 232)");
 
     # ...while the caller's outputs are of course untouched — a wipe that also
     # cleared the keypair would pass every assertion above and break every login.
@@ -7981,16 +7981,16 @@ fn test_key_scratch_wiped(): i64 {
     _tx_reset(s);
     login_on_confirm(s, "totallywrongphrase", 18);          # the MISMATCH path
     assert_eq(_nonzero_in(g_persist_dec + 128, 96), 0,
-              "a WRONG confirm leaves no derived keypair in the shared decode scratch");
+      "a WRONG confirm leaves no derived keypair in the shared decode scratch");
 
     # And the matching path, which commits and must also leave nothing behind.
     store64(s + SS_PHASE, PHASE_CONFIRMPASS);
     _tx_reset(s);
     login_on_confirm(s, "wipeypassphrase", 15);
     assert_eq(_nonzero_in(g_persist_dec + 128, 96), 0,
-              "...and neither does a CORRECT one");
+      "...and neither does a CORRECT one");
     assert_eq(load64(s + SS_PHASE), PHASE_CLASS,
-              "...while the correct confirm still gets the player to class selection");
+      "...while the correct confirm still gets the player to class selection");
     _player_unlink("Wipey", 5);
     return 0;
 }
@@ -8037,7 +8037,7 @@ fn test_operator_edit_blast(): i64 {
     assert(objs_at > 0, "cmd_serve loads the object table where we think it does");
     assert(objs_fatal_at > objs_at, "...and refuses to start when that load FAILED");
     assert(cls_fatal_at > objs_fatal_at,
-           "...and the class guard 1.7.11 added is still below it — both arms, not one");
+      "...and the class guard 1.7.11 added is still below it — both arms, not one");
 
     # --- AJ, the silent drop. This is the residual case the boot guard does NOT
     # cover: an operator legitimately removes ONE authored object, and everyone
@@ -8046,7 +8046,7 @@ fn test_operator_edit_blast(): i64 {
     var d = _freeable_sess();
     store64(d + SS_INV, 0);
     assert_eq(_restore_inv(d, "scrip,nosuchobject,cell", 23), 1,
-              "_restore_inv REPORTS the id it could not resolve");
+      "_restore_inv REPORTS the id it could not resolve");
     assert_eq(inv_count(d), 2, "...while still restoring the two that did resolve");
     store64(d + SS_INV, 0);
     assert_eq(_restore_inv(d, "scrip,cell", 10), 0, "a fully-resolvable list reports no loss");
@@ -8061,7 +8061,7 @@ fn test_operator_edit_blast(): i64 {
     assert(full > 1, "the first class id is long enough to truncate");
     assert_eq(_class_index_by_id(c0 + CL_ID, full), 0, "an exact id resolves");
     assert_eq(_class_index_by_id(c0 + CL_ID, full - 1), 0 - 1,
-              "...and a PREFIX of it resolves to nothing");
+      "...and a PREFIX of it resolves to nothing");
     _drain_ilist(d + SS_INV); store64(d + SS_INV, 0);
     session_free(d);
 
@@ -8091,8 +8091,8 @@ fn test_operator_edit_blast(): i64 {
     assert_eq(player_auth_load(ly, "lossyphrase", 11), 1, "the record loads");
     assert_eq(inv_count(ly), 1, "...restoring only the id that still resolves");
     assert_eq(_contains(load64(ly + SS_TX_BUF), load64(ly + SS_TX_LEN),
-                        "no longer part of this world"), 1,
-              "...and the PLAYER is told something of theirs is gone");
+        "no longer part of this world"), 1,
+      "...and the PLAYER is told something of theirs is gone");
     assert(g_audit_emitted > lybase, "...and the operator gets an audit entry for it");
     _drain_ilist(ly + SS_INV); store64(ly + SS_INV, 0);
     _player_unlink("Lossy", 5);
@@ -8119,7 +8119,7 @@ fn test_operator_edit_blast(): i64 {
     var n = file_read_all(g_persist_path, g_persist_slurp, SLURP_CAP - 1);
     var cc = cl_at(chosen);
     assert_eq(_contains(g_persist_slurp, n, "class = \""), 1,
-              "the record writes `class` as a QUOTED ID, not a bare integer");
+      "the record writes `class` as a QUOTED ID, not a bare integer");
     var idbuf = alloc(64);
     memcpy(idbuf, cc + CL_ID, load64(cc + CL_ID_LEN));
     store8(idbuf + load64(cc + CL_ID_LEN), 0);
@@ -8142,11 +8142,11 @@ fn test_operator_edit_blast(): i64 {
     var back = _mk_sess("Blast", 5);
     assert_eq(player_auth_load(back, "blastphrase", 11), 1, "the record still loads");
     assert_eq(load64(back + SS_CLASS), 0,
-              "...and the character follows their CLASS to its new index, not the index");
+      "...and the character follows their CLASS to its new index, not the index");
     var nc = cl_at(load64(back + SS_CLASS));
     assert_eq(load64(nc + CL_ID_LEN), want_len, "...the class it landed on has that id's length");
     assert_eq(_bytes_eq(nc + CL_ID, want_id, want_len), 1,
-              "...which is to say: the same class id they chose");
+      "...which is to say: the same class id they chose");
     # restore the table before anything else uses it
     memcpy(tmp, cl_at(0), CL_SIZE);
     memcpy(cl_at(0), cl_at(chosen), CL_SIZE);
@@ -8176,7 +8176,7 @@ fn test_operator_edit_blast(): i64 {
     var lg = _mk_sess("Legacy", 6);
     assert_eq(player_auth_load(lg, "legacyphrase", 12), 1, "a PRE-1.7.15 record still loads");
     assert_eq(load64(lg + SS_CLASS), 2,
-              "...and its positional `class = 2` is still honoured, so nobody is demoted");
+      "...and its positional `class = 2` is still honoured, so nobody is demoted");
     _player_unlink("Legacy", 6);
 
     # --- AO. A session that reached the class menu through the 1.7.11 heal has a
@@ -8215,10 +8215,10 @@ fn test_operator_edit_blast(): i64 {
     _tx_reset(h);
     login_on_class(h, "1", 1);
     assert_eq(load64(h + SS_ROOM), target_room,
-              "THE ASSERTION AO EXISTS FOR: a healed character keeps the room it was loaded into");
+      "THE ASSERTION AO EXISTS FOR: a healed character keeps the room it was loaded into");
     assert_eq(load64(h + SS_PHASE), PHASE_CMD, "...and still reaches the command prompt");
     assert_eq(_contains(load64(obs + SS_TX_BUF), load64(obs + SS_TX_LEN), "re-materializes"), 1,
-              "...and the room sees a RETURNING player arrive, not a new one");
+      "...and the room sees a RETURNING player arrive, not a new one");
     g_session_head = ohead;
     session_free(obs);
 
@@ -8239,7 +8239,7 @@ fn test_operator_edit_blast(): i64 {
     _tx_reset(fresh);
     login_on_class(fresh, "1", 1);
     assert_eq(load64(fresh + SS_ROOM), world_start_room(),
-              "a NEW character still enters at the start room");
+      "a NEW character still enters at the start room");
     # ...and READS as new. Landing in the right room is not enough: always
     # resuming would put a fresh character in the start room too (SS_ROOM is -1,
     # and session_resume_world falls back), so only the arrival prose separates
@@ -8269,7 +8269,7 @@ fn test_operator_edit_blast(): i64 {
     _tx_reset(fobs);
     login_on_class(fresh2, "1", 1);
     assert_eq(_contains(load64(fobs + SS_TX_BUF), load64(fobs + SS_TX_LEN), "flickers into being"), 1,
-              "...and the room sees a NEW arrival, not a returning one");
+      "...and the room sees a NEW arrival, not a returning one");
     g_session_head = fhead;
     _player_unlink("Newbie", 6);
     session_free(fobs); session_free(fresh2);
@@ -8328,7 +8328,7 @@ fn test_peer_reachable_highs(): i64 {
         if (load64(p + SS_HP) < hp0) { t = 60; } else { t = t + 1; }
     }
     assert(load64(p + SS_HP) < hp0,
-           "THE ASSERTION AK EXISTS FOR: a mob still swings at a player parked in `passwd`");
+      "THE ASSERTION AK EXISTS FOR: a mob still swings at a player parked in `passwd`");
 
     # ...and the normal case is unchanged: while the player is at the command
     # prompt and fighting this mob, mob_tick_all still defers to combat_round, or
@@ -8343,7 +8343,7 @@ fn test_peer_reachable_highs(): i64 {
         t2 = t2 + 1;
     }
     assert_eq(load64(p + SS_HP), hp1,
-              "...while at the command prompt it still defers to combat_round, as before");
+      "...while at the command prompt it still defers to combat_round, as before");
 
     mi_set_target(m, 0);
     mob_remove(m);
@@ -8372,7 +8372,7 @@ fn test_peer_reachable_highs(): i64 {
     assert(ready_at > 0, "persist_init sets its ready flag where we think it does");
     assert(seed_at > 0, "...and seeds the offline census");
     assert(seed_at > ready_at,
-           "...AFTER the flag — seeding before it recurses through persist_init forever");
+      "...AFTER the flag — seeding before it recurses through persist_init forever");
 
     # THE BOOT SEED. Everything below moves the census by delta; this is the one
     # assertion that it is ever populated from disk in the first place. Without
@@ -8404,7 +8404,7 @@ fn test_peer_reachable_highs(): i64 {
     _player_unlink("Census", 6);
     obj_offline_census_build();
     assert_eq(seed_with - obj_offline_count(0), 3,
-              "the boot seed READS a record's inventory off disk — three items, three counted");
+      "the boot seed READS a record's inventory off disk — three items, three counted");
 
     # Seed a KNOWN offline holding rather than trusting whatever other fixtures
     # have left on disk: the census floors at zero, so a fixture that assumes
@@ -8419,20 +8419,20 @@ fn test_peer_reachable_highs(): i64 {
     _restore_inv(r, "scrip,scrip", 11);
     assert_eq(inv_count(r), 2, "the returning player gets their two items");
     assert_eq(obj_offline_count(0), off0 - 2,
-              "THE ASSERTION AM EXISTS FOR: coming online REMOVES them from the offline census");
+      "THE ASSERTION AM EXISTS FOR: coming online REMOVES them from the offline census");
 
     # ...and the online walk now counts them instead, so the total is conserved.
     var head0 = g_session_head;
     store64(r + SS_NEXT, 0);
     g_session_head = r;
     assert_eq(_obj_id_world_count(idp, idl), _obj_id_count_rooms(idp, idl) + off0,
-              "...with the world total unchanged across the move — online + offline is conserved");
+      "...with the world total unchanged across the move — online + offline is conserved");
     g_session_head = head0;
 
     # ...and disconnecting puts them back.
     session_drop_inv(r);
     assert_eq(obj_offline_count(0), off0,
-              "disconnecting RETURNS them to the offline census — the round trip conserves");
+      "disconnecting RETURNS them to the offline census — the round trip conserves");
     session_free(r);
 
     # The census never goes negative, however inconsistent the inputs.
@@ -8468,7 +8468,7 @@ fn test_peer_reachable_highs(): i64 {
     var arena0 = alloc_used();
     zone_reset_objs();
     assert_eq(_obj_id_count_rooms(pidp, pidl), 0,
-              "THE WIRING ASSERTION: a reset mints NOTHING for an id the offline players already hold");
+      "THE WIRING ASSERTION: a reset mints NOTHING for an id the offline players already hold");
     var reset_arena = alloc_used() - arena0;
 
     # ...and the same reset restocks once those holdings are gone, so the
@@ -8486,7 +8486,7 @@ fn test_peer_reachable_highs(): i64 {
     # AND THE RESET COSTS NO ARENA. This is the assertion that keeps the census
     # off the disk: a per-reset `dir_list` would show up here immediately.
     assert_eq(reset_arena, 0,
-              "a zone reset allocates ZERO bump arena — the census is not rebuilt from disk");
+      "a zone reset allocates ZERO bump arena — the census is not rebuilt from disk");
 
     ri = 0;
     while (ri < world_room_count()) {
@@ -8539,11 +8539,11 @@ fn test_mechanics_and_instruments(): i64 {
 
     mi_set_target(m, p);                          # the MOB engages; the player did not
     assert_eq(session_in_combat(p), 1,
-              "THE ASSERTION AP EXISTS FOR: a mob attacking you IS combat, even unengaged");
+      "THE ASSERTION AP EXISTS FOR: a mob attacking you IS combat, even unengaged");
     var hp_before = load64(p + SS_HP);
     classes_upkeep(p);
     assert_eq(load64(p + SS_HP), hp_before,
-              "...so there is no free regeneration while something is swinging at you");
+      "...so there is no free regeneration while something is swinging at you");
 
     # A mob in ANOTHER room does not count — it cannot reach you, and walking the
     # whole zone per player per tick would be the wrong price for this answer.
@@ -8567,7 +8567,7 @@ fn test_mechanics_and_instruments(): i64 {
     # positive number, so `get 18446744073709551617.sword` resolved to a REAL
     # object — whichever one the wrap happened to select.
     assert_eq(parse_uint("18446744073709551617", 20), 0 - 1,
-              "THE ASSERTION AR EXISTS FOR: a 20-digit ordinal is refused, not wrapped");
+      "THE ASSERTION AR EXISTS FOR: a 20-digit ordinal is refused, not wrapped");
     assert_eq(parse_uint("99999999999999999999", 20), 0 - 1, "...as is any other overflow");
     assert_eq(parse_uint("12x", 3), 0 - 1, "a non-digit is still refused");
     assert_eq(parse_uint("", 0), 0 - 1, "...and so is an empty token");
@@ -8575,17 +8575,17 @@ fn test_mechanics_and_instruments(): i64 {
     # The second arm is the one `patra.cyr:3692` omits: at the cutoff a trailing
     # 8 or 9 lands two past max, which a `v > limit` test alone lets through.
     assert_eq(parse_uint("9223372036854775807", 19), 9223372036854775807,
-              "i64 max parses exactly");
+      "i64 max parses exactly");
     assert_eq(parse_uint("9223372036854775808", 19), 0 - 1, "...and one past it is refused");
     assert_eq(parse_uint("9223372036854775809", 19), 0 - 1,
-              "...including the trailing-9 case a bare cutoff test admits");
+      "...including the trailing-9 case a bare cutoff test admits");
 
     # BE — the ordinal bound moved OUT of the shared reader. Values above it are
     # now real numbers here, because `toml_int` is the other caller and it reads
     # -1 as "unparseable" and substitutes its caller's DEFAULT.
     assert_eq(parse_uint("1000000", 7), PA_ORDINAL_MAX, "the ordinal bound is a real value");
     assert_eq(parse_uint("1000001", 7), 1000001,
-              "BE: one past the ORDINAL bound is a NUMBER, not a refusal");
+      "BE: one past the ORDINAL bound is a NUMBER, not a refusal");
 
     # ...and the ordinal domain still behaves exactly as AR left it, because the
     # bound is enforced at `qual_parse`, the only caller that has an ordinal.
@@ -8593,13 +8593,13 @@ fn test_mechanics_and_instruments(): i64 {
     var qp_be[8]; var ql_be[8];
     parser_parse(pa_be, "get 2.scrip", 11);
     assert_eq(qual_single(pa_be, parsed_dobj(pa_be), &qp_be, &ql_be), 2,
-              "an ordinary ordinal still resolves");
+      "an ordinary ordinal still resolves");
     parser_parse(pa_be, "get 1000001.scrip", 17);
     assert_eq(qual_single(pa_be, parsed_dobj(pa_be), &qp_be, &ql_be), 1,
-              "AR's behaviour held: an over-bound ordinal is not an ordinal at all");
+      "AR's behaviour held: an over-bound ordinal is not an ordinal at all");
     parser_parse(pa_be, "get 18446744073709551617.sword", 30);
     assert_eq(qual_single(pa_be, parsed_dobj(pa_be), &qp_be, &ql_be), 1,
-              "...and neither is a wrapped one");
+      "...and neither is a wrapped one");
     parser_free(pa_be);
 
     # BE — THE REGRESSION THIS RELEASE EXISTS FOR. Every save-record and zone
@@ -8613,13 +8613,13 @@ fn test_mechanics_and_instruments(): i64 {
     # 1234567 — or exactly 1000000, the largest value that still parsed. Use a
     # GENUINE epoch second here, and nothing smaller.
     assert_eq(toml_int(_pairs_of("created = \"1785543497\"\n"), "created", 999),
-              1785543497, "BE: a real epoch-second value survives toml_int");
+      1785543497, "BE: a real epoch-second value survives toml_int");
     assert_eq(toml_int(_pairs_of("last_login = \"1785543497\"\n"), "last_login", 0),
-              1785543497, "...so the 'last seen' greeting is no longer dead code");
+      1785543497, "...so the 'last seen' greeting is no longer dead code");
     assert_eq(toml_int(_pairs_of("reset_secs = \"31536000\"\n"), "reset_secs", 900),
-              31536000, "...and RESET_SECS_MAX is reachable again, not dead");
+      31536000, "...and RESET_SECS_MAX is reachable again, not dead");
     assert_eq(toml_int(_pairs_of("created = \"99999999999999999999\"\n"), "created", 42),
-              42, "...while a genuine overflow still falls back to the default");
+      42, "...while a genuine overflow still falls back to the default");
 
     # --- AS. A KNOWN, DOCUMENTED LIMITATION, pinned rather than fixed.
     #
@@ -8633,7 +8633,7 @@ fn test_mechanics_and_instruments(): i64 {
     var pa = parser_new();
     parser_parse(pa, "get in", 6);
     assert_eq(parsed_has_dobj(pa), 0,
-              "a bare trailing preposition yields no direct object (known limitation)");
+      "a bare trailing preposition yields no direct object (known limitation)");
     parser_parse(pa, "put a in b", 10);
     assert_eq(parsed_has_dobj(pa), 1, "...while a real prepositional phrase still splits");
     assert(parsed_iobj(pa) > 0, "...with an indirect object");
@@ -8654,7 +8654,7 @@ fn test_mechanics_and_instruments(): i64 {
     player_died(d);
     g_session_head = dhead;
     assert_eq(load64(d + SS_SAVE_DIRTY), 1,
-              "THE ASSERTION AT EXISTS FOR: death marks the record dirty");
+      "THE ASSERTION AT EXISTS FOR: death marks the record dirty");
     assert_eq(load64(d + SS_HP), 20, "...and the player comes back at full health");
     _drain_ilist(d + SS_INV); store64(d + SS_INV, 0);
     session_free(d);
@@ -8693,7 +8693,7 @@ fn test_mechanics_and_instruments(): i64 {
     memset(g_fmt_scratch, 90, 32);                # 'Z' x32
     var bs = _mk_sess("Bigsig", 6);
     assert_eq(player_auth_load(bs, "bigsigphrase", 12), 0 - 2,
-              "an over-long SIG hex is rejected");
+      "an over-long SIG hex is rejected");
     var intact = 0;
     var bi = 0;
     while (bi < 32) {
@@ -8701,7 +8701,7 @@ fn test_mechanics_and_instruments(): i64 {
         bi = bi + 1;
     }
     assert_eq(intact, 32,
-              "THE ASSERTION AV EXISTS FOR: it is rejected BEFORE decode — nothing past g_persist_dec is touched");
+      "THE ASSERTION AV EXISTS FOR: it is rejected BEFORE decode — nothing past g_persist_dec is touched");
     _player_unlink("Bigsig", 6);
 
     # --- AU + AY. Two guards the suite cannot exercise, asserted from the source.
@@ -8717,12 +8717,12 @@ fn test_mechanics_and_instruments(): i64 {
     assert(rand_at > 0, "...from random_bytes");
     assert(rand_at < seed_at, "...drawn BEFORE the seed is mixed and applied");
     assert_eq(_src_count("src/server.cyr", "combat_seed(clock_now_ms())"), 0,
-              "...and no longer from uptime alone");
+      "...and no longer from uptime alone");
 
     # AY: the MAX_SESSIONS accept cap. `handle_accept` needs a real listener, so
     # the guard's presence is asserted here and its behaviour is exercised live.
     assert(_src_count("src/server.cyr", "g_session_count >= MAX_SESSIONS") >= 1,
-           "the accept path still compares the live count against MAX_SESSIONS");
+      "the accept path still compares the live count against MAX_SESSIONS");
     return 0;
 }
 
@@ -8754,7 +8754,7 @@ fn test_boot_sequence(): i64 {
     assert(persist_at > 0, "cmd_serve seeds the persistence engine");
     assert(spawn_at > 0, "...and spawns the authored room objects");
     assert(spawn_at > persist_at,
-           "THE ASSERTION AZ EXISTS FOR: the boot spawn runs AFTER the offline census is seeded");
+      "THE ASSERTION AZ EXISTS FOR: the boot spawn runs AFTER the offline census is seeded");
 
     # --- BA. A rejected ROOM table is fatal, and it is fatal ABOVE the object
     # load — which is what makes AJ's guard reachable.
@@ -8771,9 +8771,9 @@ fn test_boot_sequence(): i64 {
     assert(rooms_at > 0, "cmd_serve loads the room table");
     assert(rooms_fatal_at > rooms_at, "...and refuses to start when that load FAILED");
     assert(objs_load_at > rooms_fatal_at,
-           "THE ASSERTION BA EXISTS FOR: the object load sits BELOW the rooms guard, so it is reached on every path that survives it");
+      "THE ASSERTION BA EXISTS FOR: the object load sits BELOW the rooms guard, so it is reached on every path that survives it");
     assert_eq(_src_count("src/server.cyr", "running roomless"), 0,
-              "...and the 'roomless' affordance that only ever emptied inventories is gone");
+      "...and the 'roomless' affordance that only ever emptied inventories is gone");
 
     # --- BH. An unresolvable `start` id is a load error, not a silent ignore.
     #
@@ -8821,7 +8821,7 @@ fn test_unusual_session_states(): i64 {
     ilist_push(dropper + SS_INV, item_new(ot_at(idx0)));
     session_drop_inv(dropper);
     assert_eq(obj_offline_count(idx0) - base, 2,
-              "an ordinary disconnect credits the offline census (AM, unchanged)");
+      "an ordinary disconnect credits the offline census (AM, unchanged)");
     obj_census_adjust(idx0, 0 - 2);
     assert_eq(obj_offline_count(idx0), base, "...and the fixture leaves no residue");
 
@@ -8842,11 +8842,11 @@ fn test_unusual_session_states(): i64 {
     var restore_at = _src_offset_of("src/persist.cyr", "var lost = _restore_inv(s,");
     assert(dup_at > 0, "player_auth_load can refuse an already-connected character");
     assert(dup_at > verify_at,
-           "H11 HELD: the refusal still runs AFTER the signature verify, so it cannot probe who is online");
+      "H11 HELD: the refusal still runs AFTER the signature verify, so it cannot probe who is online");
     assert(dup_at < restore_at,
-           "THE ASSERTION BL EXISTS FOR: ...and BEFORE the inventory restore, so no census moves");
+      "THE ASSERTION BL EXISTS FOR: ...and BEFORE the inventory restore, so no census moves");
     assert_eq(_src_count("src/item.cyr", "fn session_discard_inv"), 0,
-              "...and BC's compensating discard is deleted, not left dead");
+      "...and BC's compensating discard is deleted, not left dead");
 
     # --- BD. Upkeep is not gated on the phase — AK's other half.
     #
@@ -8865,7 +8865,7 @@ fn test_unusual_session_states(): i64 {
     store64(parked + SS_NEXT, 0);
     combat_tick_all();
     assert_eq(load64(parked + SS_CD0), 2,
-              "THE ASSERTION BD EXISTS FOR: a cooldown decays while parked in the passphrase menu");
+      "THE ASSERTION BD EXISTS FOR: a cooldown decays while parked in the passphrase menu");
     assert_eq(load64(parked + SS_GUARD), 2, "...and so does a timed buff");
     combat_tick_all();
     assert_eq(load64(parked + SS_CD0), 1, "...every tick, not once");
@@ -8880,7 +8880,7 @@ fn test_unusual_session_states(): i64 {
     store64(roomless + SS_NEXT, 0);
     combat_tick_all();
     assert_eq(load64(roomless + SS_CD0), 3,
-              "a session with no body in the world does not metabolise");
+      "a session with no body in the world does not metabolise");
     g_session_head = saved_head;
 
     # BD's other half: a length rejection in the re-key menu costs a counted
@@ -8894,7 +8894,7 @@ fn test_unusual_session_states(): i64 {
         tries = tries + 1;
     }
     assert_eq(load64(rk + SS_PHASE), PHASE_CMD,
-              "THE ASSERTION BD EXISTS FOR (2): enough short lines abandon the re-key instead of re-prompting forever");
+      "THE ASSERTION BD EXISTS FOR (2): enough short lines abandon the re-key instead of re-prompting forever");
     assert_eq(load64(rk + SS_FAILS), 0, "...and the counter resets on abandon");
 
     # --- BF. Only a NEW character is a new account.
@@ -8904,9 +8904,9 @@ fn test_unusual_session_states(): i64 {
     # SS_ROOM discriminator twenty-one lines above for the room; the account
     # increment three lines below never got it.
     assert(_src_count("src/classes.cyr", "if (is_new_character == 1) { g_account_count = g_account_count + 1; }") >= 1,
-           "THE ASSERTION BF EXISTS FOR: the account increment is gated on the same discriminator AO added");
+      "THE ASSERTION BF EXISTS FOR: the account increment is gated on the same discriminator AO added");
     assert_eq(_src_count("src/classes.cyr", "\n        g_account_count = g_account_count + 1;"), 0,
-              "...and the unconditional form is gone");
+      "...and the unconditional form is gone");
 
     # --- BG. Three deadlines, and the class menu gets the middle one.
     var idler = _freeable_sess();
@@ -8914,26 +8914,26 @@ fn test_unusual_session_states(): i64 {
     store64(idler + SS_AUTHED, 0);
     store64(idler + SS_CLASS, 0 - 1);
     assert_eq(session_is_idle(idler, PREAUTH_TIMEOUT_MS, 300000), 1,
-              "an unauthenticated socket is reaped at the pre-auth deadline");
+      "an unauthenticated socket is reaped at the pre-auth deadline");
 
     store64(idler + SS_AUTHED, 1);
     store64(idler + SS_CLASS, 0 - 1);                 # authed, no class == class menu
     assert_eq(session_is_idle(idler, PREAUTH_TIMEOUT_MS, 300000), 0,
-              "a class-menu session is NOT reaped at the bare pre-auth deadline (it has reading to do)");
+      "a class-menu session is NOT reaped at the bare pre-auth deadline (it has reading to do)");
     assert_eq(session_is_idle(idler, CLASSMENU_TIMEOUT_MS, 300000), 1,
-              "THE ASSERTION BG EXISTS FOR: ...but it does NOT get the full player grace");
+      "THE ASSERTION BG EXISTS FOR: ...but it does NOT get the full player grace");
     assert(CLASSMENU_TIMEOUT_MS < 300000, "...which is shorter than the player deadline");
     assert(CLASSMENU_TIMEOUT_MS > PREAUTH_TIMEOUT_MS, "...and longer than the pre-auth one");
 
     store64(idler + SS_CLASS, 0);                     # a real player
     assert_eq(session_is_idle(idler, CLASSMENU_TIMEOUT_MS, 300000), 0,
-              "a player who chose a class keeps the full five-minute grace");
+      "a player who chose a class keeps the full five-minute grace");
     assert_eq(session_is_idle(idler, 300000, 300000), 1, "...and is reaped at it");
 
     # The deadline and the reap budget finally ask the same question — AI moved
     # the budget to `session_persistable` and left the deadline on SS_AUTHED.
     assert(_src_count("src/session.cyr", "session_persistable(s) == 0") >= 1,
-           "the idle deadline keys on the same predicate as AI's reap budget");
+      "the idle deadline keys on the same predicate as AI's reap budget");
     return 0;
 }
 
@@ -9040,14 +9040,14 @@ fn test_login_parse(): i64 {
     # record's canonical form must never be what decides whether to parse it, or
     # 1.7.8's whole auth-order argument is undone from the other side.
     assert(_src_count("src/persist.cyr", "if (authed == 1) {") >= 1,
-           "the scan path is entered only after the passphrase has proved itself");
+      "the scan path is entered only after the passphrase has proved itself");
 
     # --- The pre-auth reader stayed strict. `_kv_at` is what an unauthenticated
     # peer reaches (1.7.8's salt/pubkey scan), and it must still refuse anything
     # but a quoted value.
     var pl[8];
     assert_eq(_kv_at("salt = 41\n", 10, "salt", 4, &pl), 0,
-              "the PRE-AUTH reader still refuses a bare value — 1.7.20 changed nothing a peer can reach");
+      "the PRE-AUTH reader still refuses a bare value — 1.7.20 changed nothing a peer can reach");
     return 0;
 }
 
@@ -9068,9 +9068,9 @@ fn test_gate5(): i64 {
     # audit flush, listener close) was unreachable on that target. That is item AC
     # verbatim, on the arm AC was never carried to.
     assert_eq(_src_count("src/server.cyr", "if (g_shutdown_requested == 1) { stop = 1; }"), 2,
-              "THE ASSERTION BI EXISTS FOR: BOTH event loops honour the shutdown flag, not just the epoll one");
+      "THE ASSERTION BI EXISTS FOR: BOTH event loops honour the shutdown flag, not just the epoll one");
     assert(_src_count("src/session.cyr", "\"@shutdown\"") >= 1,
-           "...and an in-band verb sets it, which is what running.md has always claimed exists");
+      "...and an in-band verb sets it, which is what running.md has always claimed exists");
     var sd_at   = _src_offset_of("src/server.cyr", "shutdown_save_all();");
     var flush_at = _src_offset_of("src/server.cyr", "audit_flush_all();");
     assert(sd_at > 0, "the exit block still saves every live session");
@@ -9083,17 +9083,17 @@ fn test_gate5(): i64 {
     # running.md documents. Every deadline in the tree is a difference of this
     # clock, so a frozen one means the tick never fires.
     assert(_src_count("src/session.cyr", "fn mud_now_ms") >= 1,
-           "descent owns its scheduling clock rather than binding to lib/chrono.cyr");
+      "descent owns its scheduling clock rather than binding to lib/chrono.cyr");
     assert(_src_count("src/session.cyr", "sys_uptime_us()") >= 1,
-           "...and reads the rdtsc clock, which needs no interrupts");
+      "...and reads the rdtsc clock, which needs no interrupts");
     # The whole point is that there is ONE place to change. Two `clock_now_ms`
     # calls remain in src/ and both are mud_now_ms's own fallbacks.
     assert_eq(_src_count("src/server.cyr", "clock_now_ms()"), 0,
-              "THE ASSERTION BK EXISTS FOR: no scheduling site bypasses the wrapper (server)");
+      "THE ASSERTION BK EXISTS FOR: no scheduling site bypasses the wrapper (server)");
     assert_eq(_src_count("src/persist.cyr", "clock_now_ms()"), 0, "...(persist)");
     assert_eq(_src_count("src/classes.cyr", "clock_now_ms()"), 0, "...(classes)");
     assert_eq(_src_count("src/session.cyr", "clock_now_ms()"), 2,
-              "...and session holds exactly the two fallbacks inside the wrapper itself");
+      "...and session holds exactly the two fallbacks inside the wrapper itself");
     assert(mud_now_ms() > 0, "the wrapper returns a live monotonic reading");
     var t0 = mud_now_ms();
     assert(mud_now_ms() >= t0, "...that does not go backwards");
@@ -9104,12 +9104,12 @@ fn test_gate5(): i64 {
     # one, so 256 was unreachable dead code and the 8th client got silence
     # instead of H6's polite close.
     assert(_src_count("src/server.cyr", "MAX_SESSIONS       = 7;") >= 1,
-           "THE ASSERTION BP EXISTS FOR: the AGNOS arm declares the ceiling it actually has");
+      "THE ASSERTION BP EXISTS FOR: the AGNOS arm declares the ceiling it actually has");
     assert(_src_count("src/server.cyr", "MAX_SESSIONS       = 256;") >= 1,
-           "...and the Linux arm is unchanged");
+      "...and the Linux arm is unchanged");
     assert_eq(MAX_SESSIONS, 256, "...with this x86_64 build getting the Linux value");
     assert(_src_count("src/server.cyr", "g_session_count >= MAX_SESSIONS") >= 1,
-           "...so H6's close path is the thing that fires at capacity, on both");
+      "...so H6's close path is the thing that fires at capacity, on both");
 
     # --- BQ. The control-byte guard covers every string field the writer writes.
     #
@@ -9117,11 +9117,11 @@ fn test_gate5(): i64 {
     # `_fstr` values — rather than from the fields somebody thought of.
     assert_eq(_src_count("src/persist.cyr", "_rv_ctrl(rv, \"name\")"), 1, "the M11-C guard covers name");
     assert_eq(_src_count("src/persist.cyr", "_rv_ctrl(rv, \"class\")"), 1,
-              "THE ASSERTION BQ EXISTS FOR: ...and class, the fourth _fstr field it used to miss");
+      "THE ASSERTION BQ EXISTS FOR: ...and class, the fourth _fstr field it used to miss");
     assert_eq(_src_count("src/persist.cyr", "_rv_ctrl(rv, \"room\")"), 1, "...and room");
     assert_eq(_src_count("src/persist.cyr", "_rv_ctrl(rv, \"inv\")"), 1, "...and inv");
     assert_eq(_src_count("src/persist.cyr", "_fstr(off, \"class\""), 3,
-              "...and class really is written by _fstr — all three arms, including the two empty ones");
+      "...and class really is written by _fstr — all three arms, including the two empty ones");
 
     # --- BN. The audit counter counts writes, not attempts.
     #
@@ -9132,9 +9132,9 @@ fn test_gate5(): i64 {
     var cnt_at = _src_offset_of("src/persist.cyr", "if (wrote == 1) { g_audit_emitted = g_audit_emitted + 1; }");
     assert(app_at > 0, "audit_event inspects the store's return");
     assert(cnt_at > app_at,
-           "THE ASSERTION BN EXISTS FOR: the emitted counter advances AFTER a successful append, not before");
+      "THE ASSERTION BN EXISTS FOR: the emitted counter advances AFTER a successful append, not before");
     assert(_src_count("src/persist.cyr", "g_audit_store_failed") >= 2,
-           "...and a failure is latched so a full disk is one line, not one per event");
+      "...and a failure is latched so a full disk is one line, not one per event");
 
     # --- BM / BR. Rotation survives a skipped prune.
     #
@@ -9143,15 +9143,15 @@ fn test_gate5(): i64 {
     # a wrong "highest": new history sealed below old, resume from the wrong
     # segment, and a prune whose arithmetic victim no longer exists.
     assert_eq(_src_count("src/persist.cyr", "if (miss >= AUDIT_SEG_KEEP) { n = AUDIT_SEG_MAX; }"), 0,
-              "THE ASSERTION BM EXISTS FOR: the contiguity-premised early stop is gone");
+      "THE ASSERTION BM EXISTS FOR: the contiguity-premised early stop is gone");
     assert(_src_count("src/persist.cyr", "while (victim >= 1) {") >= 1,
-           "...and the prune sweeps the window rather than naming one arithmetic victim");
+      "...and the prune sweeps the window rather than naming one arithmetic victim");
     # BR — both halves: do not attest what you cannot hash, and do not claim a
     # deletion that did not happen.
     assert(_src_count("src/persist.cyr", "if (hlen <= 0) {") >= 1,
-           "THE ASSERTION BR EXISTS FOR: a hashless marker attests nothing, so it is not written");
+      "THE ASSERTION BR EXISTS FOR: a hashless marker attests nothing, so it is not written");
     assert(_src_count("src/persist.cyr", "if (xunlink(g_audit_segbuf) != 0) {") >= 1,
-           "...and an unlink that failed is not counted as a prune");
+      "...and an unlink that failed is not counted as a prune");
     var pruned_at = _src_offset_of("src/persist.cyr", "g_audit_pruned = g_audit_pruned + 1;");
     var unlink_at = _src_offset_of("src/persist.cyr", "if (xunlink(g_audit_segbuf) != 0) {");
     assert(pruned_at > unlink_at, "...the counter advancing only after the unlink is checked");
