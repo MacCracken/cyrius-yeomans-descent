@@ -828,9 +828,9 @@ var g_account_count = 0;
 #
 # No `[[entries]]`, no `---` body required.
 fn config_load(path): i64 {
-    var r = cyml_parse_file_r(path);
-    if (is_ok(r) == 0) { return 0; }            # no file → defaults
-    var doc = result_unwrap(r);
+    var r_t, r_v = cyml_parse_file_r(path);
+    if (is_ok(r_t) == 0) { return 0; }            # no file → defaults
+    var doc = result_unwrap(r_t, r_v);
     var hl = cyml_doc_header_len(doc);
     if (hl <= 0) { return 0; }
     var hs = str_new(cyml_doc_header(doc), hl);
@@ -2002,6 +2002,24 @@ fn _rv(): i64 {
     if (g_rv == 0) { g_rv = alloc(RV_SIZE); }
     return g_rv;
 }
+# Pairs of the `[player]` section of a full record.
+#
+# ⚠ NOT `vec_get(secs, 0)`. A record written by `_build_record` opens with
+# `[player]` on line 1, so bayan's section 0 is the EMPTY ROOT section (the
+# bucket for any key=value lines appearing before the first header) and the
+# real pairs live in section 1. Indexing 0 therefore reads an empty pair vec
+# and every field falls back to its default — silently, because "absent" and
+# "empty" are the same answer to every caller.
+#
+# Header-only parses elsewhere in this repo (cyml entry headers, which carry no
+# `[section]` line at all) correctly DO use section 0 — that is the root bucket
+# and it is where their pairs are. Only full-record parses need this.
+fn _player_pairs(secs): i64 {
+    var hits = toml_get_sections(secs, "player");
+    if (vec_len(hits) > 0) { return toml_section_pairs(vec_get(hits, 0)); }
+    return toml_section_pairs(vec_get(secs, 0));
+}
+
 fn _rv_set_bayan(rv, pairs): i64 {
     store64(rv + RV_MODE, RV_BAYAN);
     store64(rv + RV_PAIRS, pairs);
@@ -2511,7 +2529,7 @@ fn player_auth_load(s, pass, passlen): i64 {
         # sections (mirror world.cyr's zone-header read).
         var secs = toml_parse(str_new(g_persist_slurp, n));
         if (vec_len(secs) == 0) { return 0 - 2; }
-        _rv_set_bayan(rv, toml_section_pairs(vec_get(secs, 0)));
+        _rv_set_bayan(rv, _player_pairs(secs));
     }
     var saltl[8]; var pkl[8]; var sigl[8];
     var saltd = _rv_raw(rv, "salt", &saltl);

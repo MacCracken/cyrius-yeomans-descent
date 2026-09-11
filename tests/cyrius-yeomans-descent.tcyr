@@ -4074,7 +4074,6 @@ fn test_carry_cap(): i64 {
     assert(_build_record(s) > 0, "the record still serializes — truncated, not refused");
     assert(_build_record(s) > 0, "and again: the failure is not sticky");
 
-
     # --- `give` respects the RECIPIENT's cap. Handing someone their 101st item
     # would push them past a limit they neither see nor chose — and the GIVER is
     # the one told, since they are the one acting.
@@ -4936,7 +4935,6 @@ fn test_legacy_guards(): i64 {
     assert_eq(player_auth_load(check, "twinnedphrase", 13), 1, "the record still loads");
     assert_eq(load64(check + SS_HP), 99,
       "THE ASSERTION AE EXISTS FOR: the duplicate's stale snapshot did NOT overwrite it");
-
 
     # --- 1.7.12: the RECIPIENT of a gift is marked dirty. `cmd_on_line` flags only
     # the session that typed the command, and `cmd_give` is the one verb in the
@@ -6190,7 +6188,7 @@ fn _plant_record(blk, body): i64 {
 fn _pairs_of(body): i64 {
     var secs = toml_parse(str_from(body));
     if (vec_len(secs) == 0) { return 0; }
-    return toml_section_pairs(vec_get(secs, 0));
+    return _player_pairs(secs);
 }
 
 # === M11 — save-record migration gate + writer bounds (1.3.0) ===
@@ -6392,7 +6390,6 @@ fn main() {
     test_unusual_session_states();
     test_login_parse();
     test_gate5();
-
 
     return assert_summary();
 }
@@ -6965,11 +6962,27 @@ fn test_preauth_alloc(): i64 {
     # their signing key (ADR 0004), so the honest adversary here signs their own
     # crafted record, and the test must do the same.
     var loose = alloc(512);
-    var lo = _str_into(loose, 0, "salt=\"");
+    # ⚠ THE DECOY GOES LAST NOW, AND THE INVERSION IS THE POINT.
+    #
+    # This built the loose line FIRST, on the premise stated above that "on a
+    # duplicate key BOTH take the FIRST match". That premise expired: bayan 1.5.4
+    # made `bayan_toml_get` LAST-WINS (its own comment cites tomllib / toml-rs /
+    # go-toml / tomlkit agreeing), while this repo's `_scan_kv` still returns on
+    # its FIRST match. So the readers now diverge the OTHER way:
+    #
+    #   decoy FIRST, real LAST -> scanner takes the real (first strict match) and
+    #                             bayan takes the real (last). They AGREE, the
+    #                             refusal never fires, and this test passes with
+    #                             the guard DELETED.
+    #   real FIRST, decoy LAST -> scanner takes the real, bayan takes the DECOY.
+    #                             They DISAGREE and the guard must refuse.
+    #
+    # Only the second order still exercises the refusal.
+    var lo = _str_into(loose, 0, "salt = \"");
+    lo = _str_into(loose, lo, hex_encode(blk, SALT_LEN));          # the REAL salt, strict shape, FIRST
+    lo = _str_into(loose, lo, "\"\nsalt=\"");                       # loose decoy, LAST
     var z = 0;
     while (z < SALT_LEN * 2) { store8(loose + lo, 97); lo = lo + 1; z = z + 1; }   # 'a' x32
-    lo = _str_into(loose, lo, "\"\nsalt = \"");
-    lo = _str_into(loose, lo, hex_encode(blk, SALT_LEN));          # the REAL salt, strict shape
     lo = _str_into(loose, lo, "\"\npubkey = \"");
     lo = _str_into(loose, lo, hex_encode(blk + IDENT_PK, PK_LEN));
     lo = _str_into(loose, lo, "\"\n");
@@ -7033,12 +7046,13 @@ fn test_preauth_alloc(): i64 {
     # it the comparison would also be reading `slen` bytes out of a string that
     # may be shorter, which is the memory-safety half of why it is there.
     var pfx = alloc(512);
-    var fo = _str_into(pfx, 0, "salt=\"");
-    fo = _str_into(pfx, fo, hex_encode(blk, SALT_LEN));        # a PREFIX-MATCHING decoy...
+    var fo = _str_into(pfx, 0, "salt = \"");
+    fo = _str_into(pfx, fo, hex_encode(blk, SALT_LEN));        # the REAL salt, strict, FIRST
+    fo = _str_into(pfx, fo, "\"\nsalt=\"");                      # PREFIX-MATCHING decoy, LAST
+    fo = _str_into(pfx, fo, hex_encode(blk, SALT_LEN));        # ...starts with the real value...
     z = 0;
-    while (z < SALT_LEN * 2) { store8(pfx + fo, 97); fo = fo + 1; z = z + 1; }   # ...that keeps going
-    fo = _str_into(pfx, fo, "\"\nsalt = \"");
-    fo = _str_into(pfx, fo, hex_encode(blk, SALT_LEN));
+    while (z < SALT_LEN * 2) { store8(pfx + fo, 97); fo = fo + 1; z = z + 1; }   # ...then keeps going
+    fo = _str_into(pfx, fo, "\"\npubkey = \"");
     fo = _str_into(pfx, fo, "\"\npubkey = \"");
     fo = _str_into(pfx, fo, hex_encode(blk + IDENT_PK, PK_LEN));
     fo = _str_into(pfx, fo, "\"\n");
@@ -7050,13 +7064,16 @@ fn test_preauth_alloc(): i64 {
 
     # A decoy on `pubkey` is refused the same way — the guard covers both fields.
     var pdec = alloc(512);
-    var po = _str_into(pdec, 0, "pubkey=\"");
-    z = 0;
-    while (z < PK_LEN * 2) { store8(pdec + po, 97); po = po + 1; z = z + 1; }
-    po = _str_into(pdec, po, "\"\nsalt = \"");
+    # Real pubkey FIRST, decoy LAST — see the ordering note above: bayan is
+    # last-wins since 1.5.4 while `_scan_kv` is first-wins, so a decoy placed
+    # first is read past by BOTH and the refusal never fires.
+    var po = _str_into(pdec, 0, "salt = \"");
     po = _str_into(pdec, po, hex_encode(blk, SALT_LEN));
     po = _str_into(pdec, po, "\"\npubkey = \"");
-    po = _str_into(pdec, po, hex_encode(blk + IDENT_PK, PK_LEN));
+    po = _str_into(pdec, po, hex_encode(blk + IDENT_PK, PK_LEN));   # the REAL pubkey, FIRST
+    po = _str_into(pdec, po, "\"\npubkey=\"");                       # decoy, LAST
+    z = 0;
+    while (z < PK_LEN * 2) { store8(pdec + po, 97); po = po + 1; z = z + 1; }
     po = _str_into(pdec, po, "\"\n");
     store8(pdec + po, 0);
     _sign_record_as("Crafted", 7, blk, pdec);
@@ -7717,7 +7734,6 @@ fn test_shutdown_and_class_guard(): i64 {
       "...and the scanner does not simply match anything");
     return 0;
 }
-
 
 # === 1.7.13 — the reserve is per-command; the queue is per-read. ===
 #
@@ -8970,7 +8986,7 @@ fn test_login_parse(): i64 {
     # when it happens: a value quietly replaced by its default.
     var secs = toml_parse(str_new(rec, rn));
     assert(vec_len(secs) > 0, "the fixture parses under bayan too");
-    var pairs = toml_section_pairs(vec_get(secs, 0));
+    var pairs = _player_pairs(secs);
 
     var rvb = _rv();
     _rv_set_bayan(rvb, pairs);
@@ -9160,4 +9176,3 @@ fn test_gate5(): i64 {
 
 var exit_code = main();
 syscall(60, exit_code);
-

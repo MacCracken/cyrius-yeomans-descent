@@ -204,14 +204,14 @@ fn session_set_out(epfd, s, armed): i64 {
 
 # === Bring up a listener on INADDR_ANY:port ===
 fn open_listener(port): i64 {
-    var sr = tcp_socket();
-    if (is_ok(sr) == 0) { return 0 - err_code_of(sr); }
-    var sfd = result_unwrap(sr);
+    var sr_t, sr_v = tcp_socket();
+    if (is_ok(sr_t) == 0) { return 0 - err_code_of(sr_t, sr_v); }
+    var sfd = result_unwrap(sr_t, sr_v);
     sock_reuse(sfd);
-    var br = sock_bind(sfd, INADDR_ANY(), port);
-    if (is_ok(br) == 0) { sock_close(sfd); return 0 - err_code_of(br); }
-    var lr = sock_listen(sfd, LISTEN_BACKLOG);
-    if (is_ok(lr) == 0) { sock_close(sfd); return 0 - err_code_of(lr); }
+    var br_t, br_v = sock_bind(sfd, INADDR_ANY(), port);
+    if (is_ok(br_t) == 0) { sock_close(sfd); return 0 - err_code_of(br_t, br_v); }
+    var lr_t, lr_v = sock_listen(sfd, LISTEN_BACKLOG);
+    if (is_ok(lr_t) == 0) { sock_close(sfd); return 0 - err_code_of(lr_t, lr_v); }
     var nr = set_nonblock(sfd);
     if (nr < 0) { sock_close(sfd); return nr; }
     return sfd;
@@ -1561,20 +1561,20 @@ fn handle_accept(epfd, listener_fd, now_ms): i64 {
     if (g_tick_count < g_accept_backoff_until) { return 0; }
     var done = 0;
     while (done == 0) {
-        var ar = sock_accept(listener_fd);
-        if (is_ok(ar) == 0) {
+        var ar_t, ar_v = sock_accept(listener_fd);
+        if (is_ok(ar_t) == 0) {
             # EAGAIN is the steady state — the backlog is genuinely drained, and
             # lib/net hands back a shared singleton for it. Anything else is a
             # real error (EMFILE / ENFILE are the ones that matter) and boxes a
             # fresh Err; spinning on it is what burned a core and 2.3 MB/s.
-            if (err_code_of(ar) != _NET_EAGAIN) {
+            if (err_code_of(ar_t, ar_v) != _NET_EAGAIN) {
                 g_accept_backoff_until = g_tick_count + ACCEPT_BACKOFF_TICKS;
                 listener_disarm();
             }
             done = 1;
             continue;
         }
-        var cfd = result_unwrap(ar);
+        var cfd = result_unwrap(ar_t, ar_v);
         # H6 — at capacity, take the connection off the backlog and drop it
         # rather than leaving it pending. Leaving it would re-arm the
         # level-triggered listener immediately and reproduce the same spin.

@@ -209,9 +209,9 @@ fn world_load_objs(path): i64 {
     # error return before this line, so every one of them now unpublishes.
     g_obj_tpl_count = 0;
 
-    var r = cyml_parse_file_r(path);
-    if (is_ok(r) == 0) { return WL_ERR_IO; }
-    var doc = result_unwrap(r);
+    var r_t, r_v = cyml_parse_file_r(path);
+    if (is_ok(r_t) == 0) { return WL_ERR_IO; }
+    var doc = result_unwrap(r_t, r_v);
     var n = cyml_doc_entry_count(doc);
     if (n <= 0)          { return WL_ERR_EMPTY; }
     if (n > MAX_ENTRIES) { return WL_ERR_OVERCAP; }

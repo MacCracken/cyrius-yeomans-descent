@@ -310,9 +310,9 @@ fn _wl_rooms_fail(code): i64 {
 # world globals are populated and exits are resolved + validated; on ANY
 # failure _wl_rooms_fail leaves no live world behind.
 fn world_load_rooms(path): i64 {
-    var r = cyml_parse_file_r(path);
-    if (is_ok(r) == 0) { return _wl_rooms_fail(WL_ERR_IO); }
-    var doc = result_unwrap(r);
+    var r_t, r_v = cyml_parse_file_r(path);
+    if (is_ok(r_t) == 0) { return _wl_rooms_fail(WL_ERR_IO); }
+    var doc = result_unwrap(r_t, r_v);
 
     var n = cyml_doc_entry_count(doc);
     if (n <= 0)            { return _wl_rooms_fail(WL_ERR_EMPTY); }
