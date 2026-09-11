@@ -23,6 +23,8 @@ alloc_init();
 # Deterministic xorshift64 PRNG (no wall-clock seed — the run must be
 # reproducible so a failing seed is debuggable).
 var rng_state = 0x9E3779B97F4A7C15;
+# xorshift64 step. Deterministic by design — a fuzz run must be reproducible
+# from its seed, so this never draws from the OS.
 fn rng_next(): i64 {
     var x = rng_state;
     x = x ^ (x << 13);

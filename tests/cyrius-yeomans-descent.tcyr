@@ -187,6 +187,8 @@ fn test_negotiation(): i64 {
 # === M1-E — login name validation ===
 fn name_ok_cstr(lit): i64 { return login_name_ok(lit, strlen(lit)); }
 
+# Login-name validation: which names the server accepts, rejects, and how it
+# treats case and length boundaries.
 fn test_login(): i64 {
     test_group("login");
     assert_eq(name_ok_cstr("kiran"),  1, "kiran ok");
@@ -208,6 +210,8 @@ fn test_login(): i64 {
 # Tokenize a NUL-terminated literal; return the token count.
 fn tok_cstr(pa, lit): i64 { return parser_tokenize(pa, lit, strlen(lit)); }
 
+# Parser tokenisation: how a raw command line is split into tokens, including
+# quoting, runs of whitespace, and empty input.
 fn test_tokenize(): i64 {
     test_group("tokenize");
     var pa = parser_new();
@@ -261,6 +265,8 @@ fn test_tokenize(): i64 {
 # Tokenize a one-word literal and return the Verb id of token 0.
 fn verb_of(pa, lit): i64 { tok_cstr(pa, lit); return verb_lookup(pa, 0); }
 
+# Verb lookup: that each command word resolves to its verb, and that unknown
+# words resolve to none rather than to a neighbour.
 fn test_verbs(): i64 {
     test_group("verbs");
     var pa = parser_new();
@@ -309,6 +315,8 @@ fn resolve_lit(pa, lit, names, n): i64 {
     return resolve_tok(pa, 0, names, n);
 }
 
+# Noun resolution: matching a token against the objects in scope, including
+# ambiguity and the not-here case.
 fn test_resolve(): i64 {
     test_group("resolve");
     var pa = parser_new();
@@ -351,6 +359,8 @@ fn test_resolve(): i64 {
 # === M2-D — preposition / indirect-object split ===
 fn parse_lit(pa, lit): i64 { return parser_parse(pa, lit, strlen(lit)); }
 
+# Prepositional phrases: that `put X in Y` style commands split into the right
+# direct object, preposition and indirect object.
 fn test_prep(): i64 {
     test_group("prep");
     var pa = parser_new();
@@ -796,6 +806,8 @@ fn _count_all_mobs(): i64 {
     return total;
 }
 
+# World reset: that tearing the world down and rebuilding it leaves no state
+# carried over from the previous run.
 fn test_reset(): i64 {
     test_group("reset");
 
@@ -895,6 +907,8 @@ fn _mk_sess(name, nl): i64 {
     return s;
 }
 
+# Login flow edge cases beyond name validation — the prompts, retries and
+# session state transitions around a login attempt.
 fn test_login_polish(): i64 {
     test_group("login-polish");
     persist_init();
@@ -954,6 +968,8 @@ fn _rep_a(n): i64 {
     return b;
 }
 
+# The persistence security surface: signature verification, the split-reader
+# disagreement guard, and the decoy records that must be refused.
 fn test_security(): i64 {
     test_group("security");
     persist_init();
@@ -1491,7 +1507,8 @@ fn test_hardening(): i64 {
     random_bytes(blk, SALT_LEN);
     ident_derive(blk, "inflate99", 9, blk + IDENT_SK, blk + IDENT_PK);
     store64(blk + IDENT_CREATED, 1);
-    _plant_record(blk, "schema = 1\nname = \"FreezeHero\"\nroom = \"\"\ninv = \"\"\nhp = 1000000\nmaxhp = 30\nclass = 0\n");
+    _plant_record(blk,
+      "schema = 1\nname = \"FreezeHero\"\nroom = \"\"\ninv = \"\"\nhp = 1000000\nmaxhp = 30\nclass = 0\n");
     var s4 = _mk_sess("FreezeHero", 10);
     assert_eq(player_auth_load(s4, "inflate99", 9), 1, "the inflated record loads");
     assert_eq(load64(s4 + SS_MAXHP), 30, "maxhp is as recorded");
@@ -8787,7 +8804,7 @@ fn test_boot_sequence(): i64 {
     assert(rooms_at > 0, "cmd_serve loads the room table");
     assert(rooms_fatal_at > rooms_at, "...and refuses to start when that load FAILED");
     assert(objs_load_at > rooms_fatal_at,
-      "THE ASSERTION BA EXISTS FOR: the object load sits BELOW the rooms guard, so it is reached on every path that survives it");
+      "BA: the object load sits BELOW the rooms guard, so every surviving path reaches it");
     assert_eq(_src_count("src/server.cyr", "running roomless"), 0,
       "...and the 'roomless' affordance that only ever emptied inventories is gone");
 
@@ -8854,7 +8871,8 @@ fn test_unusual_session_states(): i64 {
     assert(PL_ERR_DUP != PL_ERR_UNREADABLE, "...distinct from an unreadable record");
     assert(PL_ERR_DUP != PL_ERR_SCHEMA, "...and from a newer-schema record");
     var dup_at    = _src_offset_of("src/persist.cyr", "return PL_ERR_DUP;");
-    var verify_at = _src_offset_of("src/persist.cyr", "if (ed25519_verify(filepk, g_persist_slurp, prefix, filesig) != 1) {");
+    var verify_at = _src_offset_of("src/persist.cyr",
+      "if (ed25519_verify(filepk, g_persist_slurp, prefix, filesig) != 1) {");
     var restore_at = _src_offset_of("src/persist.cyr", "var lost = _restore_inv(s,");
     assert(dup_at > 0, "player_auth_load can refuse an already-connected character");
     assert(dup_at > verify_at,
@@ -8956,7 +8974,7 @@ fn test_unusual_session_states(): i64 {
 # A canonical record in exactly the shape `_build_record` writes: `[player]` on
 # line 1, quoted strings from _fstr/_fhex, BARE integers from _fint.
 fn _bb_record(): i64 {
-    return "[player]\nschema = 1\nname = \"Scan\"\nsalt = \"b755354829f315d1e93f044ea507c5f3\"\nclass = \"pikeman\"\nroom = \"hub.gate\"\nhp = 24\nmaxhp = 30\nac = -3\ndmod = 0\ncreated = 1785543497\nlast_login = 1785569192\ninv = \"scrip,cell\"\n";
+    return "[player]\nschema = 1\nname = \"Scan\"\nsalt = \"b755354829f315d1e93f044ea507c5f3\"\nclass = \"pikeman\"\nroom = \"hub.gate\"\nhp = 24\nmaxhp = 30\nac = -3\ndmod = 0\ncreated = 1785543497\nlast_login = 1785569192\ninv = \"scrip,cell\"\n";   #skip-lint — one record literal; cyrius has no adjacent-string concatenation
 }
 
 # === 1.7.20 — the login parse (gate re-run #4, item BB / item U's second arm). ===

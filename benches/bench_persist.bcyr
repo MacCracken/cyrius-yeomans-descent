@@ -115,6 +115,8 @@ fn make_identity(name, nlen, pass, plen, seed): i64 {
     return s;
 }
 
+# Benchmark entry point: player save/load cost — record build, signing, write
+# and the read path back.
 fn main(): i64 {
     alloc_init();
     persist_init();

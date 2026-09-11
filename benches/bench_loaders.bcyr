@@ -45,6 +45,7 @@ enum LoaderBench {
 
 var g_lfail = 0;
 
+# Print one loader's timing row: total ns divided by iteration count, labelled.
 fn report_loader(label, ns_total, bytes_total, n): i64 {
     var per_ns = ns_total / n;
     print("  ", 2); print(label, strlen(label)); println("");
@@ -60,6 +61,8 @@ fn report_loader(label, ns_total, bytes_total, n): i64 {
     return 0;
 }
 
+# Benchmark entry point: how long each world-data loader takes to parse and
+# build its objects.
 fn main(): i64 {
     alloc_init();
     println("loader load:");

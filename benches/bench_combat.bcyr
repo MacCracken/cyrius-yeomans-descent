@@ -128,6 +128,8 @@ fn run_load(tpl, devnull, np, nticks, samples): i64 {
     return load64(samples + idx * 8);
 }
 
+# Benchmark entry point: combat resolution throughput on a seeded RNG, so runs
+# are comparable between builds.
 fn main(): i64 {
     alloc_init();
     combat_seed(0x1234567);

@@ -55,6 +55,7 @@ fn build_wire_data(buf, cap): i64 {
 # gates, and a tight number on a shared host is a coin flip.
 enum TelnetBudget { TELNET_NS_PER_BYTE_MAX = 30; }
 
+# Benchmark entry point: telnet negotiation and byte-stream handling.
 fn main(): i64 {
     alloc_init();
     var bad = 0;

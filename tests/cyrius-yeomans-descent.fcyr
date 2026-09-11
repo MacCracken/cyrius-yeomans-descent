@@ -5,6 +5,8 @@
 # stub is retained only so the tests/ tree keeps its .tcyr/.bcyr/.fcyr
 # triple; it is intentionally a no-op that exits clean.
 
+# Scaffold entry point. This harness asserts nothing — the real fuzz harnesses
+# live in fuzz/; it exists so `cyrius fuzz` has a target under tests/.
 fn main() {
     alloc_init();
     println("fuzz: see fuzz/parser_fuzz.fcyr (run via `cyrius fuzz`)");

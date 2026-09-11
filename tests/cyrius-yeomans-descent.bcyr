@@ -9,6 +9,8 @@
 # This file is kept only to preserve the scaffold's tcyr/bcyr/fcyr
 # family; it is intentionally a no-op.
 
+# Scaffold entry point. This file asserts nothing — the real benchmarks live in
+# benches/; it exists so `cyrius bench` has a target in tests/.
 fn main(): i64 {
     alloc_init();
     # 1.7.17 (AW) — SAY SO. This file cannot fail and never could, but `cyrius

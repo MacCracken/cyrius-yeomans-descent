@@ -75,6 +75,7 @@ enum TickBudgetBench {
 
 var g_tb_fail = 0;
 
+# Print one tick-budget row: label, measured time and the budget it is held to.
 fn tb_line(label, us): i64 {
     print("    ", 4); print(label, strlen(label));
     print(" : ", 3); print_num(us / 1000); println(" ms");
@@ -159,6 +160,8 @@ fn tb_saver(seed): i64 {
     return s;
 }
 
+# Benchmark entry point: per-tick cost against the 50 ms p99 budget, including
+# the broadcast-heavy case of many players in one room.
 fn main(): i64 {
     alloc_init();
     persist_init();

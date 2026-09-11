@@ -4,6 +4,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.23] — 2026-09-11
+
+**Migrated to the cyrius 6.6.x value form**, and fixed two pre-existing defects the pin bump
+exposed — one of them a security test that had gone dormant.
+
+### Changed — cyrius pin 6.5.33 → **6.6.2**, libro 2.8.10 → **2.10.0**
+
+cyrius 6.6.0 flipped `Result` / `Option` / `Either` declared `: stack` to a value form — a payload
+variant returns a `(tag, payload)` REGISTER PAIR and allocates nothing; `payload()` is gone.
+
+9 declarations across `classes`, `item`, `mob`, `persist`, `server`, `world` — all
+`cyml_parse_file_r` and socket calls. No propagation traps, no `callptr` Results, no reassignment
+sites.
+
+### Fixed — every field of a loaded record silently fell back to its default
+
+`_rv_set_bayan` read `toml_section_pairs(vec_get(secs, 0))`. A record written by `_build_record`
+opens with `[player]` on line 1, so bayan's **section 0 is the empty ROOT section** — the bucket
+for key/value lines appearing *before* the first header — and the real pairs are in section 1.
+Indexing 0 therefore read an empty pair vec, and because "absent" and "empty" are the same answer
+to every caller, each field quietly took its default.
+
+Now resolved by name via `_player_pairs` → `toml_get_sections(secs, "player")`. ⚠ Scoped to
+**full-record** parses only: the cyml entry-header parses elsewhere (`world`, `classes`, `item`,
+`mob`) carry no `[section]` line at all, so section 0 *is* their root bucket and those correctly
+keep using it.
+
+### Fixed — the split-reader security tests had stopped reaching their guard
+
+`player_auth_load` refuses any record whose two readers disagree about `salt` or `pubkey` —
+otherwise the scanner authenticates against the real salt while every restored field comes from
+the attacker's. Three fixtures exercise it: a loose `salt="…"` shape, a prefix-matching decoy, and
+a loose `pubkey="…"`.
+
+All three placed the decoy **first**, on the premise written into the test: *"on a duplicate key
+BOTH take the FIRST match."* That premise expired. **bayan 1.5.4 changed `bayan_toml_get` to
+LAST-WINS** (citing tomllib / toml-rs / go-toml / tomlkit), while this repo's `_scan_kv` still
+returns on its FIRST match — so which decoy position is dangerous **inverted**:
+
+| decoy position | scanner reads | bayan reads | outcome |
+|---|---|---|---|
+| decoy FIRST (what the tests built) | real | real | agree → refusal never fires |
+| decoy LAST | real | decoy | disagree → guard refuses |
+
+⚠ **The guard itself never stopped working** — a real attacker placing a decoy last is still
+refused today. What broke is the tests' reach: all three passed without entering the refusal path,
+so the suite would have stayed green with the guard deleted. The file's own comment records that
+happening once before ("Three mutations survived on that"). All three fixtures now build the live
+attack shape, with the inversion documented inline.
+
+### Housekeeping
+
+- 20 vendored libs had skewed against the pinned snapshot (they matched 6.5.33's); refreshed.
+  ⚠ This repo tracks **113** lib files while declaring **11** stdlib modules — most of that tree
+  is unused and will skew again at every pin bump. Worth a deliberate cleanup.
+- 19 undocumented public fns across `tests/`, `benches/` and `fuzz/` documented; `src/` was already
+  clean at 0. `cyrius audit` sets `rc = 1` on any undocumented public fn or any lint warning, so
+  both counters had to reach zero.
+- 4 over-length lines and 5 stray blank lines cleared. `_bb_record`'s 250-char record fixture is a
+  single literal and cyrius has no adjacent-string concatenation, so it carries `#skip-lint` —
+  the same marker cyrlint uses on its own over-length lines.
+
 ### Gate re-run #4 — DO-NOT-CLOSE (2026-07-31)
 
 Run against a clean tree at `0aef745`. **0 critical, 3 high, 3 medium, 3 low** —

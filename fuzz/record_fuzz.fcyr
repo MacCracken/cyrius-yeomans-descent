@@ -45,6 +45,8 @@ include "src/server.cyr"
 alloc_init();
 
 var rng_state = 0x243F6A8885A308D3;
+# xorshift64 step. Deterministic by design — a fuzz run must be reproducible
+# from its seed, so this never draws from the OS.
 fn rng_next(): i64 {
     var x = rng_state;
     x = x ^ (x << 13);
