@@ -69,9 +69,8 @@ cyrius test                          # run [build].test + tests/*.tcyr
 - [`docs/architecture/`](docs/architecture/) — Non-obvious constraints (*what's true about the code?*)
 - [`docs/guides/`](docs/guides/) — Task-oriented how-tos
 - [`docs/examples/`](docs/examples/) — Runnable examples
-- [`docs/development/state.md`](docs/development/state.md) — Live state snapshot
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — What is left, then history
-- [`docs/development/handoff.md`](docs/development/handoff.md) — **Start here if picking the project up cold.** Point-in-time; trust `state.md` / `roadmap.md` over it if the date is old
+- [`docs/development/state.md`](docs/development/state.md) — Live state snapshot, and the handoff: **start here if picking the project up cold.** Handing off means making sure it is current
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — What is left: 1.x, then 2.0.0, then a post-2.0 backlog
 
 ## Process
 

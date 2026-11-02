@@ -21,7 +21,7 @@ In the order it should happen.
 
 | # | Next | What | Blocks |
 |---|---|---|---|
-| **1** | [**BV** — AGNOS saves never publish](#bv--on-a-real-agnos-kernel-no-save-after-character-creation-is-ever-published) | Every save after character creation fails, so every AGNOS player loses all progress. The kernel's ext2 `rename` cannot replace a file. Needs a decision: wait for agnos, or an AGNOS-only publish path | the 1.x gate |
+| **1** | [**BV** — AGNOS saves never publish](#bv--on-a-real-agnos-kernel-no-save-after-character-creation-is-ever-published) | Every save after character creation fails, so every AGNOS player loses all progress. The kernel's ext2 `rename` cannot replace a file. **Decided: wait for agnos.** The issue is filed there; descent adds no workaround | the 1.x gate |
 | **2** | [BJ · AA](#the-agnos-lib-conversation--bj-aa) | One upstream conversation about what vendored `lib/` owes the AGNOS target. These are decisions, not patches | the 1.x gate |
 | **3** | [1.8.x in-repo work](#18x--in-repo-work) | The instruments gate re-run #6 needs, plus small fixes (AB, H, CI `--locked`, binary size) | re-run #6 |
 | **4** | [Gate re-run #6](#gate-re-run-6) | After 1–3. Must come back with no critical or high finding | the 1.x gate |
@@ -81,23 +81,27 @@ change, not in a sweep verdict.
   destination**: *"rename-replace is a follow-on bite"*
   (`../agnos/kernel/core/ext2.cyr`, since 2026-05-26). A brand-new record
   publishes, because its target does not exist yet; no rewrite ever does.
-- **Whose code.** The kernel's. agnos already tracks it as
+- **Whose code.** The kernel's. agnos tracks the gap as
   `docs/development/issues/2026-10-28-ext2-rename-cannot-replace-an-existing-file.md`,
-  filed from hapi, which **does not list descent as a consumer**. Add descent
-  there.
+  filed from hapi. **descent's own issue is filed beside it** as
+  `docs/development/issues/2026-11-02-ext2-rename-cannot-replace-loses-every-descent-save.md`,
+  with this evidence and the confirm step.
 - **Why no earlier pass saw it.** Re-run #5 reported "AGNOS persistence works end
   to end" under the mirshi translator, which forwards `rename` to Linux. BU then
   blocked every real-kernel login until now.
-- **The decision.** Either wait for agnos rename-replace, or give AGNOS its own
-  publish path: unlink, then rename, with the loader falling back to
-  `<name>.cyml.tmp` when the record is missing. That gives up ADR 0006's atomicity
-  for a crash window that the fallback covers, and it is an ADR 0006 amendment,
-  not a patch. Separately, decide whether a failed save should tell the player.
+- **Decided (2026-11-02): wait for agnos to repair `rename#31`.** descent keeps
+  ADR 0006's atomic `.tmp` + rename publish and adds no AGNOS-only path. Unlink
+  then rename, and rewrite in place, each open a crash window in which a record
+  is gone or torn; hapi declined the same two.
+- **What closes it here:** once agnos ships rename-replace, run
+  `SCENARIO=persist scripts/agnos-qemu-smoke.sh` against that kernel. The
+  persistence round-trip must pass, and with `KEEP=1` no `<name>.cyml.tmp` may be
+  stranded under `data/players/`.
 
 ### The AGNOS lib/ conversation — BJ, AA
 
 Both land in vendored `lib/` (off-limits here) plus the agnos kernel. Take them
-upstream together, alongside BV's issue.
+upstream together; BV's issue is already there.
 
 #### BJ — one stalled client freezes the whole AGNOS server
 

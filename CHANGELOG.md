@@ -4,6 +4,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Decided — BV waits for agnos
+
+BV is the defect where, on a real AGNOS kernel, no save after character creation is ever
+published, because agnos's ext2 `rename#31` cannot replace an existing file. descent keeps
+ADR 0006's atomic `.tmp` + rename publish and adds **no AGNOS-only workaround**: unlink then
+rename, and rewrite in place, each open a crash window in which a player record is gone or torn.
+The issue is filed in agnos as
+`docs/development/issues/2026-11-02-ext2-rename-cannot-replace-loses-every-descent-save.md`,
+beside the existing hapi issue for the same gap. It includes the measured evidence and the
+confirm step (`SCENARIO=persist scripts/agnos-qemu-smoke.sh`). BV stays open and still blocks
+the 1.x gate.
+
+### Docs — `state.md` is the handoff
+
+`docs/development/handoff.md` is removed. It was a point-in-time copy that had gone stale: it
+still described 1.7.22, cyrius 6.5.33 and BU as the blocker. **Handing off now means keeping
+`state.md` current**, and `CLAUDE.md` points there.
+
+`state.md` is rewritten as a snapshot of the tree today, 1,695 lines down to about 400. It is
+organised as: where the project is, version, open work, the gate, running on a real AGNOS kernel,
+newcomer gotchas, toolchain, dependencies, source layout, tests / benches / fuzz, CI, security,
+lessons, cold start, and ADRs.
+- **Removed:** per-release history (in this file) and stale sections, such as a "6.5.5 drift"
+  warning, a `cyrius fmt -w` quirk that 6.7.18 no longer has, a source layout that listed two
+  benches twice and missed two others, and a 1.2.0 binary size.
+- **Folded in from the handoff, each re-verified against the tree:** `mud_now_ms()` as the only
+  clock, `MAX_SESSIONS` = 7 on AGNOS, `@shutdown` as AGNOS's only clean exit, the two record
+  readers that must agree, and the sibling-defect lesson with its two extensions.
+- The old long-form `state.md` and `handoff.md` are in git:
+  `git show cb11b22:docs/development/state.md` and `git show cb11b22:docs/development/handoff.md`.
+
 ### Fixed — the AGNOS smoke probe reported failures that were not there
 
 On 2026-11-02 `scripts/agnos_probe.py` failed BK (frozen clock) and BJ (stalled loop) against
