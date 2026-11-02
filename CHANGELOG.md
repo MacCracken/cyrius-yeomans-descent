@@ -4,6 +4,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-11-02
+
+**Moved onto the cyrius 6.7 language minor.** The bump needed no source change: the edits are
+the toolchain pin, the libro tag, the re-vendored `lib/` and the `VERSION_STRING` literal.
+
+### Changed — cyrius pin 6.6.20 → **6.7.9**, libro 2.10.8 → **2.11.0**
+
+libro 2.11.0 is the libro release pinned to 6.7.9. Resolved stack: sigil **3.13.12** (was
+3.13.10), patra **1.16.0** (was 1.15.2), sakshi **2.5.8** (was 2.5.7), bayan **1.5.13** (was
+1.5.12).
+
+- **patra pairs with the fold** (both 1.16.0). **sigil sits one patch past it**: 6.7.9 folds
+  3.13.11 and libro pins 3.13.12. That is an upgrade, not a downgrade, and it changes no code:
+  diffed at the tags, the four thin sigil files descent uses differ only in their `# Version:`
+  header. No shadow warning is printed.
+- `lib/`: 70 files re-vendored, none added or removed. All 113 stdlib files are byte-identical
+  to `~/.cyrius/versions/6.7.9/lib`.
+- **Binary:** x86_64 1,301,480 → **1,305,048** bytes (+3,568), `--agnos` 1,302,680 →
+  **1,306,264** (+3,584). libro measured the same +3,568 for itself and put all of it on
+  patra 1.16.0.
+- **What the stack brings:** sigil 3.13.11 zeroes `sha256()`'s context before returning, so the
+  final state and message tail no longer stay in memory. patra 1.16.0's changes (five silent
+  wrong SQL answers made errors, and a WAL-recovery probe before every statement, which costs
+  libro +5–7% on PatraStore appends) **do not reach descent**: its audit log is libro's
+  FileStore (`filestore_open` / `filestore_append` in `persist.cyr`), and it calls nothing in
+  patra.
+
+### Audited — none of 6.7.x's silent-semantics changes reach descent
+
+Most of 6.7.x is new errors: the reserved words `trait`, `const`, `true`, `false`, `do` and
+`dyn`, checked `bool` writes, forward-call arity, `for` steps, and an unmatched module-scope `}`.
+The build reports **no new error and no new warning**, so none of those apply here. Several
+other changes alter what *already-compiling* code computes, which a green suite cannot rule
+out. So `src/`, `tests/`, `benches/`, `fuzz/` and `programs/` were scanned, with comments and
+strings stripped and a raw-`grep` cross-check:
+
+| Change | What descent has |
+|---|---|
+| A lone `!` was silently dropped before 6.7.3 (`if (!ok)` ran as `if (ok)`) | none |
+| Unary `-` / `~` on a named constant before an operator and a literal (6.7.9; `-K + 10` was 15) | no unary `-` or `~` on any name: the codebase writes `0 - 1` |
+| A typed `*T` pointer: narrow deref (6.7.8), step leaking through operators (6.7.9), `&q` of a `*P` parameter (6.7.9) | no typed pointers |
+| Signed slices, `f32` rounding, `u128`, traits, generics, method result types | none |
+| Exec-family children no longer inherit ignored SIGPIPE (6.7.9) | no exec-family call |
+| `fhm_set` overwrite no longer rebuilds (6.7.9) | not called |
+
+### Verification
+
+- `cyrius audit` exits 0: fmt, lint and docs are clean, tests are **1502 passed / 0 failed**, and
+  **benches are 6 / 6**. On a quieter host than 1.7.24's, both timing benches that printed FAIL
+  there now pass.
+- Fuzz 3 / 3. Both targets build.
+- **CI parity:** a full sibling-free re-sync reproduces `lib/` byte-for-byte, and CI's own
+  `cyrius deps` over the committed tree changes nothing. 6.7.6's **`cyrius deps --locked`**
+  reports "lib/ and cyrius.lock are exactly what the tags resolve".
+- A live boot creates a character over TCP and reloads its signed record on reconnect.
+
+### The cyrius 6.7.6 roadmap note
+
+The note's items, taken at this first pin past 6.7.6:
+
+- **`path` as a dev override:** nothing to do. 1.7.24 already removed the `path` line, and
+  `cyrius.cyml` now records the 6.7.6 rule and the `CYRIUS_LOCAL=libro` route.
+- **Commit pins:** already in `cyrius.lock` since 6.6.20, so there was no one-time diff.
+- **`cyrius deps --locked` in CI:** not adopted yet. CI runs a plain `cyrius deps` and has no
+  lock guard or `sed` step to replace. Switching to `--locked` would make CI fail on exactly
+  the divergence that 1.7.22 and 1.7.24 each had to find by hand.
+
 ## [1.7.24] — 2026-11-02
 
 **Toolchain and dependency bump**, plus the four fixes it forced. No behavioural source change:

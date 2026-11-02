@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Yeoman's Descent — a Cyrius-native text MUD server set in a techno-feudal arcology"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.6.20"
+cyrius = "6.7.9"
 
 [build]
 entry = "src/main.cyr"
@@ -57,18 +57,20 @@ stdlib = ["std", "assert", "bench", "args", "net", "chrono", "result", "tagged",
 # M6 persistence (ADR 0004 Ed25519 identity + crash-safe hash-chain store).
 # libro = append-only SHA-256 hash-linked store (FileStore: flock +
 # .tmp/rename atomic replace) — the real crash-safe primitive behind the
-# "T.Ron" persistence subsystem. Pulls sigil 3.13.10 (Ed25519) + patra 1.15.2
+# "T.Ron" persistence subsystem. Pulls sigil 3.13.12 (Ed25519) + patra 1.16.0
 # TRANSITIVELY (libro dropped its own [deps.agnosys] at the agnosys → agnodrm
 # decomposition; the trust stack lives in sigil now).
 #
 # NO `path` LINE, deliberately (1.7.24). It used to read `path = "../libro"`,
-# and below cyrius 6.7.6 `path` BEATS `tag` on every `cyrius build`, not just on
-# `cyrius deps`. Once the sibling moved past this pin (2.11.x targets 6.7.18) a
-# local build silently swapped in its libro + patra 1.16.6 — 6.7-only syntax —
-# and failed, while CI kept building the tag. Without `path` this machine and
-# CI resolve the same bytes. libro's own manifest ships without one for the same
-# reason. From 6.7.6 a `path` is a dev override read only under CYRIUS_LOCAL, so
-# it can come back then (roadmap: "Recorded by cyrius 6.7.6").
+# and below cyrius 6.7.6 `path` BEAT `tag` on every `cyrius build`, not just on
+# `cyrius deps`: once the sibling moved past the pin, a local build silently
+# swapped in its libro and failed, while CI kept building the tag. From 6.7.6
+# (git first) a `path` is a DEV OVERRIDE — a default build always builds the tag,
+# and the checkout is read only under `CYRIUS_LOCAL=libro` (or `=1`, `--local`),
+# into build/local-deps/ without touching lib/ or cyrius.lock. So it would be
+# harmless to re-add now, but it buys nothing here: to co-develop libro, run
+# `CYRIUS_LOCAL=libro cyrius build …` with the line added locally. libro's own
+# manifest ships without one too.
 #
 # NOTE — libro 2.8.0 thinned its sigil surface to capability sub-bundles, so
 # this dep now lands lib/sigil-mldsa.cyr (Ed25519) + lib/sigil_sha256.cyr +
@@ -80,29 +82,33 @@ stdlib = ["std", "assert", "bench", "args", "net", "chrono", "result", "tagged",
 # ⚠ THE TRANSITIVE DOWNGRADE. `cyrius deps` applies a declared dep's copy ON TOP
 # OF the `cyrius lib sync --full` snapshot on every resolve, so a dep that
 # declares an OLDER tag than the pinned toolchain folds will silently DOWNGRADE
-# that file for everything downstream. It is invisible on any machine with a
-# sibling checkout (`path` beats `tag`) and invisible to `deps --verify` (the
-# lock is regenerated FROM the downgraded file, so it agrees with itself) — only
-# CI, which has no siblings, takes the hit. libro 2.8.8/2.8.10 exist to keep
-# `[deps.patra]` equal to the patra the pinned cyrius folds. When bumping the
-# toolchain pin above, check the pairing still holds (the sibling checkout no
-# longer tracks the pin, so read libro's manifest AT THE TAG):
-#     head -3 ~/.cyrius/versions/<pin>/lib/patra.cyr     # 6.6.20 folds 1.15.2
+# that file for everything downstream. Before 6.7.6 it was invisible on any
+# machine with a sibling checkout (`path` beat `tag`), and it is still invisible
+# to `deps --verify` (the lock is regenerated FROM the downgraded file, so it
+# agrees with itself). `cyrius deps --locked` (6.7.6+) is the check that sees it:
+# it resolves the tags, writes nothing, and fails naming each file that differs.
+# libro 2.8.8/2.8.10 exist to keep `[deps.patra]` equal to the patra the pinned
+# cyrius folds. When bumping the toolchain pin above, check the pairing still
+# holds (read libro's manifest AT THE TAG; the sibling tracks libro's own head):
+#     head -3 ~/.cyrius/versions/<pin>/lib/patra.cyr     # 6.7.9 folds 1.16.0
 #     grep -A3 -F '[deps.patra]' ~/.cyrius/deps/libro/<tag>/cyrius.cyml
-#                                                        # libro 2.10.8 pins 1.15.2
-# (sigil pairs the same way: 6.6.20 folds 3.13.10, libro 2.10.8 pins 3.13.10.)
+#                                                        # libro 2.11.0 pins 1.16.0
+# sigil is the one exception at this pin: 6.7.9 folds 3.13.11 and libro 2.11.0
+# pins 3.13.12, one patch NEWER — an upgrade, not a downgrade, and libro's thin
+# sigil files differ between the two only in their `# Version:` header (libro
+# 2.11.0 CHANGELOG). The monolith lib/sigil.cyr is the fold's and is not used.
 #
 # That pairing is why there is no "./lib/ shadows version-pinned" warning. At
-# 6.6.20 all 113 vendored stdlib files (106 at the top level + the 7 in
-# lib/unicode/) are byte-identical to ~/.cyrius/versions/6.6.20/lib; the only
+# 6.7.9 all 113 vendored stdlib files (106 at the top level + the 7 in
+# lib/unicode/) are byte-identical to ~/.cyrius/versions/6.7.9/lib; the only
 # files in lib/ that are NOT from that snapshot are libro's own bundle and the
 # four sigil sub-bundles, which is exactly what [deps.libro] is supposed to land.
 #
 # The sakshi half of this was closed earlier, at 1.7.10, and sigil 3.12.7 removed
 # the cause for good by moving sakshi out of its `[deps.sakshi]` git dep and into
-# `[deps].stdlib` — it tracks the toolchain fold (2.5.7 at 6.6.20) now, so it can
+# `[deps].stdlib` — it tracks the toolchain fold (2.5.8 at 6.7.9) now, so it can
 # no longer downgrade lib/sakshi.cyr under a consumer.
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
-tag = "2.10.8"
+tag = "2.11.0"
 modules = ["dist/libro.cyr"]

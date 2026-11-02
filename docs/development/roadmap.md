@@ -2541,3 +2541,12 @@ merely unwanted-for-now, it belongs in
 - The first default resolve adds commit pins for these deps to `cyrius.lock` — a one-time diff.
 - CI lock guards and `sed`-the-path-out steps can become `cyrius deps --locked`.
 - Reference: the cyrius guide's *Git first; local development is a switch (6.7.6)*.
+
+**Taken at 1.8.0 (pin 6.7.9, 2026-11-02):**
+
+- `path` as a dev override: nothing to do. 1.7.24 already removed descent's `path` line, and
+  `cyrius.cyml` records the 6.7.6 rule and the `CYRIUS_LOCAL=libro` route.
+- Commit pins: already in `cyrius.lock` since 6.6.20, so there was no one-time diff.
+- **Open:** CI's `Resolve dependencies` step is a plain `cyrius deps`, with no lock guard or `sed`
+  step to replace. `cyrius deps --locked` passes on the committed tree. Adopting it would make CI
+  fail on the CI-vs-local `lib/` divergence that 1.7.22 and 1.7.24 each found by hand.

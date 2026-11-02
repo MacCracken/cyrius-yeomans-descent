@@ -3,20 +3,44 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-11-02 (v1.7.24 — **toolchain + dependency bump**,
-> `6.6.2 → 6.6.20` and libro `2.10.0 → 2.10.8`. No behavioural source change.
-> **CI and this machine had diverged again** (since 1.7.23, over patra) and that
-> is closed; `path = "../libro"` is gone; `fs` is a first-party stdlib entry.
-> Gate state is UNCHANGED: re-run #5's ruling stands (0/3/5/4, items BI-BT), ten
-> of twelve closed, **BJ** and **BT** open, and the 1.x gate still blocked by
-> **BU** on one target. This file was not refreshed at 1.7.23; see the CHANGELOG
-> for that release)
+> **Last refresh**: 2026-11-02 (v1.8.0 — **onto the cyrius 6.7 language minor**,
+> `6.6.20 → 6.7.9` and libro `2.10.8 → 2.11.0`. No source change; an audit of
+> 6.7.x's silent-semantics changes found none that reach descent. All gates green,
+> benches 6/6. Gate state is UNCHANGED: re-run #5's ruling stands (0/3/5/4, items
+> BI-BT), ten of twelve closed, **BJ** and **BT** open, and the 1.x gate still
+> blocked by **BU** on one target)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.8.0** — 2026-11-02. **1502 assertions**; `cyrius audit` exits 0 with every
+stage clean, **benches 6/6**; fuzz 3/3; both targets build. No source change: the
+toolchain pin, the libro tag, a re-vendored `lib/` and `VERSION_STRING`.
+
+**The 6.7 language minor needed nothing from descent.** Its new errors (reserved
+`trait` / `const` / `true` / `false` / `do` / `dyn`, checked bools, forward-call
+arity, `for` steps) produce no new error or warning here. Its changes to what
+*already-compiling* code computes were checked by a comment- and string-stripped
+scan of every source root. There is no lone `!` (dropped by the lexer before
+6.7.3), no unary `-` / `~` on a name (the 6.7.9 constant-fold fix; the codebase
+writes `0 - 1`), no typed pointer, slice, trait, generic, `f32` or `u128`, and no
+exec-family call. The table is in the CHANGELOG.
+
+**sigil is one patch past the fold** (6.7.9 folds 3.13.11, libro 2.11.0 pins
+3.13.12). It is an upgrade, and the four thin sigil files differ only in their
+`# Version:` header. patra pairs (1.16.0 both). patra 1.16.0's WAL probe does not
+reach descent, which uses libro's FileStore and never calls patra.
+
+**`cyrius deps --locked` exists now (6.7.6)** and passes on the committed tree:
+"lib/ and cyrius.lock are exactly what the tags resolve". CI still runs a plain
+`cyrius deps`; switching it would make CI fail on the divergence class that 1.7.22
+and 1.7.24 each found by hand.
+
+**Cost:** x86_64 1,305,048 bytes (+3,568), `--agnos` 1,306,264 (+3,584), all of
+it patra 1.16.0 per libro's own measurement.
 
 **1.7.24** — 2026-11-02. **1502 assertions**; `cyrius audit` exits 0 (fmt, lint,
 docs, tests); both targets build. ⚠ **Two timing benches printed FAIL** on a host
@@ -1120,8 +1144,12 @@ written myself two releases earlier.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.20` (`cyrius.cyml [package].cyrius`) — bumped in 1.7.24
-  (was `6.6.2`, set in 1.7.23; `6.5.33` before that, set in 1.7.22)
+- **Cyrius pin**: `6.7.9` (`cyrius.cyml [package].cyrius`) — bumped in 1.8.0
+  (was `6.6.20`, set in 1.7.24; `6.6.2` in 1.7.23; `6.5.33` in 1.7.22)
+- **Git first (6.7.6+):** a `path` beside `git` / `tag` is a dev override read
+  only under `CYRIUS_LOCAL=<dep>` / `--local`; a default build always builds the
+  tag. descent commits no `path`. `cyrius deps --locked` checks `lib/` and
+  `cyrius.lock` against the tags without writing.
 - **6.6.20 refuses to emit a binary with a reachable undefined function** and
   names the stdlib leaf that defines it. Older toolchains compiled the call to a
   `ud2` trap that SIGILLed at runtime, so a missing opt-in is now a build error.
@@ -1401,10 +1429,10 @@ Direct (declared in `cyrius.cyml`):
   blocks in sigil-mldsa and patra bring them in. **A leaf descent calls from its
   own code must be listed here**, which is why `fs` (`dir_list` in `persist.cyr`)
   was added at 1.7.24 when the sidecar stopped carrying it.
-- **libro** `2.10.8` (git, tag only, no `path` since 1.7.24) — append-only SHA-256
+- **libro** `2.11.0` (git, tag only, no `path` since 1.7.24) — append-only SHA-256
   hash-chain store (the crash-safe primitive behind "T.Ron" persistence). Pulls
-  **sigil 3.13.10** (Ed25519, ADR 0004 identity) + **patra 1.15.2** transitively;
-  sakshi **2.5.7** and bayan **1.5.12** come from the 6.6.20 fold. Resolved by
+  **sigil 3.13.12** (Ed25519, ADR 0004 identity) + **patra 1.16.0** transitively;
+  sakshi **2.5.8** and bayan **1.5.13** come from the 6.7.9 fold. Resolved by
   `cyrius deps` into `lib/` (+ `cyrius.lock`: 118 entries, 3 commit-pinned).
 
 **bayan is a direct dep as of 1.2.0.** 6.4.83 carved `cyml`/`toml` (and earlier
@@ -1440,8 +1468,9 @@ Any dep whose tag is older than what the pinned toolchain folds therefore
 **downgrades** that file for everything downstream — invisibly where a sibling
 checkout exists, and invisibly to `deps --verify`, which regenerates the lock
 *from* the downgraded file so it agrees with itself. The pairing to keep true is
-`[deps.patra]` in libro == the patra the pinned cyrius folds (both **1.15.2**
-today, and `[deps.sigil]` == the sigil fold, both **3.13.10**); libro 2.8.8 and
+`[deps.patra]` in libro == the patra the pinned cyrius folds (both **1.16.0**
+today; `[deps.sigil]` is 3.13.12 against a 3.13.11 fold, one patch NEWER and
+header-only in the thin set, which is an upgrade, not a downgrade); libro 2.8.8 and
 2.8.10 exist for exactly this. **1.7.23 broke the pairing** (libro 2.10.0 pinned
 patra 1.13.10 against 6.6.2's 1.14.1) and CI built against the older one until
 1.7.24. Read libro's pins at the TAG (`~/.cyrius/deps/libro/<tag>/cyrius.cyml`),
