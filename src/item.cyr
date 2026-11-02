@@ -239,12 +239,12 @@ fn world_load_objs(path): i64 {
         if (vec_len(secs) == 0) { return WL_ERR_NOID; }
         var pairs = toml_section_pairs(vec_get(secs, 0));
 
-        var kind = toml_get(pairs, "kind");
+        var kind = bayan_toml_get_by_cstr(pairs, "kind");
         if (kind == 0) { return WL_ERR_KIND; }
         if (str_eq_cstr(kind, "obj") == 0) { return WL_ERR_KIND; }
 
         var t = ot_at(i);
-        var id = toml_get(pairs, "id");
+        var id = bayan_toml_get_by_cstr(pairs, "id");
         if (id == 0) { return WL_ERR_NOID; }
         # H11 (1.6.6) — OT_ID_CAP - 1, not OT_ID_CAP. The template wrote up to
         # 32 bytes while item_new copies an instance's OI_TPL_ID at
@@ -253,9 +253,9 @@ fn world_load_objs(path): i64 {
         # reload — the save record stores inventory BY that id. Capping both at
         # CAP - 1 keeps them NUL-terminated and round-trippable.
         store64(t + OT_ID_LEN, copy_str_capped(t + OT_ID, OT_ID_CAP - 1, id));
-        var name = toml_get(pairs, "name");
+        var name = bayan_toml_get_by_cstr(pairs, "name");
         if (name != 0) { store64(t + OT_NAME_LEN, copy_str_capped(t + OT_NAME, OT_NAME_CAP - 1, name)); }
-        var kw = toml_get(pairs, "keywords");
+        var kw = bayan_toml_get_by_cstr(pairs, "keywords");
         if (kw != 0) { store64(t + OT_KW_LEN, copy_str_capped(t + OT_KW, OT_KW_CAP - 1, kw)); }
         store64(t + OT_DESC_PTR, cyml_entry_body(e));
         store64(t + OT_DESC_LEN, cyml_entry_body_len(e));

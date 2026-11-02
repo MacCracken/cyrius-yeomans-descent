@@ -140,7 +140,7 @@ fn mi_name_len(m): i64    { return mt_name_len(mi_tpl(m)); }
 # zone files that load today, and the zone format is frozen by ADR 0007 §5 for
 # all of 1.x — that belongs to the 2.0 format-version conversation.
 fn toml_int(pairs, key, def): i64 {
-    var v = toml_get(pairs, key);
+    var v = bayan_toml_get_by_cstr(pairs, key);
     if (v == 0) { return def; }
     return _int_from_bytes(str_data(v), str_len(v), def);
 }
@@ -286,21 +286,21 @@ fn world_load_mobs(path): i64 {
         if (vec_len(secs) == 0) { return WL_ERR_NOID; }
         var pairs = toml_section_pairs(vec_get(secs, 0));
 
-        var kind = toml_get(pairs, "kind");
+        var kind = bayan_toml_get_by_cstr(pairs, "kind");
         if (kind == 0) { return WL_ERR_KIND; }
         if (str_eq_cstr(kind, "mob") == 0) { return WL_ERR_KIND; }
 
         var t = mt_at(i);
-        var id = toml_get(pairs, "id");
+        var id = bayan_toml_get_by_cstr(pairs, "id");
         if (id == 0) { return WL_ERR_NOID; }
         store64(t + MT_ID_LEN, copy_str_capped(t + MT_ID, MT_ID_CAP, id));
 
-        var name = toml_get(pairs, "name");
+        var name = bayan_toml_get_by_cstr(pairs, "name");
         # cap at CAP-1 so the memset-zeroed tail leaves a NUL — mob names
         # are used as cstrs in combat / room prose.
         if (name != 0) { store64(t + MT_NAME_LEN, copy_str_capped(t + MT_NAME, MT_NAME_CAP - 1, name)); }
 
-        var kw = toml_get(pairs, "keywords");
+        var kw = bayan_toml_get_by_cstr(pairs, "keywords");
         if (kw != 0) {
             # cap at CAP-1 so the memset-zeroed tail leaves a NUL terminator.
             store64(t + MT_KW_LEN, copy_str_capped(t + MT_KW, MT_KW_CAP - 1, kw));
@@ -312,14 +312,14 @@ fn world_load_mobs(path): i64 {
         store64(t + MT_HIT,   toml_int(pairs, "hit", 0));
 
         var nd[8]; var dd[8]; var dm[8];
-        parse_dice(toml_get(pairs, "damage"), &nd, &dd, &dm);
+        parse_dice(bayan_toml_get_by_cstr(pairs, "damage"), &nd, &dd, &dm);
         store64(t + MT_NDICE, load64(&nd));
         store64(t + MT_DSIZE, load64(&dd));
         store64(t + MT_DMOD,  load64(&dm));
 
         store64(t + MT_DESC_PTR, cyml_entry_body(e));
         store64(t + MT_DESC_LEN, cyml_entry_body_len(e));
-        store64(t + MT_LOOT, toml_get(pairs, "loot"));   # str or 0
+        store64(t + MT_LOOT, bayan_toml_get_by_cstr(pairs, "loot"));   # str or 0
         i = i + 1;
     }
     g_mob_tpl_count = n;   # H9 — publish only now that every entry parsed

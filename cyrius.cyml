@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Yeoman's Descent — a Cyrius-native text MUD server set in a techno-feudal arcology"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.7.9"
+cyrius = "6.7.18"
 
 [build]
 entry = "src/main.cyr"
@@ -57,7 +57,7 @@ stdlib = ["std", "assert", "bench", "args", "net", "chrono", "result", "tagged",
 # M6 persistence (ADR 0004 Ed25519 identity + crash-safe hash-chain store).
 # libro = append-only SHA-256 hash-linked store (FileStore: flock +
 # .tmp/rename atomic replace) — the real crash-safe primitive behind the
-# "T.Ron" persistence subsystem. Pulls sigil 3.13.12 (Ed25519) + patra 1.16.0
+# "T.Ron" persistence subsystem. Pulls sigil 3.13.15 (Ed25519) + patra 1.16.6
 # TRANSITIVELY (libro dropped its own [deps.agnosys] at the agnosys → agnodrm
 # decomposition; the trust stack lives in sigil now).
 #
@@ -90,25 +90,24 @@ stdlib = ["std", "assert", "bench", "args", "net", "chrono", "result", "tagged",
 # libro 2.8.8/2.8.10 exist to keep `[deps.patra]` equal to the patra the pinned
 # cyrius folds. When bumping the toolchain pin above, check the pairing still
 # holds (read libro's manifest AT THE TAG; the sibling tracks libro's own head):
-#     head -3 ~/.cyrius/versions/<pin>/lib/patra.cyr     # 6.7.9 folds 1.16.0
+#     head -3 ~/.cyrius/versions/<pin>/lib/patra.cyr     # 6.7.18 folds 1.16.6
 #     grep -A3 -F '[deps.patra]' ~/.cyrius/deps/libro/<tag>/cyrius.cyml
-#                                                        # libro 2.11.0 pins 1.16.0
-# sigil is the one exception at this pin: 6.7.9 folds 3.13.11 and libro 2.11.0
-# pins 3.13.12, one patch NEWER — an upgrade, not a downgrade, and libro's thin
-# sigil files differ between the two only in their `# Version:` header (libro
-# 2.11.0 CHANGELOG). The monolith lib/sigil.cyr is the fold's and is not used.
+#                                                        # libro 2.11.3 pins 1.16.6
+# sigil pairs the same way (6.7.18 folds 3.13.15, libro 2.11.3 pins 3.13.15).
+# A tag NEWER than the fold is an upgrade, not this bug — 1.8.0 ran sigil one
+# patch past its fold, header-only in the thin set.
 #
 # That pairing is why there is no "./lib/ shadows version-pinned" warning. At
-# 6.7.9 all 113 vendored stdlib files (106 at the top level + the 7 in
-# lib/unicode/) are byte-identical to ~/.cyrius/versions/6.7.9/lib; the only
+# 6.7.18 all 113 vendored stdlib files (106 at the top level + the 7 in
+# lib/unicode/) are byte-identical to ~/.cyrius/versions/6.7.18/lib; the only
 # files in lib/ that are NOT from that snapshot are libro's own bundle and the
 # four sigil sub-bundles, which is exactly what [deps.libro] is supposed to land.
 #
 # The sakshi half of this was closed earlier, at 1.7.10, and sigil 3.12.7 removed
 # the cause for good by moving sakshi out of its `[deps.sakshi]` git dep and into
-# `[deps].stdlib` — it tracks the toolchain fold (2.5.8 at 6.7.9) now, so it can
+# `[deps].stdlib` — it tracks the toolchain fold (2.5.10 at 6.7.18) now, so it can
 # no longer downgrade lib/sakshi.cyr under a consumer.
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
-tag = "2.11.0"
+tag = "2.11.3"
 modules = ["dist/libro.cyr"]

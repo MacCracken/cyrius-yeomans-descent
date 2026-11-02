@@ -3,18 +3,48 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-11-02 (v1.8.0 — **onto the cyrius 6.7 language minor**,
-> `6.6.20 → 6.7.9` and libro `2.10.8 → 2.11.0`. No source change; an audit of
-> 6.7.x's silent-semantics changes found none that reach descent. All gates green,
-> benches 6/6. Gate state is UNCHANGED: re-run #5's ruling stands (0/3/5/4, items
-> BI-BT), ten of twelve closed, **BJ** and **BT** open, and the 1.x gate still
-> blocked by **BU** on one target)
+> **Last refresh**: 2026-11-02 (v1.8.1 — **latest tags**, `6.7.9 → 6.7.18` and
+> libro `2.11.0 → 2.11.3`; bayan jumps `1.5.13 → 1.11.1`. The only source edit
+> moves 27 calls off two deprecated bayan names. All gates green, benches 6/6,
+> zero warnings. **Binary +41.6%** (+57% under DCE). Gate state is UNCHANGED:
+> re-run #5's ruling stands (0/3/5/4, items BI-BT), **BJ** and **BT** open, and
+> the 1.x gate still blocked by **BU** — which this bump may have moved
+> (`lib/thread_local.cyr` changed) and which has **not** been re-run on a kernel)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.8.1** — 2026-11-02. **1502 assertions**; `cyrius audit` exits 0 with every
+stage clean, **benches 6/6**; fuzz 3/3; both targets build with **no warnings**.
+Toolchain to the latest tags: cyrius **6.7.18**, libro **2.11.3**, which brings
+sigil 3.13.15 and patra 1.16.6 (both equal to the fold), sakshi 2.5.10 and
+**bayan 1.11.1** (from 1.5.13).
+
+**The one source edit:** bayan 1.11.0 deprecated `toml_get` / `toml_get_sections`
+as one-line forwards to `bayan_toml_get_by_cstr` /
+`bayan_toml_get_sections_by_cstr`, and all 27 call sites now use the new names.
+The answers are identical, and duplicate keys are still last-wins, so
+`player_auth_load`'s split-reader guard holds.
+
+**Audited, nothing reaches descent:** bayan's 11 releases (section model,
+strings, allocation per call and return conventions are unchanged for descent's
+inputs; CYML whole-line markers change nothing in the shipped data), libro
+2.11.3's stricter JSONL verifiers (descent calls none), and cyrius 6.7.10–6.7.18's
+silent-semantics changes (no typed code for them to reach). The details are in
+the CHANGELOG.
+
+⚠ **Binary: x86_64 1,305,048 → 1,848,000 bytes (+41.6%)**, `--agnos` 1,306,264 →
+1,853,360. Under `CYRIUS_DCE=1` it is 506,328 → 795,328 (+57%), so the growth is
+reachable code too. bayan's bundle grew by 259 KB of source and now includes
+`math`, `hashseed`, `slice` and `unicode` itself. Its share was not separated
+from the compiler's.
+
+⚠ **BU may have moved and has not been measured.** `lib/thread_local.cyr` (+245
+lines), `lib/syscalls_x86_64_agnos.cyr` (+213) and sigil's `cbank()` all changed.
+The TLS self-install path BU faults in is still present.
 
 **1.8.0** — 2026-11-02. **1502 assertions**; `cyrius audit` exits 0 with every
 stage clean, **benches 6/6**; fuzz 3/3; both targets build. No source change: the
@@ -1144,8 +1174,12 @@ written myself two releases earlier.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.7.9` (`cyrius.cyml [package].cyrius`) — bumped in 1.8.0
-  (was `6.6.20`, set in 1.7.24; `6.6.2` in 1.7.23; `6.5.33` in 1.7.22)
+- **Cyrius pin**: `6.7.18` (`cyrius.cyml [package].cyrius`) — bumped in 1.8.1
+  (was `6.7.9`, set in 1.8.0; `6.6.20` in 1.7.24; `6.6.2` in 1.7.23; `6.5.33` in 1.7.22)
+- **`cyrius build` re-vendors the declared stdlib leaves** from the pinned
+  snapshot, and refuses to re-lock when the pin moves while `lib/` holds stale
+  snapshot files. A hand-swapped `lib/<leaf>.cyr` does not survive a build, so
+  A/B a library by moving the pin, not by copying files.
 - **Git first (6.7.6+):** a `path` beside `git` / `tag` is a dev override read
   only under `CYRIUS_LOCAL=<dep>` / `--local`; a default build always builds the
   tag. descent commits no `path`. `cyrius deps --locked` checks `lib/` and
@@ -1429,10 +1463,13 @@ Direct (declared in `cyrius.cyml`):
   blocks in sigil-mldsa and patra bring them in. **A leaf descent calls from its
   own code must be listed here**, which is why `fs` (`dir_list` in `persist.cyr`)
   was added at 1.7.24 when the sidecar stopped carrying it.
-- **libro** `2.11.0` (git, tag only, no `path` since 1.7.24) — append-only SHA-256
+- **libro** `2.11.3` (git, tag only, no `path` since 1.7.24) — append-only SHA-256
   hash-chain store (the crash-safe primitive behind "T.Ron" persistence). Pulls
-  **sigil 3.13.12** (Ed25519, ADR 0004 identity) + **patra 1.16.0** transitively;
-  sakshi **2.5.8** and bayan **1.5.13** come from the 6.7.9 fold. Resolved by
+  **sigil 3.13.15** (Ed25519, ADR 0004 identity) + **patra 1.16.6** transitively;
+  sakshi **2.5.10** and bayan **1.11.1** come from the 6.7.18 fold. descent calls
+  bayan's TOML lookups by their 1.11.0 names (`bayan_toml_get_by_cstr`,
+  `bayan_toml_get_sections_by_cstr`); the old `toml_get` / `toml_get_sections`
+  are deprecated forwards to them. Resolved by
   `cyrius deps` into `lib/` (+ `cyrius.lock`: 118 entries, 3 commit-pinned).
 
 **bayan is a direct dep as of 1.2.0.** 6.4.83 carved `cyml`/`toml` (and earlier
@@ -1468,9 +1505,8 @@ Any dep whose tag is older than what the pinned toolchain folds therefore
 **downgrades** that file for everything downstream — invisibly where a sibling
 checkout exists, and invisibly to `deps --verify`, which regenerates the lock
 *from* the downgraded file so it agrees with itself. The pairing to keep true is
-`[deps.patra]` in libro == the patra the pinned cyrius folds (both **1.16.0**
-today; `[deps.sigil]` is 3.13.12 against a 3.13.11 fold, one patch NEWER and
-header-only in the thin set, which is an upgrade, not a downgrade); libro 2.8.8 and
+`[deps.patra]` in libro == the patra the pinned cyrius folds (both **1.16.6**
+today, and `[deps.sigil]` == the sigil fold, both **3.13.15**); libro 2.8.8 and
 2.8.10 exist for exactly this. **1.7.23 broke the pairing** (libro 2.10.0 pinned
 patra 1.13.10 against 6.6.2's 1.14.1) and CI built against the older one until
 1.7.24. Read libro's pins at the TAG (`~/.cyrius/deps/libro/<tag>/cyrius.cyml`),

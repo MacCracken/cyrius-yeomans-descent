@@ -2015,7 +2015,7 @@ fn _rv(): i64 {
 # `[section]` line at all) correctly DO use section 0 — that is the root bucket
 # and it is where their pairs are. Only full-record parses need this.
 fn _player_pairs(secs): i64 {
-    var hits = toml_get_sections(secs, "player");
+    var hits = bayan_toml_get_sections_by_cstr(secs, "player");
     if (vec_len(hits) > 0) { return toml_section_pairs(vec_get(hits, 0)); }
     return toml_section_pairs(vec_get(secs, 0));
 }
@@ -2046,7 +2046,7 @@ fn _rv_raw(rv, key, out_len): i64 {
         if (q != 0) { return q; }
         return _scan_kv_bare(b, nn, key, out_len);
     }
-    var v = toml_get(load64(rv + RV_PAIRS), key);
+    var v = bayan_toml_get_by_cstr(load64(rv + RV_PAIRS), key);
     if (v == 0) { return 0; }
     store64(out_len, str_len(v));
     return str_data(v);

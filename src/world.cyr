@@ -324,9 +324,9 @@ fn world_load_rooms(path): i64 {
     var fsecs = toml_parse(fhdr);
     if (vec_len(fsecs) > 0) {
         var fpairs = toml_section_pairs(vec_get(fsecs, 0));
-        g_zone_name = toml_get(fpairs, "name");
-        g_zone_id   = toml_get(fpairs, "zone");
-        start_id = toml_get(fpairs, "start");
+        g_zone_name = bayan_toml_get_by_cstr(fpairs, "name");
+        g_zone_id   = bayan_toml_get_by_cstr(fpairs, "zone");
+        start_id = bayan_toml_get_by_cstr(fpairs, "start");
         # H13 — clamped; an authored 0 / negative / wrapped value would
         # otherwise reset the zone on every tick. See clamp_reset_secs.
         g_zone_reset_secs = clamp_reset_secs(toml_int(fpairs, "reset_secs", 900));   # M7-A
@@ -360,16 +360,16 @@ fn world_load_rooms(path): i64 {
         if (vec_len(secs) == 0) { return _wl_rooms_fail(WL_ERR_NOID); }
         var pairs = toml_section_pairs(vec_get(secs, 0));
 
-        var kind = toml_get(pairs, "kind");
+        var kind = bayan_toml_get_by_cstr(pairs, "kind");
         if (kind == 0) { return _wl_rooms_fail(WL_ERR_KIND); }
         if (str_eq_cstr(kind, "room") == 0) { return _wl_rooms_fail(WL_ERR_KIND); }
 
         var rm = room_at(i);
-        var id = toml_get(pairs, "id");
+        var id = bayan_toml_get_by_cstr(pairs, "id");
         if (id == 0) { return _wl_rooms_fail(WL_ERR_NOID); }
         store64(rm + RM_ID_LEN, copy_str_capped(rm + RM_ID, RM_ID_CAP, id));
 
-        var title = toml_get(pairs, "title");
+        var title = bayan_toml_get_by_cstr(pairs, "title");
         if (title == 0) {
             store64(rm + RM_TITLE_LEN, 0);
         } else {
@@ -381,12 +381,12 @@ fn world_load_rooms(path): i64 {
 
         # Spawn lists (space-separated template ids, or absent). Instances
         # are created by world_spawn after mob/obj templates are loaded.
-        store64(rm + RM_MOBSPAWN, toml_get(pairs, "mobs"));
-        store64(rm + RM_OBJSPAWN, toml_get(pairs, "objects"));
+        store64(rm + RM_MOBSPAWN, bayan_toml_get_by_cstr(pairs, "mobs"));
+        store64(rm + RM_OBJSPAWN, bayan_toml_get_by_cstr(pairs, "objects"));
 
         var dir = 0;
         while (dir < NDIR) {
-            var v = toml_get(pairs, exit_key(dir));
+            var v = bayan_toml_get_by_cstr(pairs, exit_key(dir));
             store64(exit_tmp + (i * NDIR + dir) * 8, v);
             store64(rm + RM_EXIT + dir * 8, 0 - 1);
             dir = dir + 1;

@@ -123,12 +123,12 @@ fn world_load_classes(path): i64 {
         if (vec_len(secs) == 0) { return WL_ERR_NOID; }
         var pairs = toml_section_pairs(vec_get(secs, 0));
 
-        var kind = toml_get(pairs, "kind");
+        var kind = bayan_toml_get_by_cstr(pairs, "kind");
         if (kind == 0) { return WL_ERR_KIND; }
         if (str_eq_cstr(kind, "class") == 0) { return WL_ERR_KIND; }
 
         var c = cl_at(i);
-        var id = toml_get(pairs, "id");
+        var id = bayan_toml_get_by_cstr(pairs, "id");
         if (id == 0) { return WL_ERR_NOID; }
         # H3 (1.6.14) — CAP - 1, matching the two fields beside it.
         #
@@ -139,9 +139,9 @@ fn world_load_classes(path): i64 {
         # does, and the same shape as the OT_ID / OI_TPL_ID mismatch that 1.6.6
         # fixed for objects and did not sweep for classes.
         store64(c + CL_ID_LEN, copy_str_capped(c + CL_ID, CL_ID_CAP - 1, id));
-        var name = toml_get(pairs, "name");
+        var name = bayan_toml_get_by_cstr(pairs, "name");
         if (name != 0) { store64(c + CL_NAME_LEN, copy_str_capped(c + CL_NAME, CL_NAME_CAP - 1, name)); }
-        var role = toml_get(pairs, "role");
+        var role = bayan_toml_get_by_cstr(pairs, "role");
         if (role != 0) { store64(c + CL_ROLE_LEN, copy_str_capped(c + CL_ROLE, CL_ROLE_CAP - 1, role)); }
 
         store64(c + CL_STR, toml_int(pairs, "str", 10));
@@ -154,7 +154,7 @@ fn world_load_classes(path): i64 {
         store64(c + CL_ENERGY, toml_int(pairs, "energy", 20));
 
         var nd[8]; var dd[8]; var dm[8];
-        parse_dice(toml_get(pairs, "damage"), &nd, &dd, &dm);
+        parse_dice(bayan_toml_get_by_cstr(pairs, "damage"), &nd, &dd, &dm);
         store64(c + CL_NDICE, load64(&nd));
         store64(c + CL_DSIZE, load64(&dd));
         store64(c + CL_DMOD,  load64(&dm));

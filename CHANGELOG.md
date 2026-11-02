@@ -4,6 +4,134 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-11-02
+
+**Toolchain and dependency bump to the latest tags.** The only source edit is moving off two
+TOML lookups bayan 1.11.0 deprecated: same answers, new names.
+
+### Changed — cyrius pin 6.7.9 → **6.7.18**, libro 2.11.0 → **2.11.3**
+
+cyrius 6.7.18 and libro 2.11.3 are the latest published tags, and libro 2.11.3 is pinned to
+6.7.18. Resolved stack: sigil **3.13.15** (was 3.13.12), patra **1.16.6** (was 1.16.0), sakshi
+**2.5.10** (was 2.5.8), bayan **1.11.1** (was 1.5.13).
+
+- **Both libro pins equal the fold again:** patra 1.16.6 and sigil 3.13.15. 1.8.0's sigil sat
+  one patch past its fold; this one doesn't.
+- `lib/`: 68 files re-vendored, none added or removed. All 113 stdlib files are byte-identical
+  to `~/.cyrius/versions/6.7.18/lib`.
+
+### Changed — `toml_get` / `toml_get_sections` → `bayan_toml_get_by_cstr` / `bayan_toml_get_sections_by_cstr`
+
+bayan 1.11.0 marked both `#deprecated`. Each is now a one-line forward to its `_by_cstr` twin,
+so all 27 call sites (`classes`, `item`, `mob`, `persist`, `world`) warned on every build. They
+now call the new names directly. The answers are identical (checked in the source): the only
+behavioural difference bayan records is that a null `pairs` or key returns 0, and descent passes
+neither. **Duplicate keys are still last-wins**, so `player_auth_load`'s split-reader guard and
+its decoy-last tests still hold. The build is back to zero warnings.
+
+### What bayan 1.5.13 → 1.11.1 means for descent
+
+All 11 releases (1.5.14 through 1.11.1) were read against descent's 15 bayan calls, and the old
+and new bundles' TOML and CYML code was diffed.
+
+- **Unchanged for descent's inputs:** the flat TOML parser's section model (root section `""`
+  first, then one per header), string, escape and control-byte handling, value scanning, the
+  return conventions, and per-call allocation. `toml_int` is descent's own function.
+- **CYML lines are whole lines now (1.7.0 / 1.8.0)**, and CRLF ends a marker or `---` line. No
+  authored or fixture `.cyml` file has an affected shape or a CR byte, so nothing loads
+  differently. A zone saved with CRLF line endings, which used to parse to zero entries, now
+  loads.
+- **A TOML header with more than 8 dotted keys is indexed (1.11.1).** On the bump allocator
+  that index is never freed, so up to about 63 KB is held per such parse. Nothing descent
+  writes or authors has dotted keys, and `_build_record` cannot emit one, so this is latent.
+- Out of reach: JSON now refuses duplicate keys and malformed numbers, base64 refuses
+  non-canonical input, and there are PDF, yaml, csv and markdown changes and a strict
+  `bayan_toml_v_parse`. descent calls none of these.
+
+### What libro 2.11.1 → 2.11.3 means for descent
+
+**From 2.11.3, a JSONL record that does not parse is an error** for
+`filestore_verify_streamed`, `filestore_load_and_verify` and `chain_import`, including a final
+record torn by a crash mid-append. descent calls none of them. Its server uses `filestore_open`,
+which does not read the log, and `filestore_append`; it seeds the chain from its own scan. The
+one reader in its tests, `filestore_load_all`, stays lenient and now logs a `sakshi_warn` per
+bad line. 2.11.2 changed docs and benches only.
+
+### ⚠ Binary size: +41.6%, and +57% even with DCE
+
+| Build | 1.8.0 (6.7.9) | 1.8.1 (6.7.18) |
+|---|---|---|
+| x86_64 | 1,305,048 | **1,848,000** (+542,952) |
+| `--agnos` | 1,306,264 | **1,853,360** (+547,096) |
+| x86_64 with `CYRIUS_DCE=1` | 506,328 | **795,328** (+289,000) |
+
+About half of the growth is unreachable code: 255 KB more of it, which DCE removes. The rest
+is reachable. bayan's bundle grew 735,730 → 995,070 bytes of source and now includes `math`,
+`hashseed`, `slice` and the `unicode` tree itself. This release does not separate bayan's share
+from the compiler's: `cyrius build` re-vendors declared stdlib leaves from the pinned snapshot,
+so the old bayan could not be swapped into a 6.7.18 build to A/B it.
+
+### Audited — cyrius 6.7.10 → 6.7.18 changes that a green suite would not show
+
+Every section of cyrius's migration notes from 6.7.10 to 6.7.18 was read. Each change that
+alters already-compiling code or a stdlib function's behaviour was checked against descent's
+source.
+
+- **Unreachable:** the struct, `Str`, tuple, generic, trait and closure value-passing
+  changes; f64 and narrow-integer typing; `+|` / `+?`; multi-value-return checks; startup
+  order of redeclared globals; include-once at 128+ characters; and the 6.7.18 network, http,
+  ws, DNS and `file_write_atomic` changes. descent has no typed annotations, structs, floats,
+  closures or multi-value returns of its own, and calls none of those stdlib functions.
+- **Reached, and harmless or a fix:**
+  - `dir_list` on a FIFO now returns an empty list instead of hanging (6.7.11).
+  - Tail calls keep their `jmp` (6.7.17).
+  - sigil 3.13.15's crypto lanes are a pool, and `cbank()` no longer hands out a lane. descent
+    starts no threads, so its crypto runs exactly as before.
+- **Tooling:** `cyrius audit` fails on any lint warning, and 6.7.11 / 6.7.12 added lint
+  rules. 6.7.18's `cyrlint`, `cyrfmt --check` and `cyrdoc --check` are clean over every file
+  the audit walks. CI already uses `cyrius test` (the old `cyrius tests` is gone) and an https
+  dep URL (now required).
+- **One name now exists twice, harmlessly.** 6.7.12 added `const EPOLL_EVENT_SIZE` to the
+  stdlib (12 on x86_64, 16 on aarch64). `src/server.cyr:67` declares an enum member of the
+  same name. Neither target warns. The x86_64 values agree, and on aarch64 descent's epoll
+  helper reads its own `EPOLL_EVENT_SIZE_A64 = 16`. Recorded on the roadmap as hygiene.
+
+### ⚠ BU (no AGNOS login) has not been re-measured at this pin
+
+1.7.22 could say BU "did not move" because `lib/thread_local.cyr`, where the real-kernel page
+fault lands, was byte-identical across that bump. **That is no longer true.** Between 6.7.9
+and 6.7.18 it changed by 245 lines, `lib/syscalls_x86_64_agnos.cyr` by 213, and sigil 3.13.15
+restructured `cbank()`. The first-use TLS self-install that BU dies in is still there
+(`_crypto_slot_get` → `crypto_tls_main_init` / `thread_local_get`). The `--agnos` target builds
+and **has not been run on a real kernel at this tag.** Re-running `scripts/agnos-qemu-smoke.sh`
+is the roadmap's first item.
+
+### Docs — the roadmap is future-facing
+
+`docs/development/roadmap.md` went from 2,552 lines to 482. It now holds only open work:
+- the AGNOS `lib/` conversation (BU, BJ, AA), with BU's re-measure first;
+- the 1.8.x in-repo work: the instruments gate re-run #6 needs (conservation invariant, CYML
+  loader fuzz, the forged-signature harness, self-hash verification), plus AB, H, CI
+  `--locked`, binary size and the `EPOLL_EVENT_SIZE` shadow;
+- gate re-run #6, with the settled negatives it should not re-derive;
+- the 2.0.0 milestones: M14, M15 with BT, M16, K and Q, and the v2.0 criteria;
+- a post-2.0 backlog (M17–M23, Joshua, deferred, unclaimed, out of scope), to be reorganised
+  when 2.0.0 ships.
+
+The sweep write-ups and per-release detail are in this file and in git
+(`git show a9e7dc1:docs/development/roadmap.md`). Every anchor linked from README, `state.md`
+and `src/` still resolves. M15-A's "255, not 256" rationale is marked stale: bayan 1.5.1
+removed the 256-entry CYML scan limit it rested on.
+
+### Verification
+
+- `cyrius audit` exits 0: fmt, lint and docs are clean, tests are **1502 passed / 0 failed**, and
+  benches are **6 / 6**. Fuzz is 3 / 3, and both targets build with **no warnings**.
+- **CI parity:** `cyrius deps --locked` reports "lib/ and cyrius.lock are exactly what the tags
+  resolve". A full sibling-free re-sync reproduces `lib/` byte-for-byte, and a CI-style
+  `cyrius deps` over the committed tree changes nothing.
+- A live boot creates a character over TCP and reloads its signed record on reconnect.
+
 ## [1.8.0] — 2026-11-02
 
 **Moved onto the cyrius 6.7 language minor.** The bump needed no source change: the edits are
