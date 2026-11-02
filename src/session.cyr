@@ -1906,6 +1906,11 @@ fn session_append_bounded(s, buf, len): i64 {
     return take;
 }
 
+# Feed buffered RX bytes through the telnet machine, dispatching at most
+# `maxlines` complete lines and stopping early once the tick's crypto charge
+# window is spent. Stores the number of lines dispatched through `out_fired`.
+# Returns 1 when bytes were left unread (kept at the front of the buffer for
+# drain_pending_rx's next pass), 0 when the buffer drained.
 fn session_consume_rx_max(s, maxlines, out_fired): i64 {
     var rx = load64(s + SS_RX_BUF);
     var len = load64(s + SS_RX_LEN);

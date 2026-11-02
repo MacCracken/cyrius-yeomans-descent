@@ -6130,6 +6130,9 @@ fn test_hygiene_tail(): i64 {
     return 0;
 }
 
+# Save-format freeze: the schema stamp, the too-new-record refusal and its
+# ceiling, how a missing or malformed schema key reads, and the control-byte
+# guard on values written into a record.
 fn test_freeze(): i64 {
     test_group("freeze");
     persist_init();
@@ -6310,6 +6313,7 @@ fn test_migration(): i64 {
     return 0;
 }
 
+# Test entry point: redirects the audit log to a fixture, then runs every group.
 fn main() {
     alloc_init();
 

@@ -4,6 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.24] — 2026-11-02
+
+**Toolchain and dependency bump**, plus the four fixes it forced. No behavioural source change:
+the edits under `src/` are two doc comments and the `VERSION_STRING` literal.
+
+### Changed — cyrius pin 6.6.2 → **6.6.20**, libro 2.10.0 → **2.10.8**
+
+libro 2.10.8 is the libro release built for 6.6.20: its `[deps.patra]` (1.15.2) and
+`[deps.sigil]` (3.13.10) equal what 6.6.20 folds, so neither can downgrade `lib/` under a
+consumer. Resolved stack: libro 2.10.8, sigil 3.13.10 (was 3.12.16), patra 1.15.2 (was
+1.14.1 here, 1.13.10 in CI, see below), sakshi 2.5.7 (was 2.5.1), bayan 1.5.12 (was 1.5.5).
+
+- `lib/` re-synced from a **sibling-free** resolve. All 113 vendored stdlib files are
+  byte-identical to `~/.cyrius/versions/6.6.20/lib`. The only other files are libro's bundle
+  and the four sigil sub-bundles. Three files are new: `alloc_cx` and `poison` (pulled in by
+  6.6.18's `alloc` / `freelist`) and `tls_hostid` (from `tls`, which nothing here calls).
+- `cyrius.lock` now records commit pins for libro, patra and sigil (6.6.20 behaviour).
+- **Binary:** x86_64 1,224,632 → **1,301,480** bytes (+6.3%), `--agnos` 1,208,928 →
+  **1,302,680** (+7.8%). Both baselines are 1.7.23's tree built the way CI builds it.
+
+### Fixed — CI and this machine were building different servers again (since 1.7.23)
+
+1.7.22 closed this and 1.7.23 reopened it. libro 2.10.0 pinned patra **1.13.10**, while
+cyrius 6.6.2 folds **1.14.1**. The repo carried 1.14.1 because this machine resolved from
+the `../libro` sibling. CI has no sibling, resolved the tag, and wrote 1.13.10 over it, which
+is what the "./lib/ shadows version-pinned … patra 1.13.10 (pinned: 1.14.1)" warning in a
+sibling-free 1.7.23 build means. At 1.7.24, a full sibling-free re-sync and CI's own
+`cyrius deps` over the committed tree both reproduce `lib/` and `cyrius.lock` byte-for-byte.
+
+### Fixed — `path = "../libro"` removed from `[deps.libro]`
+
+Below cyrius 6.7.6, `path` beats `tag` on **every `cyrius build`**, not only on `cyrius deps`.
+The sibling had moved to libro 2.11.3, which targets 6.7.18, so the first local build at this
+pin swapped in libro 2.11.3 and patra 1.16.6 and failed on 6.7-only syntax
+(`lib/patra.cyr:3765: expected identifier, got '-'`). CI would have stayed green the whole time
+on the tag. With no `path`, local builds and CI resolve the same bytes. libro's own manifest
+already ships without one. From 6.7.6 a `path` becomes a `CYRIUS_LOCAL`-only override, so it
+can come back with that pin bump (see the roadmap's "Recorded by cyrius 6.7.6" note).
+
+### Fixed — `fs` is now a first-party stdlib entry
+
+From cyrius 6.6.18, `distlib` writes a bundle's sidecar as **only the leaves the bundle
+itself needs**, so libro 2.10.8's `dist/libro.deps` shrank from 27 leaves to 1 (`hashmap`).
+descent had been getting `fs` only through that sidecar, but `persist.cyr`'s boot census
+calls `dir_list` directly. 6.6.20 refuses to emit a binary with a reachable undefined function
+(older toolchains compiled it to a `ud2` trap), so the build stopped with a hint naming `fs`.
+`fs` is now listed in `[deps].stdlib`. It was the only missing leaf: the compile reports no
+other undefined function.
+
+### Fixed — `VERSION_STRING` had drifted to 1.7.22
+
+The `version` verb reported 1.7.22 throughout 1.7.23. It now matches `VERSION`.
+
+### Housekeeping
+
+- **4 undocumented public fns** documented: `chpass_on_new`, `session_consume_rx_max`, and
+  `test_freeze` and `main` in the test corpus. They were always undocumented; 6.6.2's doc
+  checker simply did not see them. It counted 38 fns in `persist.cyr`, and 6.6.20's counts 95.
+- **Gates:** `cyrius audit` exits 0. fmt, lint and docs are clean, tests are 1502 passed /
+  0 failed, and both targets build. ⚠ **Two timing benches printed FAIL** on a
+  host saturated by an unrelated job (load average ~20 on 16 cores): `bench_combat`'s
+  256-player broadcast case and `bench_tick_budget`'s `ident_derive` calibration. The broadcast
+  case fails the same way on 1.7.23's tree under the same load (p99 105–128 ms for both). The
+  calibration passed at 114% on the first audit run and failed at 214% on the second.
+  **Re-run the benches on an idle host before tagging.**
+
 ## [1.7.23] — 2026-09-11
 
 **Migrated to the cyrius 6.6.x value form**, and fixed two pre-existing defects the pin bump

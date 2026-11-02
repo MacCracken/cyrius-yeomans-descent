@@ -3,19 +3,49 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 >
-> **Last refresh**: 2026-08-22 (v1.7.22 — **toolchain + dependency bump**,
-> `6.5.4 → 6.5.33` and libro `2.8.4 → 2.8.10`. No behavioural source change. The
-> release found that **CI and this machine had been building different servers**
-> since 1.2.0 and closed it; the shadow warning carried since 6.4.83 is gone.
+> **Last refresh**: 2026-11-02 (v1.7.24 — **toolchain + dependency bump**,
+> `6.6.2 → 6.6.20` and libro `2.10.0 → 2.10.8`. No behavioural source change.
+> **CI and this machine had diverged again** (since 1.7.23, over patra) and that
+> is closed; `path = "../libro"` is gone; `fs` is a first-party stdlib entry.
 > Gate state is UNCHANGED: re-run #5's ruling stands (0/3/5/4, items BI-BT), ten
 > of twelve closed, **BJ** and **BT** open, and the 1.x gate still blocked by
-> **BU** on one target)
+> **BU** on one target. This file was not refreshed at 1.7.23; see the CHANGELOG
+> for that release)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
 > [`roadmap.md`](roadmap.md).
 
 ## Version
+
+**1.7.24** — 2026-11-02. **1502 assertions**; `cyrius audit` exits 0 (fmt, lint,
+docs, tests); both targets build. ⚠ **Two timing benches printed FAIL** on a host
+saturated by an unrelated job: `bench_combat`'s 256-player broadcast case and
+`bench_tick_budget`'s `ident_derive` calibration. Both are load artefacts: the
+broadcast case fails identically on 1.7.23's tree under the same load, and the
+calibration passed (114%) on the first audit run. **Re-run them on an idle host.**
+Toolchain and dependency bump only: the `src/` edits are two doc comments and
+`VERSION_STRING`, which had drifted to 1.7.22 through all of 1.7.23.
+
+**CI and this machine diverged again at 1.7.23, and this closes it.** libro 2.10.0
+pinned patra 1.13.10 against 6.6.2's 1.14.1 fold. The repo carried 1.14.1 (resolved
+through the `../libro` sibling) while CI, resolving the tag, built against 1.13.10.
+libro 2.10.8's patra (1.15.2) and sigil (3.13.10) pins equal the 6.6.20 folds, and a
+sibling-free re-sync plus CI's own `cyrius deps` over the committed tree both
+reproduce `lib/` and `cyrius.lock` byte-for-byte.
+
+**`path = "../libro"` is removed.** Below 6.7.6, `path` beats `tag` on every
+`cyrius build`, and the sibling is now libro 2.11.3 (built for 6.7.18), so a local
+build silently swapped in patra 1.16.6 and failed on 6.7-only syntax. Without
+`path`, local and CI resolve the same bytes. It can come back as a `CYRIUS_LOCAL`
+override with the 6.7.6+ pin (see the roadmap note).
+
+**`fs` is now declared directly.** From 6.6.18, libro's `dist/libro.deps` sidecar
+lists only what the bundle needs (27 leaves → `hashmap`). `persist.cyr` calls
+`dir_list`, and 6.6.20 refuses to emit a binary with a reachable undefined function.
+
+**Cost: x86_64 1,224,632 → 1,301,480 bytes (+6.3%)**, `--agnos` 1,208,928 →
+1,302,680 (+7.8%), both against 1.7.23 built as CI builds it.
 
 **1.7.22** — 2026-08-22. **1502 assertions**; `cyrius audit` exits 0; 6/6 benches;
 **2/2 fuzz targets**; both targets build. Toolchain and dependency bump only —
@@ -1090,8 +1120,11 @@ written myself two releases earlier.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.33` (`cyrius.cyml [package].cyrius`) — bumped in 1.7.22
-  (was `6.5.4`, set in 1.7.10 and 29 releases behind by then)
+- **Cyrius pin**: `6.6.20` (`cyrius.cyml [package].cyrius`) — bumped in 1.7.24
+  (was `6.6.2`, set in 1.7.23; `6.5.33` before that, set in 1.7.22)
+- **6.6.20 refuses to emit a binary with a reachable undefined function** and
+  names the stdlib leaf that defines it. Older toolchains compiled the call to a
+  `ud2` trap that SIGILLed at runtime, so a missing opt-in is now a build error.
 
 Toolchain quirks, worked around rather than fixed here:
 
@@ -1363,15 +1396,16 @@ Direct (declared in `cyrius.cyml`):
 
 - **stdlib** — `std` (the built-in default group: string, fmt, alloc, io, vec, str,
   syscalls) + assert, bench, args, net, chrono, result, tagged, fnptr, freelist,
-  **bayan**. The M6 crypto/store leaves (fs, process, hashmap, slice, ct, keccak,
-  thread, thread_local, random, sakshi, chrono, tagged) are **not** hand-listed —
-  libro's `dist/libro.deps` sidecar declares them and `cyrius deps` auto-resolves
-  them in topological order, fail-loud on a missing one.
-- **libro** `2.8.10` (git, `path = "../libro"`) — append-only SHA-256 hash-chain
-  store (the crash-safe primitive behind "T.Ron" persistence). Pulls **sigil
-  3.12.9** (Ed25519, ADR 0004 identity) + **patra 1.13.10** + **sakshi 2.4.11** +
-  **bayan 1.5.2** transitively. Resolved by `cyrius deps` into `lib/`
-  (+ `cyrius.lock`: 113 entries, 3 commit-pinned).
+  **fs**, **bayan**. The M6 crypto/store leaves are **not** hand-listed: libro's
+  `dist/libro.deps` sidecar (`hashmap` only, from 6.6.18) and the `# Requires`
+  blocks in sigil-mldsa and patra bring them in. **A leaf descent calls from its
+  own code must be listed here**, which is why `fs` (`dir_list` in `persist.cyr`)
+  was added at 1.7.24 when the sidecar stopped carrying it.
+- **libro** `2.10.8` (git, tag only, no `path` since 1.7.24) — append-only SHA-256
+  hash-chain store (the crash-safe primitive behind "T.Ron" persistence). Pulls
+  **sigil 3.13.10** (Ed25519, ADR 0004 identity) + **patra 1.15.2** transitively;
+  sakshi **2.5.7** and bayan **1.5.12** come from the 6.6.20 fold. Resolved by
+  `cyrius deps` into `lib/` (+ `cyrius.lock`: 118 entries, 3 commit-pinned).
 
 **bayan is a direct dep as of 1.2.0.** 6.4.83 carved `cyml`/`toml` (and earlier
 `json`/`bigint`) out of the stdlib into bayan, and descent's own `world.cyr` /
@@ -1406,8 +1440,12 @@ Any dep whose tag is older than what the pinned toolchain folds therefore
 **downgrades** that file for everything downstream — invisibly where a sibling
 checkout exists, and invisibly to `deps --verify`, which regenerates the lock
 *from* the downgraded file so it agrees with itself. The pairing to keep true is
-`[deps.patra]` in libro == the patra the pinned cyrius folds (both **1.13.10**
-today); libro 2.8.8 and 2.8.10 exist for exactly this. Verify a bump by resolving
+`[deps.patra]` in libro == the patra the pinned cyrius folds (both **1.15.2**
+today, and `[deps.sigil]` == the sigil fold, both **3.13.10**); libro 2.8.8 and
+2.8.10 exist for exactly this. **1.7.23 broke the pairing** (libro 2.10.0 pinned
+patra 1.13.10 against 6.6.2's 1.14.1) and CI built against the older one until
+1.7.24. Read libro's pins at the TAG (`~/.cyrius/deps/libro/<tag>/cyrius.cyml`),
+not from a sibling checkout, which tracks libro's own head. Verify a bump by resolving
 the manifest somewhere `../<sibling>` does not exist and diffing `lib/`:
 
 ```sh

@@ -3283,6 +3283,10 @@ fn _chpass_len_reject(s, msg): i64 {
     return 0;
 }
 
+# First half of the re-key (PHASE_CHPASS_NEW). An out-of-range line costs a
+# counted attempt; an in-range one derives a candidate salt|pk|sk into the
+# per-session candidate block — never over the live ident — and advances to
+# PHASE_CHPASS_CONFIRM. chpass_on_confirm decides whether it is committed.
 fn chpass_on_new(s, buf, len): i64 {
     # === 1.7.19 (BD) — A LENGTH REJECTION COSTS A COUNTED ATTEMPT. ===
     #
