@@ -4,6 +4,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the AGNOS smoke probe reported failures that were not there
+
+On 2026-11-02 `scripts/agnos_probe.py` failed BK (frozen clock) and BJ (stalled loop) against
+agnos 1.57.14, and neither was true. Its `login+world` pass also proved less than it said. All
+three checks now measure the thing they name:
+
+- **BK** fought `drone` in the start room, which holds no mob (mobs wander), and counted a bare
+  newline's reply as tick output, though a bare newline gets no reply even on Linux. It now
+  spends energy with `brace` and polls `examine me`. Only `classes_upkeep`, which only the tick
+  runs, refills energy (`ENERGY_REGEN` = 3 a tick), so any rise proves a tick.
+- **BJ** timed `wr("look", 6.0)`, which always waits out its 6 s read timeout, so its `< 3.0`
+  could never pass. It now times the bystander's **first byte**. The bystander logs in before the
+  stall, and the stalled client shrinks its receive window before `connect()` and queues 2,000
+  `look`s instead of 40. A pass says so in its own text: SLIRP's host-side buffering means it
+  cannot prove the guest's send window filled.
+- **login+world** passed on any reply over 60 bytes, which a passphrase or class prompt also
+  produces. It now requires the room render's `Exits:` line.
+- **persistence** printed "inventory survived logout" on FAIL as well as on PASS. A failure now
+  says the save did not publish and points at roadmap BV.
+
+**Verified both ways.** Against Linux the probe passes 5 / 5. With `YD_TICK_MS=600000` so the
+tick never fires, BK fails ("energy stuck at 15 for 16s — the clock looks frozen"). On agnos
+1.57.14 under QEMU, the stock `agnos-qemu-smoke.sh` now passes 4 / 5, and its one failure is
+the real defect, BV.
+
 ## [1.8.1] — 2026-11-02
 
 **Toolchain and dependency bump to the latest tags.** The only source edit is moving off two
@@ -96,23 +121,43 @@ source.
   same name. Neither target warns. The x86_64 values agree, and on aarch64 descent's epoll
   helper reads its own `EPOLL_EVENT_SIZE_A64 = 16`. Recorded on the roadmap as hygiene.
 
-### ⚠ BU (no AGNOS login) has not been re-measured at this pin
+### Measured on a real AGNOS kernel — BU no longer reproduces, and it was hiding BV
 
-1.7.22 could say BU "did not move" because `lib/thread_local.cyr`, where the real-kernel page
-fault lands, was byte-identical across that bump. **That is no longer true.** Between 6.7.9
-and 6.7.18 it changed by 245 lines, `lib/syscalls_x86_64_agnos.cyr` by 213, and sigil 3.13.15
-restructured `cbank()`. The first-use TLS self-install that BU dies in is still there
-(`_crypto_slot_get` → `crypto_tls_main_init` / `thread_local_get`). The `--agnos` target builds
-and **has not been run on a real kernel at this tag.** Re-running `scripts/agnos-qemu-smoke.sh`
-is the roadmap's first item.
+`lib/thread_local.cyr`, where BU's page fault lands, changed by 245 lines in this bump, so
+1.7.22's "BU did not move" no longer held. The QEMU harness was run against **agnos 1.57.14**
+(HEAD `bdc587d7`, built with `BENCH_CONNECT_SELFTEST=1` at agnos's own 6.6.20 pin, in a scratch
+copy; `../agnos` was not touched). The same scratch probe was then run on **both 1.8.0 and 1.8.1**,
+and on Linux as a control.
+
+| | Linux 1.8.1 | AGNOS 1.8.0 | AGNOS 1.8.1 |
+|---|---|---|---|
+| Create a character, verify it on reconnect (**BU**) | ✓ | ✓ | ✓ |
+| Tick runs: energy 15 → 20 idle after `brace` (**BK**) | ✓ | ✓ | ✓ |
+| Item survives `quit` + reconnect | ✓ | **✗** | **✗** |
+| Bystander behind an unread client, first byte (**BJ**) | 0.000 s | 0.004 s | 0.003 s |
+
+- **BU does not reproduce on agnos 1.57.14, and 1.8.1 is not what fixed it**, since 1.8.0
+  logs in on the same kernel. The fix lies somewhere between July's kernel and libs and today's.
+- **BV — no save after character creation is ever published on AGNOS.** The guest's disk keeps
+  the creation-time `<name>.cyml` with **`<name>.cyml.tmp` stranded beside it**. descent's audit
+  log records `save.fail.disconnect` and `save.fail.sweep`; nothing reaches the console or the
+  player. The cause is the kernel: `ext2_rename` refuses an existing destination
+  (*"rename-replace is a follow-on bite"*), so `player_save`'s `.tmp` → `file_rename` publish
+  (ADR 0006) fails on every rewrite. agnos tracks the gap as a 2026-10-28 issue filed from hapi,
+  which does not list descent as a consumer. Re-run #5's "AGNOS persistence works end to end" ran
+  under a translator that forwards `rename` to Linux. **BV is the roadmap's new first item.**
+- **The stock probe's BK and BJ FAILs were the probe's own errors.** BK fights a mob that is not
+  in the start room and counts a bare newline's reply as tick output. BJ times a call that
+  always waits out a 6 s read timeout. Fixing them is a 1.8.x roadmap item. BJ remains open: SLIRP
+  buffering may keep the guest's send window from filling, so 0.003 s does not clear it.
 
 ### Docs — the roadmap is future-facing
 
 `docs/development/roadmap.md` went from 2,552 lines to 482. It now holds only open work:
-- the AGNOS `lib/` conversation (BU, BJ, AA), with BU's re-measure first;
-- the 1.8.x in-repo work: the instruments gate re-run #6 needs (conservation invariant, CYML
-  loader fuzz, the forged-signature harness, self-hash verification), plus AB, H, CI
-  `--locked`, binary size and the `EPOLL_EVENT_SIZE` shadow;
+- BV first, then the AGNOS `lib/` conversation (BJ, AA);
+- the 1.8.x in-repo work: fixing the smoke probe, the instruments gate re-run #6 needs
+  (conservation invariant, CYML loader fuzz, the forged-signature harness, self-hash
+  verification), plus AB, H, CI `--locked`, binary size and the `EPOLL_EVENT_SIZE` shadow;
 - gate re-run #6, with the settled negatives it should not re-derive;
 - the 2.0.0 milestones: M14, M15 with BT, M16, K and Q, and the v2.0 criteria;
 - a post-2.0 backlog (M17–M23, Joshua, deferred, unclaimed, out of scope), to be reorganised

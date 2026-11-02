@@ -6,10 +6,11 @@
 > **Last refresh**: 2026-11-02 (v1.8.1 — **latest tags**, `6.7.9 → 6.7.18` and
 > libro `2.11.0 → 2.11.3`; bayan jumps `1.5.13 → 1.11.1`. The only source edit
 > moves 27 calls off two deprecated bayan names. All gates green, benches 6/6,
-> zero warnings. **Binary +41.6%** (+57% under DCE). Gate state is UNCHANGED:
-> re-run #5's ruling stands (0/3/5/4, items BI-BT), **BJ** and **BT** open, and
-> the 1.x gate still blocked by **BU** — which this bump may have moved
-> (`lib/thread_local.cyr` changed) and which has **not** been re-run on a kernel)
+> zero warnings. **Binary +41.6%** (+57% under DCE). **On a real AGNOS kernel
+> (agnos 1.57.14, QEMU) BU no longer reproduces**, on 1.8.0 or 1.8.1, and the
+> first real-kernel persistence test found **BV**: no save after character
+> creation is ever published, because agnos's ext2 `rename` cannot replace a
+> file. The 1.x gate is now blocked by **BV**; **BJ** and **BT** stay open)
 >
 > A **snapshot of the current tree**, not a history. Per-release chronology lives
 > in [`CHANGELOG.md`](../../CHANGELOG.md); sequencing and what is planned live in
@@ -42,9 +43,20 @@ reachable code too. bayan's bundle grew by 259 KB of source and now includes
 `math`, `hashseed`, `slice` and `unicode` itself. Its share was not separated
 from the compiler's.
 
-⚠ **BU may have moved and has not been measured.** `lib/thread_local.cyr` (+245
-lines), `lib/syscalls_x86_64_agnos.cyr` (+213) and sigil's `cbank()` all changed.
-The TLS self-install path BU faults in is still present.
+**On a real AGNOS kernel** (agnos 1.57.14 at `bdc587d7`, QEMU, measured on 1.8.0
+and 1.8.1 with Linux as a control):
+- **BU no longer reproduces.** Characters are created and verified on reconnect on
+  both releases, so 1.8.1 is not what fixed it.
+- **The tick runs (BK).**
+- **BV is new and high: no save after creation is ever published.** agnos's ext2
+  `rename` refuses an existing destination, so every `.tmp` rewrite is stranded
+  beside the creation-time record. It is audited as `save.fail.*` and invisible
+  to the player.
+- **BJ was not reproduced** (bystander 0.003 s), which does not clear it, since
+  SLIRP may keep the send window from filling.
+- **`scripts/agnos_probe.py` misreported BK and BJ** as failing at the 1.8.1
+  tag. It is fixed after the tag (CHANGELOG `[Unreleased]`) and verified both
+  ways. On AGNOS the stock smoke now passes 4/5, and its one failure is BV.
 
 **1.8.0** — 2026-11-02. **1502 assertions**; `cyrius audit` exits 0 with every
 stage clean, **benches 6/6**; fuzz 3/3; both targets build. No source change: the

@@ -21,8 +21,8 @@ In the order it should happen.
 
 | # | Next | What | Blocks |
 |---|---|---|---|
-| **1** | [Re-measure BU at 6.7.18](#1-bu--nobody-can-log-in-on-a-real-agnos-kernel) | One QEMU run. The code BU faults in changed in this bump, and nobody has looked since | the 1.x gate |
-| **2** | [BU · BJ · AA](#the-agnos-lib-conversation--bu-bj-aa) | One upstream conversation about what vendored `lib/` owes the AGNOS target. These are decisions, not patches | the 1.x gate |
+| **1** | [**BV** — AGNOS saves never publish](#bv--on-a-real-agnos-kernel-no-save-after-character-creation-is-ever-published) | Every save after character creation fails, so every AGNOS player loses all progress. The kernel's ext2 `rename` cannot replace a file. Needs a decision: wait for agnos, or an AGNOS-only publish path | the 1.x gate |
+| **2** | [BJ · AA](#the-agnos-lib-conversation--bj-aa) | One upstream conversation about what vendored `lib/` owes the AGNOS target. These are decisions, not patches | the 1.x gate |
 | **3** | [1.8.x in-repo work](#18x--in-repo-work) | The instruments gate re-run #6 needs, plus small fixes (AB, H, CI `--locked`, binary size) | re-run #6 |
 | **4** | [Gate re-run #6](#gate-re-run-6) | After 1–3. Must come back with no critical or high finding | the 1.x gate |
 | **5** | [2.0.0](#milestones--the-20-line) | M14 contract + schema v2 · M15 zone registry · M16 progression · broadcast fan-out (K) · donation bin (Q) · loot ceiling (BT) | — |
@@ -43,9 +43,16 @@ finding.** Gate re-run #5 (2026-07-31, against v1.7.20) returned **0 critical /
 3 high / 5 medium / 4 low**. All three highs were on the AGNOS build. On x86_64
 it came back with **zero highs**, the first time in seven sweeps. 1.7.21 closed
 ten of #5's twelve findings. The QEMU harness built in that same release then
-found **BU**, which is worse than any of them.
+found **BU**: nobody could log in on a real AGNOS kernel.
 
-**So the gate is blocked by one target, through code this repo does not own.**
+**BU no longer reproduces (measured 2026-11-02).** On agnos 1.57.14 under QEMU,
+both 1.8.0 and 1.8.1 create a character, verify it on reconnect, and run the
+tick. The cause of the fix is not attributed: it lies somewhere between the
+July kernel and libs and today's, and 1.8.1's bump is not it. With login
+working, the first real-kernel persistence test immediately found **BV**.
+
+**So the gate is still blocked by one target, through code this repo does not
+own.**
 
 **There is a policy option, and it should be taken deliberately or not at all:**
 scope AGNOS out of the 1.x gate. The case against it: item T (1.7.8) was an
@@ -54,37 +61,45 @@ AGNOS-only defect rated high and closed as high, and
 deployment since 1.1.0. If the call is made, it belongs in ADR 0007 as a contract
 change, not in a sweep verdict.
 
-### The AGNOS lib/ conversation — BU, BJ, AA
+### BV — on a real AGNOS kernel, no save after character creation is ever published
 
-All three land in vendored `lib/` (off-limits here) plus the agnos kernel. Take
-them upstream together.
+*(high — found 2026-11-02 by the first real-kernel persistence test)*
 
-#### 1. BU — nobody can log in on a real AGNOS kernel
+- **What breaks.** A player creates a character, picks up an item and quits. On
+  reconnect the passphrase verifies and they get "Last seen moments ago", but the
+  inventory is empty. **Every save after the first fails**: quit, the autosave
+  sweep, the login stamp. So every AGNOS player keeps only their creation-time
+  record and loses all progress.
+- **Measured** on agnos 1.57.14 under QEMU, with both 1.8.0 and 1.8.1. The guest's
+  disk afterwards holds `agnosone.cyml` from creation, with **`agnosone.cyml.tmp`
+  stranded beside it**. The audit log records `save.fail.disconnect` and
+  `save.fail.sweep`; the serial console says nothing, and the player is told
+  nothing. The same probe on Linux keeps the item.
+- **Where.** `player_save` writes `<name>.cyml.tmp` and then calls `file_rename`
+  over the existing record (ADR 0006's crash-safe publish). On AGNOS that is
+  `rename#31`, and the kernel's `ext2_rename` **refuses an existing
+  destination**: *"rename-replace is a follow-on bite"*
+  (`../agnos/kernel/core/ext2.cyr`, since 2026-05-26). A brand-new record
+  publishes, because its target does not exist yet; no rewrite ever does.
+- **Whose code.** The kernel's. agnos already tracks it as
+  `docs/development/issues/2026-10-28-ext2-rename-cannot-replace-an-existing-file.md`,
+  filed from hapi, which **does not list descent as a consumer**. Add descent
+  there.
+- **Why no earlier pass saw it.** Re-run #5 reported "AGNOS persistence works end
+  to end" under the mirshi translator, which forwards `rename` to Linux. BU then
+  blocked every real-kernel login until now.
+- **The decision.** Either wait for agnos rename-replace, or give AGNOS its own
+  publish path: unlink, then rename, with the loader falling back to
+  `<name>.cyml.tmp` when the record is missing. That gives up ADR 0006's atomicity
+  for a crash window that the fallback covers, and it is an ADR 0006 amendment,
+  not a patch. Separately, decide whether a failed save should tell the player.
 
-*(high — found by the 1.7.21 QEMU harness)*
+### The AGNOS lib/ conversation — BJ, AA
 
-- **What breaks.** A player connects, is greeted, gives a name and is prompted
-  for a passphrase. The server **dies the moment the passphrase is submitted**:
-  `run: exit 142`, the kernel's ring-3 page-fault kill. Character creation and
-  login have never worked on that target since `--agnos` shipped in 1.1.0.
-  Everything before that point works: zone load, `sock_listen`, `sock_accept`,
-  the MOTD, the Telnet salvo and name entry.
-- **Where.** Bisected to `ident_derive`. The fault is in sigil's per-thread
-  crypto scratch: the first call self-installs a TLS block
-  (`crypto_tls_main_init` → `thread_local_get`). That is vendored `lib/` plus the
-  kernel's TLS support. `src/main.cyr` already includes `lib/thread.cyr` and
-  `lib/thread_local.cyr` explicitly, so the gap is deeper than an include.
-- ⚠ **Do first: re-measure at 6.7.18.** 1.7.22 could say BU "did not move" because
-  `lib/thread_local.cyr` was byte-identical across that bump. It is not
-  identical across 1.8.1's: `lib/thread_local.cyr` changed by 245 lines and
-  `lib/syscalls_x86_64_agnos.cyr` by 213, and sigil 3.13.15 restructured
-  `cbank()`. The TLS self-install is still on the path (`cbank` →
-  `_crypto_slot_get` → `crypto_tls_main_init`). Run `scripts/agnos-qemu-smoke.sh`
-  (see [`running.md`](../guides/running.md); it needs `../agnos/build/agnos` built
-  with `BENCH_CONNECT_SELFTEST=1`). If BU is gone, the gate's picture changes. If
-  it stands, take the fresh trace upstream.
+Both land in vendored `lib/` (off-limits here) plus the agnos kernel. Take them
+upstream together, alongside BV's issue.
 
-#### 2. BJ — one stalled client freezes the whole AGNOS server
+#### BJ — one stalled client freezes the whole AGNOS server
 
 *(high — a decision, not a patch)*
 
@@ -95,10 +110,17 @@ them upstream together.
 - The read half already has its AGNOS branch (`session_on_readable_max`); the
   write half never got one.
 - **Why it waits.** agnos exposes **no non-blocking send primitive**. Any fix here
-  would be written against an API nobody has agreed to. It also only matters once
-  BU is fixed, since until then nobody can log in to stall.
+  would be written against an API nobody has agreed to.
+- **Not reproduced on a real kernel yet.** On 2026-11-02 a bystander behind an
+  unread client answered in 0.003 s with 400 queued `look`s, on both 1.8.0 and
+  1.8.1. With 2,000 (over 1 MB of output) and the stalled client's receive
+  window shrunk to 4 KB, the first byte came at 0.000 s. That does not clear BJ:
+  SLIRP buffers on the host side, so the guest's send window may never have
+  filled. The code path is unchanged. Re-run #6 needs a probe that provably fills
+  the window, for example by counting the bytes the guest accepted before the
+  stall, or a transport without SLIRP between the client and the guest.
 
-#### 3. AA — every accepted connection costs 16 bytes, forever
+#### AA — every accepted connection costs 16 bytes, forever
 
 *(medium — a decision, not a patch)*
 
@@ -161,7 +183,11 @@ protocol as #4 and #5: finders in isolated worktrees, required to build and run,
 each attacked by an independent skeptic told to default to REFUTED. Aim it at
 what #5 could not reach:
 
-- **A real AGNOS kernel**, using the harness that has existed since 1.7.21. Cover
+- **A real AGNOS kernel**, using the harness that has existed since 1.7.21 (the
+  kernel needs `BENCH_CONNECT_SELFTEST=1`; agnos's `scripts/build.sh` can run
+  from a `git archive` copy with `KASHI_DIR` / `REKHA_DIR` pointed at the
+  siblings and a `CYRIUS_HOME` on agnos's own pin, leaving `../agnos`
+  untouched). Cover
   every `YD_*` knob, zone reset, `save_sweep`, audit rotation, `passwd`, and the
   40-cell phase × tick matrix. On `--agnos` that matrix runs on the **second
   driver**, its own poll-loop `advance_tick`.

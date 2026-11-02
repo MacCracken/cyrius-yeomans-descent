@@ -20,6 +20,7 @@ QEMU, and answers the two questions gate re-run #5 could not:
 Exit 0 if every selected scenario passes.
 """
 import os
+import re
 import socket
 import sys
 import time
@@ -40,8 +41,16 @@ def log(msg):
 class S:
     """One player connection."""
 
-    def __init__(self, timeout=10):
-        self.s = socket.create_connection((HOST, PORT), timeout=timeout)
+    def __init__(self, timeout=10, rcvbuf=None):
+        if rcvbuf is None:
+            self.s = socket.create_connection((HOST, PORT), timeout=timeout)
+        else:
+            # SO_RCVBUF only shrinks the advertised window if it is set BEFORE
+            # connect(), so this path cannot use create_connection.
+            self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+            self.s.settimeout(timeout)
+            self.s.connect((HOST, PORT))
         self.buf = ""
         self.rd(2.0)
 
@@ -145,41 +154,54 @@ try:
     record("banner", banner_ok, f"{len(a.buf)} bytes of MOTD")
     a.login("agnosone")
     looked = a.wr("look", 1.5)
-    in_world = "gate" in looked.lower() or "arcology" in looked.lower() or len(looked) > 60
-    record("login+world", in_world, "character created and placed in a room")
+    # Every room render carries an "Exits:" line (session_show_room). The old
+    # check also passed on ANY reply over 60 bytes, which a passphrase or class
+    # prompt satisfies just as well as a room.
+    in_world = "exits:" in looked.lower()
+    record("login+world", in_world,
+           "character created and placed in a room" if in_world
+           else f"no room render after login: {looked.strip()[:80]!r}")
 except Exception as e:
     record("banner", False, f"exception: {e}")
     record("login+world", False, "could not reach the world")
     a = None
 
 # --- Scenario BK: does the clock advance? ----------------------------------
-# The tick is the observable. Two independent readings:
-#   1. `@stats`-free: energy/HP regen is driven by classes_upkeep, which only
-#      runs from the tick. Take damage, then watch it come back.
-#   2. A mob swing: mob_tick_all only swings on a tick.
-# If the clock is frozen NEITHER ever happens, and the session still answers
-# commands — which is exactly the signature BK predicts.
+# The observable is energy regeneration. classes_upkeep is the only thing that
+# refills energy, and only the tick runs it (ENERGY_REGEN a tick). So: spend
+# some with `brace` (Pikeman, 5 energy), then poll `examine me` with no other
+# command in between. Any rise proves a tick ran. If the clock is frozen it never
+# rises while the session still answers commands, which is exactly the
+# signature BK predicts.
+#
+# Do not go back to a mob fight or to "any unsolicited output". The start room
+# holds no mob (mobs wander), and a bare newline gets no reply even on Linux, so
+# that version reported a frozen clock on a healthy server (2026-11-02).
+def energy_of(txt):
+    m = re.search(r"Energy\s+(\d+)/\d+", txt)
+    return int(m.group(1)) if m else None
+
+
 if SCENARIO in ("all", "tick") and a is not None:
     try:
-        before = a.wr("examine me", 2.0)
-        # Engage something so the tick has visible work, then sit still.
-        a.wr("kill drone", 1.5)
+        a.wr("brace", 1.2)
+        spent = energy_of(a.wr("examine me", 1.2))
         t0 = time.time()
-        saw_tick = False
-        for _ in range(12):
+        now = spent
+        while spent is not None and time.time() - t0 < 15.0:
             time.sleep(2.5)
-            out = a.wr("", 0.8)  # bare newline; collect anything the tick pushed
-            if out.strip():
-                saw_tick = True
+            now = energy_of(a.wr("examine me", 1.2))
+            if now is not None and now > spent:
                 break
         elapsed = time.time() - t0
-        record(
-            "BK tick advances",
-            saw_tick,
-            f"tick-driven output within {elapsed:.0f}s"
-            if saw_tick
-            else f"NO tick output in {elapsed:.0f}s — the clock looks frozen",
-        )
+        ticked = spent is not None and now is not None and now > spent
+        if spent is None:
+            detail = "could not read Energy from 'examine me'"
+        elif ticked:
+            detail = f"energy {spent} -> {now} within {elapsed:.1f}s"
+        else:
+            detail = f"energy stuck at {spent} for {elapsed:.0f}s — the clock looks frozen"
+        record("BK tick advances", ticked, detail)
     except Exception as e:
         record("BK tick advances", False, f"exception: {e}")
 
@@ -187,25 +209,45 @@ if SCENARIO in ("all", "tick") and a is not None:
 # Open a client, get the server queueing prose at it, then STOP READING while a
 # second player asks for something. On Linux the drain would hit EAGAIN and move
 # on. On AGNOS sock_send #48 blocks, so the whole loop should stall.
+#
+# The latency is TIME TO FIRST BYTE. The old version timed `wr("look", 6.0)`,
+# which always waits out its 6 s read timeout, so its `< 3.0` could never pass.
+#
+# ⚠ A pass is weaker than a fail. QEMU's SLIRP buffers on the host side, so
+# the guest's send window only fills once SLIRP's buffer is full too. The
+# stalled client shrinks its receive window and asks for ~2,000 room renders
+# (over 1 MB) to push past that, but nothing here can prove the guest's window
+# actually filled.
+STALL_LOOKS = 2000
+
 if SCENARIO in ("all", "stall"):
     try:
-        stalled = S()
-        stalled.login("agnosstall")
-        # Ask for a lot of output and then stop reading it.
-        stalled.s.sendall(b"look\n" * 40)
-        time.sleep(1.0)
-
         bystander = S()
         bystander.login("agnoswatch")
+        bystander.rd(1.0)
+
+        stalled = S(rcvbuf=4096)
+        stalled.login("agnosstall")
+        # Ask for a lot of output and then stop reading it.
+        stalled.s.sendall(b"look\n" * STALL_LOOKS)
+        time.sleep(3.0)
+
+        bystander.s.settimeout(30.0)
         t0 = time.time()
-        out = bystander.wr("look", 6.0)
+        bystander.s.sendall(b"look\n")
+        try:
+            first = bystander.s.recv(65536)
+        except socket.timeout:
+            first = b""
         latency = time.time() - t0
-        ok = latency < 3.0 and len(out) > 0
+        ok = latency < 3.0 and len(first) > 0
         record(
             "BJ bystander unaffected",
             ok,
-            f"bystander 'look' answered in {latency:.2f}s"
-            + ("" if ok else " — the loop stalled behind the unread client"),
+            (f"bystander's first byte after {latency:.3f}s"
+             + (" (SLIRP buffering: a pass does not prove the window filled)" if ok
+                else " — the loop stalled behind the unread client"))
+            if first else "bystander got NOTHING in 30s — the loop is stalled",
         )
         stalled.close()
         bystander.close()
@@ -224,7 +266,11 @@ if SCENARIO in ("all", "persist") and a is not None:
         greet = b.login("agnosone")
         inv = b.wr("i", 1.5)
         kept = "notice" in inv.lower()
-        record("persistence round-trip", kept, "inventory survived logout on a real kernel")
+        # On FAIL, look in the guest's /data/players for a stranded <name>.cyml.tmp:
+        # agnos's ext2 rename cannot replace an existing file (roadmap item BV).
+        record("persistence round-trip", kept,
+               "inventory survived logout on a real kernel" if kept
+               else "inventory LOST across logout — the save did not publish (see roadmap BV)")
         b.close()
     except Exception as e:
         record("persistence round-trip", False, f"exception: {e}")
